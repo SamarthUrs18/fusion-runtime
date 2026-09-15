@@ -11,7 +11,7 @@ import json
 import uuid
 
 from fusion_runtime.config import PipelineConfig, DEVELOPMENT_CONFIG, PRODUCTION_CONFIG
-from fusion_runtime.orchestrator import BargeInState, PipelineOrchestrator, PipelineMetrics
+from fusion_runtime.engine import BargeInState, PipelineOrchestrator, PipelineMetrics
 
 
 app = FastAPI(title="fusion-runtime", version="0.1.0")
@@ -100,7 +100,7 @@ async def voice_chat(request: VoiceChatRequest):
             raise HTTPException(400, "Cloud provider override requires allow_cloud_fallback=true")
     
     # Run pipeline
-    from fusion_runtime.orchestrator import run_single_turn
+    from fusion_runtime.engine import run_single_turn
     output_audio = await run_single_turn(
         orchestrator,
         audio,

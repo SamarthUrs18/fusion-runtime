@@ -23,7 +23,7 @@ from typing import Optional
 
 import numpy as np
 
-from fusion_runtime.echo_canceller import EchoCanceller, EchoStats, StreamingResampler
+from fusion_runtime.audio.echo_canceller import EchoCanceller, EchoStats, StreamingResampler
 
 # After the last audible sample leaves the speaker, the room and the input
 # buffers can still hold some of it for a moment.

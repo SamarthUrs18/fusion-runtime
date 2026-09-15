@@ -23,6 +23,7 @@ COPY scripts/ ./scripts/
 
 # Create model cache directory
 RUN mkdir -p /models
+ENV FUSION_MODEL_DIR=/models
 
 # Expose port
 EXPOSE 8000

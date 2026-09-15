@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 from scipy.signal import lfilter
 
-from fusion_runtime.duplex_audio import DuplexAudio
-from fusion_runtime.echo_canceller import EchoCanceller, StreamingResampler
+from fusion_runtime.audio.duplex_audio import DuplexAudio
+from fusion_runtime.audio.echo_canceller import EchoCanceller, StreamingResampler
 from test_echo_canceller import db_ratio, speech
 
 DEVICE_RATE = 24000

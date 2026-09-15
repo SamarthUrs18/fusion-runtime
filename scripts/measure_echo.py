@@ -26,8 +26,8 @@ import soundfile as sf
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, ROOT)
 
-from fusion_runtime.duplex_audio import DuplexAudio  # noqa: E402
-from fusion_runtime.echo_canceller import StreamingResampler  # noqa: E402
+from fusion_runtime.audio.duplex_audio import DuplexAudio  # noqa: E402
+from fusion_runtime.audio.echo_canceller import StreamingResampler  # noqa: E402
 
 RATE = 16000  # DuplexAudio's output rate
 SPEECH_RATE = 24000

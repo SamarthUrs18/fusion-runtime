@@ -79,6 +79,3 @@ download-llm:
 
 download-kokoro:
 	python scripts/download_models.py --kokoro
-
-download-firered:
-	python scripts/download_models.py --firered-asr --firered-tts --firered-eot

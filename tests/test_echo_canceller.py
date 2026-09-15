@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from fusion_runtime.echo_canceller import DelayEstimator, EchoCanceller, StreamingResampler
+from fusion_runtime.audio.echo_canceller import DelayEstimator, EchoCanceller, StreamingResampler
 
 FS = 16000
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "hello.wav")

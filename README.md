@@ -84,27 +84,22 @@ PipelineConfig(
 )
 ```
 
-### Swappable Providers
+### Swappable LLM
 ```python
-# Use any combination
-STTConfig(provider="deepgram", api_key="...")      # Cloud STT
-LLMConfig(provider="llama_cpp", model="...")       # Local LLM
-TTSConfig(provider="elevenlabs", api_key="...")    # Cloud TTS
+LLMConfig(provider="llama_cpp", model="llm/your-model.gguf")                 # Local GGUF
+LLMConfig(provider="openai", model="...", api_base="http://localhost:8080/v1")  # Any OpenAI-compatible server
 ```
-
-**All providers implement the same interface — swap in 1 line.**
 
 ## 📦 Model Support
 
-| Component | Default (Self-Hosted) | Cloud Options |
-|-----------|----------------------|---------------|
-| **STT** | faster-whisper tiny.en | Deepgram, Gladia, OpenAI, FireRedASR |
-| **LLM** | llama.cpp Qwen2.5-7B | vLLM, Ollama, OpenAI, Anthropic |
-| **TTS** | Kokoro ONNX | ElevenLabs, XTTS, Piper, FireRedTTS*, OpenAI |
-| **VAD** | Silero | pVAD, WebRTC VAD |
-| **Turn Detection** | Punctuation + silence | FireRedChat EoT (EN/ZH) |
+| Component | Engine | Format |
+|-----------|--------|--------|
+| **STT** | faster-whisper (tiny.en default) | CTranslate2 |
+| **LLM** | llama.cpp (Qwen2.5 default), or any OpenAI-compatible endpoint | GGUF |
+| **TTS** | Kokoro | ONNX |
+| **VAD** | Silero | — |
+| **Turn Detection** | Punctuation + silence | — |
 
-*FireRedTTS: Non-commercial license only
 
 ## 📊 Performance Targets
 
@@ -137,13 +132,14 @@ mypy fusion_runtime/
 ```
 fusion-runtime/
 ├── fusion_runtime/
-│   ├── config/          # Pydantic configs (all providers)
-│   ├── stt/             # STT implementations + factory
-│   ├── llm/             # LLM implementations + factory
-│   ├── tts/             # TTS implementations + factory
-│   ├── vad/             # VAD + Turn detection
-│   ├── orchestrator/    # Pipeline coordination, batching, budgets
-│   └── server.py        # FastAPI + WebSocket server
+│   ├── config.py        # Settings, profiles, model directory
+│   ├── server.py        # FastAPI + WebSocket server
+│   ├── stt/             # base.py + one file per engine (whisper.py)
+│   ├── llm/             # base.py, llama_cpp.py, openai_compat.py
+│   ├── tts/             # base.py, kokoro.py
+│   ├── vad/             # base.py, silero.py, turn.py (turn detection)
+│   ├── engine/          # orchestrator.py (conversation loop), barge_in.py, metrics.py
+│   └── audio/           # echo_canceller.py, duplex_audio.py
 ├── docker/
 │   ├── Dockerfile       # CUDA production image
 │   ├── Dockerfile.cpu   # CPU-only dev image

@@ -13,7 +13,7 @@ Echo
 ----
 On laptop speakers the bot's own voice reaches the microphone about as loud
 as you do. This client plays and records through
-fusion_runtime.duplex_audio.DuplexAudio, which removes the bot's voice from
+fusion_runtime.audio.duplex_audio.DuplexAudio, which removes the bot's voice from
 the microphone on this device — using the exact audio it just played — before
 anything is sent. For the first moment of the first reply, while the
 canceller is still learning the room, microphone audio that could contain
@@ -41,10 +41,10 @@ import numpy as np
 import websockets
 
 try:
-    from fusion_runtime.duplex_audio import DuplexAudio, MicChunk
+    from fusion_runtime.audio.duplex_audio import DuplexAudio, MicChunk
 except ImportError:  # running from a source checkout that isn't installed
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-    from fusion_runtime.duplex_audio import DuplexAudio, MicChunk
+    from fusion_runtime.audio.duplex_audio import DuplexAudio, MicChunk
 
 TTS_SAMPLE_RATE = 24000
 AEC_ENABLED = os.environ.get("FUSION_AEC", "1") not in ("0", "false", "False")

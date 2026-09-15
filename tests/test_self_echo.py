@@ -25,7 +25,7 @@ import pytest
 
 from fusion_runtime.config import PipelineConfig, TurnDetectionConfig
 from fusion_runtime.llm import LLMResult
-from fusion_runtime.orchestrator import LatencyBudget, PipelineMetrics, PipelineOrchestrator
+from fusion_runtime.engine import LatencyBudget, PipelineMetrics, PipelineOrchestrator
 from fusion_runtime.stt import STTResult
 from fusion_runtime.vad import PunctuationTurnDetector, TurnState
 

@@ -4,43 +4,59 @@ fusion-runtime Configuration
 Centralized config for all models. Default = self-hosted, low-latency.
 Cloud providers require explicit opt-in.
 """
+import os
+from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 from enum import Enum
 
 
+def model_dir() -> Path:
+    """Directory that model files live in and get downloaded to.
+
+    FUSION_MODEL_DIR wins. Otherwise a `models/` folder beside the source
+    tree is used if one exists (editable installs, existing dev setups),
+    else the per-user cache. Never the current working directory, so the
+    server finds its models no matter where it's started from.
+    """
+    env = os.getenv("FUSION_MODEL_DIR")
+    if env:
+        return Path(env).expanduser()
+    source_models = Path(__file__).resolve().parent.parent / "models"
+    if source_models.is_dir():
+        return source_models
+    cache = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser()
+    return cache / "fusion-runtime" / "models"
+
+
+def resolve_model_path(path: str) -> Path:
+    """Absolute paths are used as-is; anything else is relative to model_dir()."""
+    p = Path(path).expanduser()
+    return p if p.is_absolute() else model_dir() / p
+
+
+# Model paths are relative to model_dir() unless absolute (see resolve_model_path)
+_LLM_MODEL_7B = "llm/qwen2.5-7b-instruct-q4_k_m.gguf"
+_LLM_MODEL_SMALL = "llm/qwen2.5-0.5b-instruct-q4_k_m.gguf"  # ~470MB, for 8GB machines
+_TTS_MODEL = "tts/onnx/model.onnx"
+
+
 class Provider(str, Enum):
     # STT
     FASTER_WHISPER = "faster_whisper"
-    FIRE_RED_ASR = "fire_red_asr"
-    DEEPGRAM = "deepgram"
-    GLADIA = "gladia"
-    OPENAI_STT = "openai_stt"
-    
+
     # LLM
     LLAMA_CPP = "llama_cpp"
-    VLLM = "vllm"
-    OLLAMA = "ollama"
-    OPENAI = "openai"
-    ANTHROPIC = "anthropic"
-    
+    OPENAI = "openai"  # any OpenAI-compatible endpoint (api_base)
+
     # TTS
     KOKORO = "kokoro"
-    FIRE_RED_TTS = "fire_red_tts"
-    XTTS = "xtts"
-    PIPER = "piper"
-    ELEVENLABS = "elevenlabs"
-    OPENAI_TTS = "openai_tts"
-    CARTESIA = "cartesia"
-    
+
     # VAD
     SILERO = "silero"
-    PVAD = "pvad"
-    WEBRTC = "webrtc"
-    
+
     # Turn Detection
     PUNCTUATION = "punctuation"
-    FIRE_RED_EOT = "fire_red_eot"
 
 
 class STTConfig(BaseModel):
@@ -51,17 +67,11 @@ class STTConfig(BaseModel):
     language: Optional[str] = "en"
     beam_size: int = 1
     vad_filter: bool = True
-    # API providers
-    api_key: Optional[str] = None
-    api_url: Optional[str] = None
-    # FireRedASR specific
-    model_dir: Optional[str] = None
-    punctuation: bool = True
 
 
 class LLMConfig(BaseModel):
     provider: Provider = Provider.LLAMA_CPP
-    model: str = "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+    model: str = _LLM_MODEL_7B
     n_ctx: int = 4096
     n_gpu_layers: int = -1  # -1 = all
     n_batch: int = 512
@@ -74,25 +84,17 @@ class LLMConfig(BaseModel):
     # API providers
     api_key: Optional[str] = None
     api_base: Optional[str] = None
-    # vLLM/Ollama
-    base_url: Optional[str] = None
 
 
 class TTSConfig(BaseModel):
     provider: Provider = Provider.KOKORO
-    model: str = "kokoro-v1.0.onnx"
+    model: str = _TTS_MODEL
     voice: str = "af_heart"
     sample_rate: int = 24000
     speed: float = 1.0
     # Streaming
     stream: bool = True
     chunk_size: int = 256
-    # API providers
-    api_key: Optional[str] = None
-    api_url: Optional[str] = None
-    # XTTS/FireRedTTS
-    model_dir: Optional[str] = None
-    speaker_wav: Optional[str] = None
 
 
 class VADConfig(BaseModel):
@@ -100,8 +102,6 @@ class VADConfig(BaseModel):
     threshold: float = 0.5
     min_silence_ms: int = 100
     min_speech_ms: int = 250
-    # pVAD specific
-    speaker_embedding: Optional[bytes] = None
 
 
 class TurnDetectionConfig(BaseModel):
@@ -144,8 +144,6 @@ class TurnDetectionConfig(BaseModel):
     # words (ordinary topic continuity) is not discarded.
     echo_min_match_words: int = 4
     echo_containment_ratio: float = 0.5
-    # FireRed EoT specific
-    model_path: Optional[str] = None
 
 
 class PipelineConfig(BaseModel):
@@ -170,10 +168,6 @@ class PipelineConfig(BaseModel):
 
 
 # Default configs for different deployment profiles
-# Model paths resolve in this order: absolute path → ./models/... → HF auto-download name
-_LLM_MODEL_7B = "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf"
-_LLM_MODEL_SMALL = "models/llm/qwen2.5-0.5b-instruct-q4_k_m.gguf"  # ~470MB, for 8GB machines
-_TTS_MODEL = "models/tts/onnx/model.onnx"
 
 DEVELOPMENT_CONFIG = PipelineConfig(
     stt=STTConfig(provider=Provider.FASTER_WHISPER, model="tiny.en", device="cpu", compute_type="int8"),
@@ -189,13 +183,13 @@ DEVELOPMENT_CONFIG = PipelineConfig(
 
 PRODUCTION_CONFIG = PipelineConfig(
     stt=STTConfig(provider=Provider.FASTER_WHISPER, model="tiny.en", device="cuda"),
-    llm=LLMConfig(provider=Provider.LLAMA_CPP, model="Qwen2.5-7B-Instruct-Q4_K_M.gguf", n_gpu_layers=-1),
-    tts=TTSConfig(provider=Provider.KOKORO, model="kokoro-v1.0.onnx"),
+    llm=LLMConfig(provider=Provider.LLAMA_CPP, model=_LLM_MODEL_7B, n_gpu_layers=-1),
+    tts=TTSConfig(provider=Provider.KOKORO, model=_TTS_MODEL),
 )
 
 HYBRID_CONFIG = PipelineConfig(
     stt=STTConfig(provider=Provider.FASTER_WHISPER, model="tiny.en", device="cuda"),
     llm=LLMConfig(provider=Provider.OPENAI, model="gpt-4o-mini", api_key="${OPENAI_API_KEY}"),
-    tts=TTSConfig(provider=Provider.KOKORO, model="kokoro-v1.0.onnx"),
+    tts=TTSConfig(provider=Provider.KOKORO, model=_TTS_MODEL),
     allow_cloud_fallback=True,
 )

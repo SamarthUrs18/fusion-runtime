@@ -104,7 +104,7 @@ def download_models():
 def fusion_runtime_app():
     """ASGI app for Modal."""
     import os
-    os.environ["MODEL_DIR"] = MODEL_DIR
+    os.environ["FUSION_MODEL_DIR"] = MODEL_DIR
     os.environ["FUSION_CONFIG"] = "production"
     
     from fusion_runtime.server import app as fastapi_app

@@ -18,12 +18,14 @@ dependencies = [
     "scipy>=1.13.0",
     "soundfile>=0.12.1",
     "websockets>=12.0",
-    "aiohttp>=3.9.0",
     "python-multipart>=0.0.9",
     "httpx>=0.27.0",
     "faster-whisper>=1.1.0",
     "llama-cpp-python>=0.2.80",
     "onnxruntime>=1.18.0",
+    # TTS wrapper. KokoroTTS reaches into its internals (tokenizer, session,
+    # voices), so stay on the minor version it was tested with.
+    "kokoro-onnx>=0.6.1,<0.7",
     # torch/torchaudio MUST stay on the same version — torchaudio's
     # compiled extension is ABI-locked to a specific torch release, and an
     # unconstrained ">=" on both let pip resolve them independently on a
@@ -53,14 +55,17 @@ dev = [
     "mypy>=1.10.0",
     "pre-commit>=3.6.0",
 ]
-examples = [
-    # examples/websocket_client.py — live mic/speaker test client
+talk = [
+    # live mic/speaker client (examples/websocket_client.py, later `frun talk`)
     "sounddevice>=0.4.6",
+]
+examples = [
+    "fusion-runtime[talk]",
 ]
 all = [
     "fusion-runtime[cuda]",
     "fusion-runtime[dev]",
-    "fusion-runtime[examples]",
+    "fusion-runtime[talk]",
 ]
 
 [project.urls]

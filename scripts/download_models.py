@@ -8,18 +8,19 @@ Run once during container build or manual setup.
 import os
 import sys
 from pathlib import Path
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import hf_hub_download
 
-MODEL_DIR = Path(os.getenv("MODEL_DIR", Path(__file__).parent.parent / "models"))
+from fusion_runtime.config import model_dir
+
+MODEL_DIR = model_dir()  # FUSION_MODEL_DIR, else ./models beside the source, else user cache
 
 def download_whisper():
     """Download faster-whisper tiny.en model."""
     print("📥 Downloading faster-whisper tiny.en...")
-    # faster-whisper downloads automatically on first use
-    # This just triggers the download
-    from faster_whisper import WhisperModel
-    model = WhisperModel("tiny.en", device="cpu", compute_type="int8", download_root=str(MODEL_DIR))
-    print("✅ faster-whisper ready")
+    # Plain folder at <model dir>/stt/tiny.en, which FasterWhisperSTT loads directly
+    from faster_whisper.utils import download_model
+    path = download_model("tiny.en", output_dir=str(MODEL_DIR / "stt" / "tiny.en"))
+    print(f"✅ faster-whisper downloaded to {path}")
 
 def download_llama_cpp():
     """Download Qwen2.5-7B-Instruct GGUF."""
@@ -94,52 +95,6 @@ def download_silero_vad():
     )
     print("✅ Silero VAD ready")
 
-def download_fire_red_asr():
-    """Download FireRedASR models (optional)."""
-    print("📥 Downloading FireRedASR...")
-    try:
-        snapshot_download(
-            repo_id="FireRedTeam/FireRedASR-AED-L",
-            local_dir=MODEL_DIR / "fireredasr" / "FireRedASR-AED-L",
-            local_dir_use_symlinks=False,
-        )
-        snapshot_download(
-            repo_id="FireRedTeam/FireRedChat-punc",
-            local_dir=MODEL_DIR / "fireredasr" / "PUNC-BERT",
-            local_dir_use_symlinks=False,
-        )
-        print("✅ FireRedASR downloaded")
-    except Exception as e:
-        print(f"⚠️ FireRedASR download failed (optional): {e}")
-
-def download_fire_red_tts():
-    """Download FireRedTTS (optional, non-commercial)."""
-    print("📥 Downloading FireRedTTS...")
-    try:
-        from huggingface_hub import snapshot_download
-        snapshot_download(
-            repo_id="FireRedTeam/FireRedTTS-1S",
-            revision="fireredtts1s_4_chat",
-            local_dir=MODEL_DIR / "fireredtts",
-            local_dir_use_symlinks=False,
-        )
-        print("✅ FireRedTTS downloaded (NON-COMMERCIAL ONLY)")
-    except Exception as e:
-        print(f"⚠️ FireRedTTS download failed (optional): {e}")
-
-def download_fire_red_eot():
-    """Download FireRedChat EoT turn detector (optional)."""
-    print("📥 Downloading FireRedChat EoT...")
-    try:
-        snapshot_download(
-            repo_id="FireRedTeam/FireRedChat-EoT",
-            local_dir=MODEL_DIR / "firered_eot",
-            local_dir_use_symlinks=False,
-        )
-        print("✅ FireRedChat EoT downloaded")
-    except Exception as e:
-        print(f"⚠️ FireRedChat EoT download failed (optional): {e}")
-
 def main():
     import argparse
     
@@ -149,9 +104,6 @@ def main():
     parser.add_argument("--llm", action="store_true", help="Download LLM")
     parser.add_argument("--kokoro", action="store_true", help="Download Kokoro TTS")
     parser.add_argument("--vad", action="store_true", help="Download Silero VAD")
-    parser.add_argument("--firered-asr", action="store_true", help="Download FireRedASR")
-    parser.add_argument("--firered-tts", action="store_true", help="Download FireRedTTS (non-commercial)")
-    parser.add_argument("--firered-eot", action="store_true", help="Download FireRedChat EoT")
     
     args = parser.parse_args()
     
@@ -169,12 +121,6 @@ def main():
         download_kokoro()
     if args.vad:
         download_silero_vad()
-    if args.firered_asr:
-        download_fire_red_asr()
-    if args.firered_tts:
-        download_fire_red_tts()
-    if args.firered_eot:
-        download_fire_red_eot()
     
     print("\n🎉 All requested models downloaded!")
     print(f"📁 Model directory: {MODEL_DIR}")

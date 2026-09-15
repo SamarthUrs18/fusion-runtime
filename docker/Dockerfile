@@ -80,6 +80,7 @@ COPY --chown=appuser:appuser scripts/ ./scripts/
 
 # Create model cache directory
 RUN mkdir -p /models && chown appuser:appuser /models
+ENV FUSION_MODEL_DIR=/models
 
 # Switch to app user
 USER appuser

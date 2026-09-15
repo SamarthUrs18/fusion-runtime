@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from fusion_runtime.config import PipelineConfig
-from fusion_runtime.orchestrator import BargeInState, PipelineOrchestrator
+from fusion_runtime.engine import BargeInState, PipelineOrchestrator
 
 
 def make_orchestrator(threshold: float = 0.5, sample_rate: int = 16000, min_speech_ms: int = 300):

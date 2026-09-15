@@ -13,7 +13,7 @@ from fusion_runtime.config import (
     PRODUCTION_CONFIG,
     HYBRID_CONFIG,
 )
-from fusion_runtime.orchestrator import PipelineOrchestrator, run_single_turn
+from fusion_runtime.engine import PipelineOrchestrator, run_single_turn
 
 __version__ = "0.1.0"
 __all__ = [

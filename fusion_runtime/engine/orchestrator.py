@@ -1,7 +1,4 @@
-"""
-Orchestrator - Core pipeline coordination with latency budgeting and streaming.
-"""
-from dataclasses import dataclass, field
+"""The voice conversation loop: audio → VAD → STT → turn detection → LLM → TTS → audio."""
 from typing import AsyncIterator, Optional, List, Callable, Awaitable
 import asyncio
 import contextlib
@@ -15,108 +12,8 @@ from fusion_runtime.stt import STTBase, STTResult, create_stt
 from fusion_runtime.llm import LLMBase, LLMResult, ChatMessage, create_llm
 from fusion_runtime.tts import TTSBase, TTSResult, create_tts
 from fusion_runtime.vad import VADBase, VADResult, TurnDetectorBase, TurnState, create_vad, create_turn_detector
-
-
-@dataclass
-class LatencyBudget:
-    """Tracks latency budget across pipeline stages."""
-    total_ms: int
-    spent_ms: float = 0
-    stage_budgets: dict = field(default_factory=dict)
-    
-    def allocate(self, stage: str, ms: int) -> "StageBudget":
-        self.stage_budgets[stage] = ms
-        return StageBudget(self, stage, ms)
-    
-    def record(self, stage: str, ms: float):
-        self.spent_ms += ms
-        if stage in self.stage_budgets:
-            remaining = self.stage_budgets[stage] - ms
-            if remaining < 0:
-                print(f"⚠️ Stage {stage} exceeded budget by {-remaining:.0f}ms")
-
-
-@dataclass
-class StageBudget:
-    """Context manager for stage latency tracking."""
-    budget: LatencyBudget
-    stage: str
-    allocated_ms: int
-    start_time: float = field(default_factory=time.perf_counter)
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, *args):
-        elapsed = (time.perf_counter() - self.start_time) * 1000
-        self.budget.record(self.stage, elapsed)
-    
-    @property
-    def remaining_ms(self) -> float:
-        elapsed = (time.perf_counter() - self.start_time) * 1000
-        return max(0, self.allocated_ms - elapsed)
-    
-    @property
-    def is_exceeded(self) -> bool:
-        return self.remaining_ms <= 0
-
-
-@dataclass
-class BargeInState:
-    """Coordinates interruption ("barge-in") between the reply generation
-    loop and an independent watcher task that keeps scanning incoming audio
-    for real user speech while the bot is talking.
-
-    "Talking" has two parts. `generating` covers the server producing a
-    reply; `playing` is reported by the client and covers audio still coming
-    out of its speaker — which usually outlasts generation by seconds, since
-    text is produced faster than it's spoken. Watching generation alone left
-    the end of every reply impossible to interrupt.
-
-    Once an interruption fires, `speaking` stays False until the next reply
-    starts, so a single interruption can't fire twice. The watcher still
-    requires *sustained* speech, since a client without echo cancellation
-    can't promise echo-free audio — see `_barge_in_watcher`.
-    """
-    generating: bool = False
-    playing: bool = False
-    interrupted: asyncio.Event = field(default_factory=asyncio.Event)
-    _fired: bool = False
-
-    @property
-    def speaking(self) -> bool:
-        return (self.generating or self.playing) and not self._fired
-
-    def mark_speaking(self):
-        self.generating = True
-        self._fired = False
-        self.interrupted.clear()
-
-    def mark_idle(self):
-        self.generating = False
-        self.interrupted.clear()
-
-    def set_playing(self, playing: bool):
-        self.playing = playing
-
-    def fire(self):
-        """Record an interruption: cancels in-flight generation and stops
-        watching until the next reply starts."""
-        self._fired = True
-        self.interrupted.set()
-
-
-@dataclass
-class PipelineMetrics:
-    """Pipeline performance metrics."""
-    stt_latency_ms: float = 0
-    llm_first_token_ms: float = 0
-    llm_total_ms: float = 0
-    tts_first_chunk_ms: float = 0
-    tts_total_ms: float = 0
-    e2e_latency_ms: float = 0
-    pipeline_start: float = field(default_factory=time.perf_counter)
-    timestamp: float = field(default_factory=time.time)
+from fusion_runtime.engine.barge_in import BargeInState
+from fusion_runtime.engine.metrics import LatencyBudget, PipelineMetrics, StageBudget
 
 
 class PipelineOrchestrator:

@@ -17,7 +17,7 @@ from fusion_runtime.stt import create_stt, STTBase
 from fusion_runtime.llm import create_llm, LLMBase
 from fusion_runtime.tts import create_tts, TTSBase
 from fusion_runtime.vad import create_vad, create_turn_detector
-from fusion_runtime.orchestrator import PipelineOrchestrator, run_single_turn
+from fusion_runtime.engine import PipelineOrchestrator, run_single_turn
 
 
 class TestConfig:
@@ -46,11 +46,6 @@ class TestSTTFactory:
         stt = create_stt(config)
         assert isinstance(stt, STTBase)
     
-    def test_create_deepgram(self):
-        config = STTConfig(provider=Provider.DEEPGRAM, api_key="test")
-        stt = create_stt(config)
-        assert isinstance(stt, STTBase)
-    
     def test_unknown_provider_raises(self):
         # Pydantic rejects unknown providers at validation time
         with pytest.raises(Exception):
@@ -74,11 +69,6 @@ class TestTTSFactory:
         config = TTSConfig(provider=Provider.KOKORO)
         tts = create_tts(config)
         assert isinstance(tts, TTSBase)
-    
-    def test_create_elevenlabs(self):
-        config = TTSConfig(provider=Provider.ELEVENLABS, api_key="test")
-        tts = create_tts(config)
-        assert isinstance(tts, TTSBase)
 
 
 class TestVADFactory:
@@ -95,12 +85,6 @@ class TestTurnDetectorFactory:
         config = TurnDetectionConfig(provider=Provider.PUNCTUATION)
         detector = create_turn_detector(config)
         assert detector is not None
-    
-    def test_create_fire_red_eot(self):
-        from fusion_runtime.config import TurnDetectionConfig
-        config = TurnDetectionConfig(provider=Provider.FIRE_RED_EOT)
-        detector = create_turn_detector(config)
-        assert detector is not None
 
 
 # Integration tests (require models downloaded)
@@ -108,7 +92,7 @@ class TestTurnDetectorFactory:
 class TestPipelineIntegration:
     @pytest.fixture(scope="class")
     def orchestrator(self):
-        from fusion_runtime.orchestrator import PipelineOrchestrator
+        from fusion_runtime.engine import PipelineOrchestrator
         orch = PipelineOrchestrator(DEVELOPMENT_CONFIG)
         asyncio.run(orch.initialize())
         yield orch
