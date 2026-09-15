@@ -2,9 +2,13 @@
 fusion-runtime: Low-latency voice AI inference runtime.
 """
 import importlib
+from importlib.metadata import PackageNotFoundError, version as _package_version
 from typing import TYPE_CHECKING
 
-__version__ = "0.1.0"
+try:
+    __version__ = _package_version("fusion-runtime")  # the one real version lives in pyproject.toml
+except PackageNotFoundError:  # source checkout that was never pip-installed
+    __version__ = "0.0.0+unknown"
 
 # Public names load on first use, so light entry points like `frun --help`
 # don't pull in pydantic, numpy and the whole pipeline just by importing

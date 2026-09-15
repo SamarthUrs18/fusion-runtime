@@ -70,3 +70,253 @@ def test_unknown_package_attribute_raises():
 
     with pytest.raises(AttributeError):
         fusion_runtime.does_not_exist
+
+
+# ---- frun models -------------------------------------------------------------
+
+import fusion_runtime.catalog as catalog_pkg
+from fusion_runtime.catalog import download as download_mod
+
+
+def _empty_model_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("FUSION_MODEL_DIR", str(tmp_path / "models"))
+    monkeypatch.setenv("TORCH_HOME", str(tmp_path / "torch"))
+
+
+def _record_pulls(monkeypatch, fail=None):
+    pulled = []
+
+    def fake_pull(entry, root, force=False, log=print):
+        if fail:
+            raise download_mod.DownloadError(fail)
+        pulled.append(entry.id)
+
+    monkeypatch.setattr(download_mod, "pull", fake_pull)
+    monkeypatch.setattr(download_mod, "check_disk_space", lambda needed, root: None)
+    return pulled
+
+
+def test_models_list_shows_missing_and_how_to_fix(tmp_path, monkeypatch):
+    _empty_model_env(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["models", "list"])
+    assert result.exit_code == 0
+    assert "qwen2.5-7b-q4" in result.output and "missing" in result.output
+    assert "(FUSION_MODEL_DIR)" in result.output
+    assert "Run: frun models pull --config production" in result.output
+
+
+def test_models_pull_defaults_to_development_profile(tmp_path, monkeypatch):
+    _empty_model_env(tmp_path, monkeypatch)
+    pulled = _record_pulls(monkeypatch)
+    result = runner.invoke(app, ["models", "pull"])
+    assert result.exit_code == 0, result.output
+    assert pulled == ["whisper-tiny.en", "qwen2.5-0.5b-q4", "kokoro-v1.0", "silero-vad"]
+
+
+def test_models_pull_stage_flag_uses_chosen_profile(tmp_path, monkeypatch):
+    _empty_model_env(tmp_path, monkeypatch)
+    pulled = _record_pulls(monkeypatch)
+    result = runner.invoke(app, ["models", "pull", "--llm", "--config", "production"])
+    assert result.exit_code == 0, result.output
+    assert pulled == ["qwen2.5-7b-q4"]
+
+
+def test_models_pull_by_id(tmp_path, monkeypatch):
+    _empty_model_env(tmp_path, monkeypatch)
+    pulled = _record_pulls(monkeypatch)
+    result = runner.invoke(app, ["models", "pull", "kokoro-v1.0"])
+    assert result.exit_code == 0, result.output
+    assert pulled == ["kokoro-v1.0"]
+
+
+def test_models_pull_skips_installed(tmp_path, monkeypatch):
+    _empty_model_env(tmp_path, monkeypatch)
+    pulled = _record_pulls(monkeypatch)
+    monkeypatch.setattr(catalog_pkg, "is_installed", lambda entry, root: True)
+    result = runner.invoke(app, ["models", "pull"])
+    assert result.exit_code == 0
+    assert pulled == []
+    assert "already installed" in result.output
+
+
+def test_models_pull_unknown_id_fails(tmp_path, monkeypatch):
+    _empty_model_env(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["models", "pull", "nope"])
+    assert result.exit_code == 1
+    assert "Unknown model: nope" in result.output
+
+
+def test_models_pull_reports_download_failure(tmp_path, monkeypatch):
+    _empty_model_env(tmp_path, monkeypatch)
+    _record_pulls(monkeypatch, fail="whisper-tiny.en: download failed: ConnectionError")
+    result = runner.invoke(app, ["models", "pull", "--whisper"])
+    assert result.exit_code == 1
+    assert "download failed" in result.output and "run the same command again" in result.output
+
+
+def test_models_pull_refuses_without_disk_space(tmp_path, monkeypatch):
+    _empty_model_env(tmp_path, monkeypatch)
+
+    def no_space(needed, root):
+        raise download_mod.NotEnoughDiskSpace("Need 4.7 GB but only 1.0 GB is free")
+
+    monkeypatch.setattr(download_mod, "check_disk_space", no_space)
+    result = runner.invoke(app, ["models", "pull", "--llm", "--config", "production"])
+    assert result.exit_code == 1
+    assert "only 1.0 GB is free" in result.output
+
+
+# ---- frun up -----------------------------------------------------------------
+
+import socket
+
+import uvicorn
+
+
+def _all_models_installed(monkeypatch):
+    monkeypatch.setattr(catalog_pkg, "is_installed", lambda entry, root: True)
+
+
+def _record_uvicorn(monkeypatch):
+    calls = []
+    monkeypatch.setattr(uvicorn, "run", lambda app_path, **kw: calls.append((app_path, kw)))
+    return calls
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def test_up_starts_server_with_chosen_profile(monkeypatch):
+    _all_models_installed(monkeypatch)
+    calls = _record_uvicorn(monkeypatch)
+    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")  # restored after the test
+    port = _free_port()
+    result = runner.invoke(app, ["up", "--port", str(port), "--config", "production"])
+    assert result.exit_code == 0, result.output
+    assert calls == [("fusion_runtime.server:app", {"host": "127.0.0.1", "port": port, "workers": 1})]
+    assert os.environ["FUSION_CONFIG"] == "production"
+    assert f"frun talk --url ws://localhost:{port}/v1/voice/ws" in result.output
+
+
+def test_up_default_port_suggests_plain_talk(monkeypatch):
+    _all_models_installed(monkeypatch)
+    _record_uvicorn(monkeypatch)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    result = runner.invoke(app, ["up"])
+    assert "run `frun talk` in another terminal" in result.output
+
+
+def test_up_refuses_when_models_missing(tmp_path, monkeypatch):
+    _empty_model_env(tmp_path, monkeypatch)
+    calls = _record_uvicorn(monkeypatch)
+    result = runner.invoke(app, ["up", "--config", "production"])
+    assert result.exit_code == 1
+    assert "qwen2.5-7b-q4" in result.output
+    assert "Run: frun models pull --config production" in result.output
+    assert calls == []
+
+
+def test_up_refuses_busy_port(monkeypatch):
+    _all_models_installed(monkeypatch)
+    calls = _record_uvicorn(monkeypatch)
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        result = runner.invoke(app, ["up", "--port", str(port)])
+    assert result.exit_code == 1
+    assert f"port {port} is already in use" in result.output
+    assert calls == []
+
+
+def test_up_warns_when_exposed_to_network(monkeypatch):
+    _all_models_installed(monkeypatch)
+    _record_uvicorn(monkeypatch)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    result = runner.invoke(app, ["up", "--host", "0.0.0.0"])
+    assert "no authentication" in result.output
+
+
+# ---- frun talk ---------------------------------------------------------------
+
+import os
+
+from fusion_runtime.cli import _talk_client
+
+
+class _FakeClient:
+    instances = []
+    raise_on_run = None
+
+    def __init__(self, uri, echo_cancellation):
+        self.uri, self.echo_cancellation = uri, echo_cancellation
+        _FakeClient.instances.append(self)
+
+    async def run(self):
+        if _FakeClient.raise_on_run:
+            raise _FakeClient.raise_on_run
+
+
+def _fake_client(monkeypatch, raise_on_run=None):
+    _FakeClient.instances, _FakeClient.raise_on_run = [], raise_on_run
+    monkeypatch.setattr(_talk_client, "VoiceChatClient", _FakeClient)
+    monkeypatch.setattr("fusion_runtime.cli.talk._audio_available", lambda: True)
+    monkeypatch.delenv("FUSION_AEC", raising=False)
+
+
+def test_talk_passes_url_and_echo_cancellation(monkeypatch):
+    _fake_client(monkeypatch)
+    result = runner.invoke(app, ["talk", "--url", "ws://box:9000/v1/voice/ws", "--no-aec"])
+    assert result.exit_code == 0, result.output
+    client, = _FakeClient.instances
+    assert (client.uri, client.echo_cancellation) == ("ws://box:9000/v1/voice/ws", False)
+
+
+def test_talk_echo_cancellation_on_by_default_and_env_can_disable(monkeypatch):
+    _fake_client(monkeypatch)
+    runner.invoke(app, ["talk"])
+    assert _FakeClient.instances[-1].echo_cancellation is True
+    monkeypatch.setenv("FUSION_AEC", "0")
+    runner.invoke(app, ["talk"])
+    assert _FakeClient.instances[-1].echo_cancellation is False
+
+
+def test_talk_explains_when_server_is_not_running(monkeypatch):
+    _fake_client(monkeypatch, raise_on_run=ConnectionRefusedError(61, "Connection refused"))
+    result = runner.invoke(app, ["talk"])
+    assert result.exit_code == 1
+    assert "Is the server running?" in result.output and "frun up" in result.output
+
+
+def test_talk_without_audio_extra_says_how_to_install(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_sounddevice(name, *args, **kwargs):
+        if name == "sounddevice":
+            raise ImportError("No module named 'sounddevice'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_sounddevice)
+    result = runner.invoke(app, ["talk"])
+    assert result.exit_code == 1
+    assert "pip install 'fusion-runtime[talk]'" in result.output
+
+
+def test_version_comes_only_from_pyproject():
+    import tomllib
+    from pathlib import Path
+
+    import fusion_runtime
+    from fusion_runtime.server import app as server_app
+
+    declared = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text())["project"]["version"]
+    assert fusion_runtime.__version__ == declared
+    assert package_version() == declared
+    assert server_app.version == declared

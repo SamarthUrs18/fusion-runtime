@@ -1,173 +1,168 @@
 # fusion-runtime
 
-**Low-latency voice AI inference runtime — STT → LLM → TTS in <500ms**
+**A self-hosted voice agent runtime.** Speech-to-text, the LLM and text-to-speech run together on one machine and stream into each other, so a reply starts playing while it's still being generated.
 
-Self-hosted, model-agnostic, production-ready. Built for real-time voice applications.
+> **Status: early development.** The full voice pipeline works on a laptop CPU, including interruptions and echo cancellation. It hasn't been measured on a GPU yet, and it serves one conversation at a time. See [Roadmap](#roadmap).
 
-## 🎯 Why fusion-runtime?
+## Quickstart
 
-STT, LLM and TTS run co-located in a single worker: zero network hops between models, shared GPU memory, a true streaming pipeline, and dynamic batching.
+Requires Python 3.11+.
 
-## 🏗 Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Single Worker Container                   │
-│  ┌─────────────┐    <5ms    ┌─────────────┐   Shared GPU  ┌─────────────┐
-│  │   STT       │ ──────────► │   LLM       │ ◄───────────► │   TTS       │
-│  │ faster-     │  (queues)   │  llama.cpp  │   Memory      │  Kokoro     │
-│  │ whisper     │             │  Qwen2.5-7B │  (KV cache +  │  ONNX       │
-│  └─────────────┘             └─────────────┘  audio tokens)└─────────────┘
-│         │                            │                         │
-│         └────────────────────────────┼────────────────────────┘
-│                                      ▼
-│                         ┌─────────────────────┐
-│                         │   Orchestrator      │
-│                         │  • Latency budget   │
-│                         │  • Streaming coord  │
-│                         │  • Dynamic batching │
-│                         └─────────────────────┘
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                 ┌──────────────────────┐
-                 │   Voice clients      │
-                 │   (WebSocket)        │
-                 └──────────────────────┘
-```
-
-## 🚀 Quickstart
-
-### Prerequisites
-- NVIDIA GPU (CUDA 12.4+) for production
-- Docker + NVIDIA Container Toolkit
-- 8GB+ VRAM recommended
-
-### 1. Clone & Download Models
 ```bash
 git clone https://github.com/fusion-runtime/fusion-runtime.git
 cd fusion-runtime
+pip install -e ".[talk]"
 
-# Download models (one-time)
-python scripts/download_models.py --all
+frun models pull          # ~0.9 GB: Whisper tiny, Qwen2.5 0.5B, Kokoro, Silero VAD
+frun doctor               # checks libraries, GPU, models and audio, and says how to fix problems
 ```
 
-### 2. Run with Docker Compose
+Start the server, then talk to it from a second terminal:
+
 ```bash
-cd docker
-docker-compose up -d
+frun up
 ```
 
-### 3. Test
 ```bash
-# Health check
-curl http://localhost:8000/health
-
-# Single-turn voice chat
-curl -X POST http://localhost:8000/v1/voice/chat \
-  -H "Content-Type: application/json" \
-  -d '{"audio_base64": "'$(base64 -w0 test_audio.wav)'"}'
-
-# WebSocket (real-time)
-# See examples/websocket_client.py
+frun talk
 ```
 
-## ⚙️ Configuration
+On macOS, allow microphone access for your terminal app (System Settings → Privacy & Security → Microphone). You can talk over the bot to interrupt it. With headphones, `frun talk --no-aec` turns echo cancellation off.
 
-### Default (Production - All Self-Hosted)
+## The `frun` CLI
+
+| Command | What it does |
+|---------|--------------|
+| `frun up` | Starts the server on `127.0.0.1:8000`. Checks models are installed and the port is free first |
+| `frun up --config production --host 0.0.0.0 --port 8080` | Production models, reachable from other machines |
+| `frun talk` | Talks to the server with your mic and speakers |
+| `frun talk --url ws://host:8080/v1/voice/ws` | Talks to a server elsewhere |
+| `frun models list` | Shows every model, its size, whether it's installed, and which profile uses it |
+| `frun models pull` | Downloads what the development profile needs |
+| `frun models pull --config production` | Downloads what the production profile needs |
+| `frun models pull --llm` | Only one stage; also `--whisper`, `--kokoro`, `--vad` |
+| `frun models pull qwen2.5-7b-q4` | A specific model by ID |
+| `frun doctor` | Checks Python, libraries (incl. that torch and torchaudio match and Silero VAD really loads), GPU support, models, port and audio. Prints a fix for each problem; exits 1 if something is broken |
+| `frun version` | Installed version |
+
+`fusion-runtime` works as an alias for `frun`. If the command isn't on your PATH, use `python3 -m fusion_runtime.cli`.
+
+## Models
+
+Every download is pinned to an exact Hugging Face commit and checked by file size ([catalog](fusion_runtime/catalog/models.toml)).
+
+| ID | Stage | Size | License | Used by |
+|----|-------|------|---------|---------|
+| `whisper-tiny.en` | Speech-to-text | 78 MB | MIT | development, production |
+| `qwen2.5-0.5b-q4` | LLM (GGUF) | 491 MB | Apache-2.0 | development |
+| `qwen2.5-7b-q4` | LLM (GGUF) | 4.7 GB | Apache-2.0 | production |
+| `kokoro-v1.0` | Text-to-speech (ONNX) | 328 MB | Apache-2.0 | development, production |
+| `silero-vad` | Voice activity detection | 2 MB | MIT | development, production |
+
+**Where models are stored**, first match wins:
+
+1. `FUSION_MODEL_DIR`, if set
+2. a `models/` folder next to the source code (source checkouts)
+3. `~/.cache/fusion-runtime/models`
+
+Silero VAD is the exception: it's cached by PyTorch in `~/.cache/torch/hub`.
+
+## How it works
+
+```
+ microphone audio
+       │
+       ▼
+ Silero VAD ──► faster-whisper ──► turn detection ──► llama.cpp ──► Kokoro ──► audio out
+ (speech only)   (rolling window)   (punctuation +     (streams      (speaks each
+                                     silence)           tokens)       sentence, or
+                                                                      a long phrase)
+       │
+       └──► barge-in watcher: if you talk over the reply, generation and playback stop
+```
+
+Everything runs in one Python process today. The local client removes the bot's own voice from the microphone ([echo cancellation](fusion_runtime/audio/echo_canceller.py)), so the server hears clean audio and can decide when you're interrupting.
+
+## Configuration
+
+Choose a profile with `frun up --config` (or `FUSION_CONFIG` if you start the server another way):
+
+| Profile | STT | LLM | TTS | For |
+|---------|-----|-----|-----|-----|
+| `development` (default) | Whisper tiny, CPU int8 | Qwen2.5 0.5B, CPU | Kokoro | Laptops, 8 GB RAM |
+| `production` | Whisper tiny, CUDA | Qwen2.5 7B, all GPU layers | Kokoro | NVIDIA GPU |
+
+```bash
+frun up --config production
+```
+
+In Python, model paths are relative to the model directory:
+
 ```python
+from fusion_runtime import PipelineConfig, LLMConfig
+
 PipelineConfig(
-    stt=STTConfig(provider="faster_whisper", model="tiny.en", device="cuda"),
-    llm=LLMConfig(provider="llama_cpp", model="Qwen2.5-7B-Instruct-Q4_K_M.gguf"),
-    tts=TTSConfig(provider="kokoro", model="kokoro-v1.0.onnx"),
-    target_latency_ms=500,
+    llm=LLMConfig(provider="llama_cpp", model="llm/qwen2.5-0.5b-instruct-q4_k_m.gguf"),
 )
+LLMConfig(provider="openai", model="...", api_base="http://localhost:8080/v1")  # any OpenAI-compatible server
 ```
 
-### Swappable LLM
-```python
-LLMConfig(provider="llama_cpp", model="llm/your-model.gguf")                 # Local GGUF
-LLMConfig(provider="openai", model="...", api_base="http://localhost:8080/v1")  # Any OpenAI-compatible server
-```
+Only `FUSION_CONFIG`, `FUSION_MODEL_DIR` and `FUSION_AEC` (`FUSION_AEC=0` is the same as `frun talk --no-aec`) are read today. The other variables in `.env.example` aren't wired up yet.
 
-## 📦 Model Support
+## Server API
 
-| Component | Engine | Format |
-|-----------|--------|--------|
-| **STT** | faster-whisper (tiny.en default) | CTranslate2 |
-| **LLM** | llama.cpp (Qwen2.5 default), or any OpenAI-compatible endpoint | GGUF |
-| **TTS** | Kokoro | ONNX |
-| **VAD** | Silero | — |
-| **Turn Detection** | Punctuation + silence | — |
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health` | Status and loaded models |
+| `POST /v1/voice/chat` | One turn: base64 audio in, base64 audio out |
+| `POST /v1/voice/stream` | One turn, streamed PCM response |
+| `WS /v1/voice/ws` | Real-time conversation: raw 16 kHz PCM in, 24 kHz PCM and JSON events out |
+| `GET /metrics` | P50/P99 latency over recent turns |
 
+There's no authentication yet, which is why `frun up` only listens on `127.0.0.1` unless you pass `--host`.
 
-## 📊 Performance Targets
+## Performance
 
-| Metric | Target (P50) | Target (P99) |
-|--------|-------------|-------------|
-| Time to First Audio | 200ms | 350ms |
-| End-to-End Latency | 300ms | 500ms |
-| Concurrent Users/GPU | 15-25 | - |
-| GPU Memory | 8-10 GB | - |
+Measured numbers only.
 
-## 🔧 Development
+| Machine | Profile | Time to first audio | Speech-to-text |
+|---------|---------|---------------------|----------------|
+| 8 GB MacBook Air, CPU only | development | ~1.6 s | ~0.5–0.7 s |
+| NVIDIA GPU | production | not measured yet | not measured yet |
+
+Measured on the `tests/fixtures/hello.wav` clip.
+
+## Development
 
 ```bash
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Run CPU-only (no GPU needed)
-docker-compose -f docker/docker-compose.yml up fusion-runtime-cpu
-
-# Run tests
+pip install -e ".[dev,talk]"
 pytest tests/
-
-# Lint
-ruff check fusion_runtime/
-mypy fusion_runtime/
 ```
 
-## 📁 Project Structure
-
 ```
-fusion-runtime/
-├── fusion_runtime/
-│   ├── config.py        # Settings, profiles, model directory
-│   ├── server.py        # FastAPI + WebSocket server
-│   ├── stt/             # base.py + one file per engine (whisper.py)
-│   ├── llm/             # base.py, llama_cpp.py, openai_compat.py
-│   ├── tts/             # base.py, kokoro.py
-│   ├── vad/             # base.py, silero.py, turn.py (turn detection)
-│   ├── engine/          # orchestrator.py (conversation loop), barge_in.py, metrics.py
-│   └── audio/           # echo_canceller.py, duplex_audio.py
-├── docker/
-│   ├── Dockerfile       # CUDA production image
-│   ├── Dockerfile.cpu   # CPU-only dev image
-│   ├── docker-compose.yml
-│   └── requirements.cpu.txt
-├── scripts/
-│   └── download_models.py
-├── tests/
-├── pyproject.toml
-└── README.md
+fusion_runtime/
+├── cli/          frun commands, one file per command (_talk_client.py is the mic client)
+├── catalog/      model catalog (models.toml), install checks, downloads
+├── config.py     settings, profiles, model directory
+├── server.py     FastAPI + WebSocket server
+├── stt/          base.py, whisper.py
+├── llm/          base.py, llama_cpp.py, openai_compat.py
+├── tts/          base.py, kokoro.py
+├── vad/          base.py, silero.py, turn.py
+├── engine/       orchestrator.py (conversation loop), barge_in.py, metrics.py
+└── audio/        echo_canceller.py, duplex_audio.py
 ```
 
-## 🎯 Roadmap
+`docker/` and `modal_deploy.py` exist but haven't been verified yet.
 
-- [ ] Modal deployment template (free tier → RunPod)
-- [ ] Python SDK (`pip install fusion-runtime-sdk`)
-- [ ] TypeScript SDK for frontend integration
-- [ ] Prometheus metrics + Grafana dashboards
-- [ ] Multi-language STT/TTS routing
-- [ ] Custom model fine-tuning pipeline
+## Roadmap
 
-## 📄 License
+- **Phase 1, in progress:** `frun` CLI (`models`, `up`, `talk`, `doctor` done; `deploy --target modal` next) and the first GPU measurements
+- **Phase 2:** many conversations per GPU: LLM server sidecar, per-call sessions, admission control
+- **Phase 3:** agents as Python files (`frun up agent.py`): prompts, variables, hooks and tool calling
+- **Phase 4:** deploy environments (`fusion.toml`) and a model picker
+- **Then:** browser/app client, phone calls, managed cloud
 
-**AGPL-3.0-or-later** (core runtime)  
-**Apache-2.0** (SDKs, client libraries)
+## License
 
-Commercial licenses available — contact for enterprise.
-
----
-
-**Built for developers who need voice AI that actually feels real-time.**
+AGPL-3.0-or-later, as declared in `pyproject.toml`. Licensing is not final yet.

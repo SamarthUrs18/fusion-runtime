@@ -10,11 +10,12 @@ import base64
 import json
 import uuid
 
+from fusion_runtime import __version__
 from fusion_runtime.config import PipelineConfig, DEVELOPMENT_CONFIG, PRODUCTION_CONFIG
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator, PipelineMetrics
 
 
-app = FastAPI(title="fusion-runtime", version="0.1.0")
+app = FastAPI(title="fusion-runtime", version=__version__)
 
 # Global orchestrator (single worker)
 orchestrator: Optional[PipelineOrchestrator] = None

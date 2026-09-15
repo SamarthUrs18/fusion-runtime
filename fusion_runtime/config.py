@@ -29,6 +29,15 @@ def model_dir() -> Path:
     return cache / "fusion-runtime" / "models"
 
 
+def model_dir_source() -> str:
+    """Why model_dir() picked its directory, for showing to users."""
+    if os.getenv("FUSION_MODEL_DIR"):
+        return "FUSION_MODEL_DIR"
+    if (Path(__file__).resolve().parent.parent / "models").is_dir():
+        return "models/ folder next to the source code"
+    return "user cache"
+
+
 def resolve_model_path(path: str) -> Path:
     """Absolute paths are used as-is; anything else is relative to model_dir()."""
     p = Path(path).expanduser()
@@ -36,7 +45,7 @@ def resolve_model_path(path: str) -> Path:
 
 
 # Model paths are relative to model_dir() unless absolute (see resolve_model_path)
-_LLM_MODEL_7B = "llm/qwen2.5-7b-instruct-q4_k_m.gguf"
+_LLM_MODEL_7B = "llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"  # split in 2; llama.cpp loads part 2 itself
 _LLM_MODEL_SMALL = "llm/qwen2.5-0.5b-instruct-q4_k_m.gguf"  # ~470MB, for 8GB machines
 _TTS_MODEL = "tts/onnx/model.onnx"
 

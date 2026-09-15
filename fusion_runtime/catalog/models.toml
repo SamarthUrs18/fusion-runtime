@@ -1,0 +1,63 @@
+# Models fusion-runtime knows how to download.
+#
+# Every Hugging Face entry is pinned to a commit, so two machines always get
+# identical files. Paths are relative to the model directory
+# (fusion_runtime.config.model_dir). File sizes are checked after download.
+#
+#   stage     stt | llm | tts | vad
+#   path      what the config profiles point at (see fusion_runtime/config.py)
+#   files     file name in the repo -> size in bytes, saved under local_dir
+
+["whisper-tiny.en"]
+stage = "stt"
+description = "Whisper tiny, English only"
+license = "MIT"
+source = "huggingface"
+repo = "Systran/faster-whisper-tiny.en"
+revision = "0d3d19a32d3338f10357c0889762bd8d64bbdeba"
+local_dir = "stt/tiny.en"
+path = "stt/tiny.en"
+files = { "config.json" = 2317, "model.bin" = 75537502, "tokenizer.json" = 2128466, "vocabulary.txt" = 422309 }
+
+["qwen2.5-0.5b-q4"]
+stage = "llm"
+description = "Qwen2.5 0.5B Instruct, Q4_K_M (small, for CPU and 8 GB machines)"
+license = "Apache-2.0"
+source = "huggingface"
+repo = "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
+revision = "9217f5db79a29953eb74d5343926648285ec7e67"
+local_dir = "llm"
+path = "llm/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+files = { "qwen2.5-0.5b-instruct-q4_k_m.gguf" = 491400032 }
+
+["qwen2.5-7b-q4"]
+stage = "llm"
+description = "Qwen2.5 7B Instruct, Q4_K_M (GPU); published as two parts, llama.cpp loads both from the first"
+license = "Apache-2.0"
+source = "huggingface"
+repo = "Qwen/Qwen2.5-7B-Instruct-GGUF"
+revision = "bb5d59e06d9551d752d08b292a50eb208b07ab1f"
+local_dir = "llm"
+path = "llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+files = { "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf" = 3993201344, "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf" = 689872288 }
+
+["kokoro-v1.0"]
+stage = "tts"
+description = "Kokoro 82M v1.0, ONNX fp32, 5 voices"
+license = "Apache-2.0"
+source = "huggingface"
+repo = "onnx-community/Kokoro-82M-v1.0-ONNX"
+revision = "1939ad2a8e416c0acfeecc08a694d14ef25f2231"
+local_dir = "tts"
+path = "tts/onnx/model.onnx"
+# kokoro-onnx wants every voice in one file; built from voices/*.bin after download
+builds = "voices-v1.0.bin"
+files = { "onnx/model.onnx" = 325532232, "voices/af_heart.bin" = 522240, "voices/af_bella.bin" = 522240, "voices/am_michael.bin" = 522240, "voices/bf_emma.bin" = 522240, "voices/bm_lewis.bin" = 522240 }
+
+["silero-vad"]
+stage = "vad"
+description = "Silero voice activity detection"
+license = "MIT"
+source = "torch_hub"
+repo = "snakers4/silero-vad"
+size = 2300000

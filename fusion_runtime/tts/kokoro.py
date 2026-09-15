@@ -13,7 +13,7 @@ class KokoroTTS(TTSBase):
     espeak needed) and calls the ONNX session directly for full control
     over the style-vector shape.
 
-    Files needed, relative to the model dir (scripts/download_models.py --kokoro):
+    Files needed, relative to the model dir (`frun models pull --kokoro`):
       - tts/onnx/model.onnx
       - tts/voices-v1.0.bin   (assembled voice pack)
     """
@@ -34,7 +34,7 @@ class KokoroTTS(TTSBase):
         if not model_path.exists():
             raise FileNotFoundError(
                 f"Kokoro model not found at {model_path}. "
-                "Run: python3 scripts/download_models.py --kokoro"
+                "Run: frun models pull --kokoro"
             )
         
         # Resolve voices pack: explicit path, else next to model or one level up
@@ -50,7 +50,7 @@ class KokoroTTS(TTSBase):
             raise FileNotFoundError(
                 f"Kokoro voices pack (voices-v1.0.bin) not found in any of: "
                 f"{[str(c) for c in candidates]}. "
-                "Run: python3 scripts/download_models.py --kokoro"
+                "Run: frun models pull --kokoro"
             )
         self._voices_path = str(voices)
         

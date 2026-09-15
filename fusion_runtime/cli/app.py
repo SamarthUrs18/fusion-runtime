@@ -1,6 +1,10 @@
 """The Typer app every `frun` command registers on."""
 import typer
 
+from fusion_runtime.cli.doctor import doctor
+from fusion_runtime.cli.models import models_app
+from fusion_runtime.cli.talk import talk
+from fusion_runtime.cli.up import up
 from fusion_runtime.cli.version import version
 
 app = typer.Typer(
@@ -20,4 +24,8 @@ def _root() -> None:
     pass
 
 
+app.command()(up)
+app.command()(talk)
+app.add_typer(models_app, name="models")
+app.command()(doctor)
 app.command()(version)

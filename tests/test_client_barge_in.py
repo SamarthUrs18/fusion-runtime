@@ -1,6 +1,6 @@
 """
-Tests for the reference client's interruption handling
-(examples/websocket_client.py).
+Tests for the `frun talk` client's interruption handling
+(fusion_runtime/cli/_talk_client.py).
 
 The audio side — echo cancellation, instant flush, the send gate — is tested
 in test_duplex_audio.py. What's left in the client is small but easy to get
@@ -9,14 +9,10 @@ when the bot is audible, so interruptions keep working until the speaker
 actually goes quiet rather than only until the reply finishes generating.
 """
 import json
-import os
-import sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples"))
-
-from websocket_client import PlaybackReporter, ReplyGate  # noqa: E402
+from fusion_runtime.cli._talk_client import PlaybackReporter, ReplyGate
 
 
 class TestReplyGate:

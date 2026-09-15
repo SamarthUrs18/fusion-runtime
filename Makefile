@@ -8,7 +8,7 @@ help:
 	@echo "Commands:"
 	@echo "  install         Install production dependencies"
 	@echo "  install-dev     Install with dev dependencies"
-	@echo "  download-models Download all models to /models"
+	@echo "  download-models Download the development profile's models (frun models pull)"
 	@echo "  run             Run with Docker Compose (GPU)"
 	@echo "  run-cpu         Run CPU-only with Docker Compose"
 	@echo "  test            Run tests"
@@ -25,7 +25,7 @@ install-dev:
 	pip install -e ".[dev]"
 
 download-models:
-	python scripts/download_models.py --all
+	frun models pull
 
 run:
 	cd docker && docker-compose up -d
@@ -34,7 +34,7 @@ run-cpu:
 	cd docker && docker-compose up fusion-runtime-cpu
 
 run-native:
-	python3 -m uvicorn fusion_runtime.server:app --host 0.0.0.0 --port 8000
+	frun up
 
 test:
 	pytest tests/ -v
@@ -72,10 +72,10 @@ shell:
 
 # Model shortcuts
 download-whisper:
-	python scripts/download_models.py --whisper
+	frun models pull --whisper
 
 download-llm:
-	python scripts/download_models.py --llm
+	frun models pull --llm
 
 download-kokoro:
-	python scripts/download_models.py --kokoro
+	frun models pull --kokoro
