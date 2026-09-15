@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  fusion-runtime:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime
+    image: fusion-runtime:latest
+    container_name: fusion-runtime
+    runtime: nvidia
+    environment:
+      - FUSION_CONFIG=production
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ../models:/models:ro
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=5).raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # For local development with CPU only
+  fusion-runtime-cpu:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+    image: fusion-runtime-cpu:latest
+    container_name: fusion-runtime-cpu
+    environment:
+      - FUSION_CONFIG=development
+    volumes:
+      - ../models:/models:ro
+      - ./logs:/app/logs
+    ports:
+      - "8001:8000"
+    restart: unless-stopped

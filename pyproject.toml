@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fusion-runtime"
+version = "0.1.0"
+description = "Low-latency voice AI inference runtime (STT→LLM→TTS <500ms)"
+readme = "README.md"
+license = {text = "AGPL-3.0-or-later"}
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    "numpy>=1.26.0",
+    "scipy>=1.13.0",
+    "soundfile>=0.12.1",
+    "websockets>=12.0",
+    "aiohttp>=3.9.0",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27.0",
+    "faster-whisper>=1.1.0",
+    "llama-cpp-python>=0.2.80",
+    "onnxruntime>=1.18.0",
+    # torch/torchaudio MUST stay on the same version — torchaudio's
+    # compiled extension is ABI-locked to a specific torch release, and an
+    # unconstrained ">=" on both let pip resolve them independently on a
+    # fresh install, drifting apart (torch 2.9.1 + torchaudio 2.11.0 in
+    # practice) and silently breaking Silero VAD load with an
+    # `OSError: ... Symbol not found` that's easy to miss since it's
+    # caught and treated as "VAD unavailable" rather than crashing loudly.
+    "torch==2.9.1",
+    "torchaudio==2.9.1",
+    "huggingface-hub>=0.23.0",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "llama-cpp-python[cuda]>=0.2.80",
+    "onnxruntime-gpu>=1.18.0",
+    # Keep in lockstep with the base torch/torchaudio pin above — same
+    # ABI-matching reasoning applies regardless of CPU vs CUDA build.
+    "torch[cuda]==2.9.1",
+    "torchaudio[cuda]==2.9.1",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "pre-commit>=3.6.0",
+]
+examples = [
+    # examples/websocket_client.py — live mic/speaker test client
+    "sounddevice>=0.4.6",
+]
+all = [
+    "fusion-runtime[cuda]",
+    "fusion-runtime[dev]",
+    "fusion-runtime[examples]",
+]
+
+[project.urls]
+Homepage = "https://fusion-runtime.dev"
+Repository = "https://github.com/fusion-runtime/fusion-runtime"
+Documentation = "https://fusion-runtime.dev/docs"
+Issues = "https://github.com/fusion-runtime/fusion-runtime/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fusion_runtime*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "T20"]
+ignore = ["E501", "B008"]
+src = ["fusion_runtime"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
