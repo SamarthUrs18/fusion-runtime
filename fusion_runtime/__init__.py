@@ -1,32 +1,50 @@
 """
 fusion-runtime: Low-latency voice AI inference runtime.
 """
-from fusion_runtime.config import (
-    PipelineConfig,
-    STTConfig,
-    LLMConfig,
-    TTSConfig,
-    VADConfig,
-    TurnDetectionConfig,
-    Provider,
-    DEVELOPMENT_CONFIG,
-    PRODUCTION_CONFIG,
-    HYBRID_CONFIG,
-)
-from fusion_runtime.engine import PipelineOrchestrator, run_single_turn
+import importlib
+from typing import TYPE_CHECKING
 
 __version__ = "0.1.0"
-__all__ = [
-    "PipelineConfig",
-    "STTConfig",
-    "LLMConfig", 
-    "TTSConfig",
-    "VADConfig",
-    "TurnDetectionConfig",
-    "Provider",
-    "DEVELOPMENT_CONFIG",
-    "PRODUCTION_CONFIG",
-    "HYBRID_CONFIG",
-    "PipelineOrchestrator",
-    "run_single_turn",
-]
+
+# Public names load on first use, so light entry points like `frun --help`
+# don't pull in pydantic, numpy and the whole pipeline just by importing
+# the package. `from fusion_runtime import PipelineOrchestrator` still works.
+_EXPORTS = {
+    "PipelineConfig": "fusion_runtime.config",
+    "STTConfig": "fusion_runtime.config",
+    "LLMConfig": "fusion_runtime.config",
+    "TTSConfig": "fusion_runtime.config",
+    "VADConfig": "fusion_runtime.config",
+    "TurnDetectionConfig": "fusion_runtime.config",
+    "Provider": "fusion_runtime.config",
+    "DEVELOPMENT_CONFIG": "fusion_runtime.config",
+    "PRODUCTION_CONFIG": "fusion_runtime.config",
+    "HYBRID_CONFIG": "fusion_runtime.config",
+    "PipelineOrchestrator": "fusion_runtime.engine",
+    "run_single_turn": "fusion_runtime.engine",
+}
+__all__ = list(_EXPORTS)
+
+if TYPE_CHECKING:  # let editors and type checkers see the real names
+    from fusion_runtime.config import (
+        DEVELOPMENT_CONFIG,
+        HYBRID_CONFIG,
+        PRODUCTION_CONFIG,
+        LLMConfig,
+        PipelineConfig,
+        Provider,
+        STTConfig,
+        TTSConfig,
+        TurnDetectionConfig,
+        VADConfig,
+    )
+    from fusion_runtime.engine import PipelineOrchestrator, run_single_turn
+
+
+def __getattr__(name: str):
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module 'fusion_runtime' has no attribute {name!r}")
+    value = getattr(importlib.import_module(module), name)
+    globals()[name] = value  # cache so the lookup happens once
+    return value
