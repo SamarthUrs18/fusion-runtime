@@ -56,7 +56,9 @@ class KokoroTTS(TTSBase):
         
         # Official wrapper: gives us tokenizer + session + voices,
         # but we run inference ourselves for correct style rank.
-        self._kokoro = Kokoro(str(model_path), self._voices_path)
+        self._kokoro = await asyncio.get_running_loop().run_in_executor(
+            None, Kokoro, str(model_path), self._voices_path
+        )
         
         # Warmup inference
         await self.synthesize("Warmup.")

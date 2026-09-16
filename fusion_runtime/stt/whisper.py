@@ -17,7 +17,21 @@ class FasterWhisperSTT(STTBase):
         except Exception:
             return False
     
+    def _transcribe_sync(self, audio, **options):
+        """Transcribe and fully decode. Run in a worker thread.
+
+        faster-whisper's transcribe() returns a lazy generator: the decoding
+        happens while iterating the segments. Iterating them back on the event
+        loop froze the whole server for ~200 ms per window, so the text is
+        joined here, inside the thread.
+        """
+        segments, info = self.model.transcribe(audio, **options)
+        return " ".join(segment.text for segment in segments), info
+
     async def _warmup_impl(self):
+        await asyncio.get_running_loop().run_in_executor(None, self._load_and_warm_sync)
+
+    def _load_and_warm_sync(self):
         from faster_whisper import WhisperModel
         
         # Resolve device/compute_type ("auto" adapts to the machine)
@@ -45,8 +59,7 @@ class FasterWhisperSTT(STTBase):
         buf = io.BytesIO()
         sf.write(buf, dummy, 16000, format="WAV")
         buf.seek(0)
-        segments, _ = self.model.transcribe(buf, language=self.config.language)
-        list(segments)  # Consume
+        self._transcribe_sync(buf, language=self.config.language)
     
     async def transcribe_stream(
         self,
@@ -99,11 +112,11 @@ class FasterWhisperSTT(STTBase):
                 window_audio = bytes(audio_buffer[start_idx:])
                 audio_np = np.frombuffer(window_audio, dtype=np.int16).astype(np.float32) / 32768.0
                 
-                # Run in thread pool to avoid blocking
-                loop = asyncio.get_event_loop()
-                segments, info = await loop.run_in_executor(
+                # Run in thread pool to avoid blocking (decoding included)
+                loop = asyncio.get_running_loop()
+                text, info = await loop.run_in_executor(
                     None,
-                    lambda: self.model.transcribe(
+                    lambda: self._transcribe_sync(
                         audio_np,
                         language=self.config.language,
                         beam_size=self.config.beam_size,
@@ -111,8 +124,6 @@ class FasterWhisperSTT(STTBase):
                         condition_on_previous_text=False,  # Critical for streaming
                     )
                 )
-                
-                text = " ".join([s.text for s in segments])
                 latency = (time.perf_counter() - start) * 1000
                 
                 # Determine if this looks like a final result
@@ -151,18 +162,16 @@ class FasterWhisperSTT(STTBase):
             remaining_audio = bytes(audio_buffer[start_idx:])
             audio_np = np.frombuffer(remaining_audio, dtype=np.int16).astype(np.float32) / 32768.0
             
-            loop = asyncio.get_event_loop()
-            segments, info = await loop.run_in_executor(
+            loop = asyncio.get_running_loop()
+            text, info = await loop.run_in_executor(
                 None,
-                lambda: self.model.transcribe(
+                lambda: self._transcribe_sync(
                     audio_np,
                     language=self.config.language,
                     beam_size=self.config.beam_size,
                     vad_filter=self.config.vad_filter,
                 )
             )
-            
-            text = " ".join([s.text for s in segments])
             latency = (time.perf_counter() - start) * 1000
             
             yield STTResult(
@@ -190,18 +199,16 @@ class FasterWhisperSTT(STTBase):
         audio_np = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
         
         # Run transcription
-        loop = asyncio.get_event_loop()
-        segments, info = await loop.run_in_executor(
+        loop = asyncio.get_running_loop()
+        text, info = await loop.run_in_executor(
             None,
-            lambda: self.model.transcribe(
+            lambda: self._transcribe_sync(
                 audio_np,
                 language=self.config.language,
                 beam_size=self.config.beam_size,
                 vad_filter=self.config.vad_filter,
             )
         )
-        
-        text = " ".join([s.text for s in segments])
         latency = (time.perf_counter() - start) * 1000
         
         return STTResult(

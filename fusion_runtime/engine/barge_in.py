@@ -1,6 +1,8 @@
 """Interruption ("barge-in") state shared between generation and the watcher."""
 from dataclasses import dataclass, field
+from typing import Optional
 import asyncio
+import time
 
 
 @dataclass
@@ -19,10 +21,18 @@ class BargeInState:
     starts, so a single interruption can't fire twice. The watcher still
     requires *sustained* speech, since a client without echo cancellation
     can't promise echo-free audio — see `_barge_in_watcher`.
+
+    `speaking_since` (time.monotonic) is when the bot became audible. The
+    watcher can lag behind the audio (model loading, a slow moment, audio
+    sent faster than real time), so it compares each frame's *arrival* time
+    against this, rather than asking whether the bot is speaking at the
+    moment the frame gets processed. Otherwise the user's own words from
+    just before the reply started count as talking over the bot.
     """
     generating: bool = False
     playing: bool = False
     interrupted: asyncio.Event = field(default_factory=asyncio.Event)
+    speaking_since: Optional[float] = None
     _fired: bool = False
 
     @property
@@ -32,6 +42,7 @@ class BargeInState:
     def mark_speaking(self):
         self.generating = True
         self._fired = False
+        self.speaking_since = time.monotonic()
         self.interrupted.clear()
 
     def mark_idle(self):
@@ -39,7 +50,11 @@ class BargeInState:
         self.interrupted.clear()
 
     def set_playing(self, playing: bool):
+        if playing and not self.generating and not self.playing and self.speaking_since is None:
+            self.speaking_since = time.monotonic()
         self.playing = playing
+        if not playing and not self.generating:
+            self.speaking_since = None
 
     def fire(self):
         """Record an interruption: cancels in-flight generation and stops

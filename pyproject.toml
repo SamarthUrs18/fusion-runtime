@@ -38,6 +38,9 @@ dependencies = [
     "huggingface-hub>=0.23.0",
     # CLI (`frun`)
     "typer>=0.12",
+    # Telemetry: /metrics endpoint and process resource metrics
+    "prometheus-client>=0.20",
+    "psutil>=5.9",
 ]
 
 [project.scripts]

@@ -74,9 +74,51 @@ class PlaybackReporter:
         return json.dumps({"type": "playback", "playing": playing})
 
 
+def format_turn_summary(summary: dict) -> str:
+    """One line per turn: the numbers that explain how it felt."""
+    def ms(key: str) -> str:
+        value = summary.get(key)
+        return f"{value:.0f}ms" if value is not None else "n/a"
+
+    parts = []
+    if summary.get("ttfa_ms") is not None:
+        parts.append(f"TTFA {ms('ttfa_ms')}")
+    parts.append(f"response {ms('response_ms')}")
+    if summary.get("end_of_turn_wait_ms") is not None:
+        parts.append(f"end-of-turn {ms('end_of_turn_wait_ms')}")
+    if summary.get("stt_transcribe_ms") is not None:
+        parts.append(f"stt {ms('stt_transcribe_ms')}")
+    if summary.get("llm_first_token_ms") is not None:
+        rate = f" {summary['llm_tokens_per_second']:.0f} tok/s" if summary.get("llm_tokens_per_second") else ""
+        parts.append(f"llm {ms('llm_first_token_ms')}{rate}")
+    if summary.get("tts_first_chunk_ms") is not None:
+        parts.append(f"tts {ms('tts_first_chunk_ms')}")
+    if summary.get("playback_delay_ms") is not None:
+        parts.append(f"playback +{ms('playback_delay_ms')}")
+    if summary.get("interrupted"):
+        parts.append(f"interrupted (stopped in {ms('interruption_stop_ms')})")
+    outcome = summary.get("outcome", "?")
+    return f"📊 {outcome}: " + " · ".join(parts)
+
+
+def format_timeline(timeline: list) -> str:
+    return "\n".join(f"     {step['t_ms']:>8.0f} ms  {step['event']}" for step in timeline)
+
+
+def format_error(msg: dict) -> str:
+    stage = f"[{msg['stage']}] " if msg.get("stage") else ""
+    line = f"❌ {stage}{msg.get('code', 'error')}: {msg.get('message', '')}"
+    if msg.get("retryable"):
+        line += " (retryable)"
+    if msg.get("fix"):
+        line += f"\n   → {msg['fix']}"
+    return line
+
+
 class VoiceChatClient:
-    def __init__(self, uri: str = DEFAULT_URL, echo_cancellation: bool = True):
+    def __init__(self, uri: str = DEFAULT_URL, echo_cancellation: bool = True, verbose: bool = False):
         self.uri = uri
+        self.verbose = verbose
         self.audio = DuplexAudio(echo_cancellation=echo_cancellation)
         self.replies = ReplyGate()
         self.reporter = PlaybackReporter()
@@ -156,15 +198,20 @@ class VoiceChatClient:
                 cut = " (cut off — you interrupted)" if msg.get("interrupted") else ""
                 print(f"\n🤖 Bot: {msg['text']}{cut}")
         elif mtype == "interrupted":
+            started = time.perf_counter()
             self.audio.flush()
+            flush_ms = (time.perf_counter() - started) * 1000
             self.replies.on_interrupted()
-            print("\n⏹  (you interrupted — bot stopped)")
+            print(f"\n⏹  (you interrupted — bot stopped, speaker cleared in {flush_ms:.1f} ms)")
         elif mtype == "echo_discarded":
             # The server decided a "user" turn was really the bot's own voice
             # and dropped it. Shown so a wrong call is visible too.
             print(f'\n🪞 (server discarded likely self-echo: "{msg.get("text", "")}")')
-        elif mtype == "metrics":
-            parts = [f"{k}={v:.0f}ms" for k, v in msg.items() if k != "type"]
-            print(f"\n📊 {' '.join(parts)}")
+        elif mtype == "turn.trace":
+            print(f"\n{format_turn_summary(msg.get('summary', {}))}")
+            if self.verbose and msg.get("timeline"):
+                print(format_timeline(msg["timeline"]))
+        elif mtype == "error":
+            print(f"\n{format_error(msg)}")
         else:
             print(f"\n[server] {msg}")

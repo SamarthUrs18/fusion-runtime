@@ -1,9 +1,22 @@
 """`frun up`: start the voice server."""
 import os
+from enum import Enum
 
 import typer
 
 from fusion_runtime.cli._common import Profile, short_path
+
+
+class LogFormat(str, Enum):
+    pretty = "pretty"
+    json = "json"
+
+
+class LogLevel(str, Enum):
+    debug = "debug"
+    info = "info"
+    warning = "warning"
+    error = "error"
 
 
 def up(
@@ -12,6 +25,17 @@ def up(
     ),
     port: int = typer.Option(8000, help="Port to listen on."),
     config: Profile = typer.Option(Profile.development, "--config", "-c", help="Which models and devices to use."),
+    log_format: LogFormat = typer.Option(
+        LogFormat.pretty, "--log-format",
+        help="pretty: readable lines for a terminal. json: one JSON object per line, for log collectors and deployments.",
+    ),
+    log_level: LogLevel = typer.Option(
+        LogLevel.info, "--log-level", help="debug adds every partial transcript, audio chunk and client message.",
+    ),
+    log_content: bool = typer.Option(
+        False, "--log-content",
+        help="Include transcripts and replies in logs. Off by default: logs show only text lengths.",
+    ),
 ) -> None:
     """Start the voice server. Talk to it from another terminal with `frun talk`."""
     from fusion_runtime.cli._checks import missing_models, port_in_use
@@ -50,7 +74,14 @@ def up(
         typer.echo("Warning: there's no authentication yet, so anyone who can reach this machine can use it.")
     typer.echo(f"Loading models. Once it says 'Models ready', run `{talk_hint}` in another terminal.\n")
 
-    os.environ["FUSION_CONFIG"] = config.value  # read by the server at startup
+    if log_content:
+        typer.echo("Note: --log-content writes what users say, and the bot's replies, into the logs.")
+    # read by the server at startup
+    os.environ["FUSION_CONFIG"] = config.value
+    os.environ["FUSION_LOG_FORMAT"] = log_format.value
+    os.environ["FUSION_LOG_LEVEL"] = log_level.value
+    os.environ["FUSION_LOG_CONTENT"] = "1" if log_content else "0"
     import uvicorn
 
-    uvicorn.run("fusion_runtime.server:app", host=host, port=port, workers=1)
+    uvicorn.run("fusion_runtime.server:app", host=host, port=port, workers=1,
+                log_level="warning" if log_format is LogFormat.json else "info")

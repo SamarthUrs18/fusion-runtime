@@ -35,7 +35,9 @@ On macOS, allow microphone access for your terminal app (System Settings → Pri
 |---------|--------------|
 | `frun up` | Starts the server on `127.0.0.1:8000`. Checks models are installed and the port is free first |
 | `frun up --config production --host 0.0.0.0 --port 8080` | Production models, reachable from other machines |
-| `frun talk` | Talks to the server with your mic and speakers |
+| `frun up --log-format json` | One JSON log line per event, for deployments and log collectors (see [Observability](#observability)) |
+| `frun talk` | Talks to the server with your mic and speakers, with a one-line latency summary per turn |
+| `frun talk --verbose` | Also prints each turn's full timeline |
 | `frun talk --url ws://host:8080/v1/voice/ws` | Talks to a server elsewhere |
 | `frun models list` | Shows every model, its size, whether it's installed, and which profile uses it |
 | `frun models pull` | Downloads what the development profile needs |
@@ -107,7 +109,7 @@ PipelineConfig(
 LLMConfig(provider="openai", model="...", api_base="http://localhost:8080/v1")  # any OpenAI-compatible server
 ```
 
-Only `FUSION_CONFIG`, `FUSION_MODEL_DIR` and `FUSION_AEC` (`FUSION_AEC=0` is the same as `frun talk --no-aec`) are read today. The other variables in `.env.example` aren't wired up yet.
+Only `FUSION_CONFIG`, `FUSION_MODEL_DIR`, `FUSION_LOG_FORMAT`, `FUSION_LOG_LEVEL`, `FUSION_LOG_CONTENT` (set by `frun up`'s log flags) and `FUSION_AEC` (`FUSION_AEC=0` is the same as `frun talk --no-aec`) are read today. The other variables in `.env.example` aren't wired up yet.
 
 ## Server API
 
@@ -117,9 +119,31 @@ Only `FUSION_CONFIG`, `FUSION_MODEL_DIR` and `FUSION_AEC` (`FUSION_AEC=0` is the
 | `POST /v1/voice/chat` | One turn: base64 audio in, base64 audio out |
 | `POST /v1/voice/stream` | One turn, streamed PCM response |
 | `WS /v1/voice/ws` | Real-time conversation: raw 16 kHz PCM in, 24 kHz PCM and JSON events out |
-| `GET /metrics` | P50/P99 latency over recent turns |
+| `GET /metrics` | Prometheus metrics (see [Observability](#observability)) |
+| `GET /v1/metrics/summary` | P50/P99 of recent single-shot runs, as JSON |
 
 There's no authentication yet, which is why `frun up` only listens on `127.0.0.1` unless you pass `--host`.
+
+WebSocket clients receive, besides audio: `transcript`, `response`, `interrupted`, `echo_discarded`, `turn.trace` (every turn's summary and timeline) and `error` (`code`, `message`, `stage`, `retryable`, `fix`; never a stack trace).
+
+## Observability
+
+Every stage emits structured events with a timestamp, session id, turn id, stage, model and duration, so a deployed agent never runs blind.
+
+```
+20:47:49.441  95b134d2 t1   vad      speech_start       audio_offset_ms=192 probability=0.88
+20:47:52.162  95b134d2 t1   turn     end_detected       reason=silence sounded_complete=True wait_ms=269
+20:47:52.334  95b134d2 t1   llm      first_token        171ms runtime=llama_cpp model=llm/qwen2.5-0.5b-instruct-q4_k_m.gguf
+20:47:52.670  95b134d2 t1   tts      first_chunk        326ms audio_ms=2525
+20:47:52.671  95b134d2 t1   audio    first_sent         response_ms=509 ttfa_ms=778
+20:47:55.980  95b134d2 t1   turn t1 completed · TTFA 778ms · response 509ms · end-of-turn wait 269ms · llm first 171ms, 91 tok/s · tts first 337ms, rtf 0.24
+```
+
+- **Logs:** `frun up --log-format pretty|json`, `--log-level debug|info|warning|error`. Errors include a stable `code`, whether retrying can help, a suggested fix, and the stack trace (server logs only).
+- **Private by default:** logs record text *lengths*, not what people said. `--log-content` includes transcripts and replies. API keys are always redacted.
+- **Per turn:** time to first audio (TTFA, from the end of the user's speech), end-of-turn wait, transcription delay, speech-to-text time, LLM time to first token and tokens per second, TTS time to first audio and real-time factor, playback start, interruptions and how fast generation stopped. Speech timings use when audio *arrived*, so they stay correct when the server is busy.
+- **`GET /metrics` (Prometheus):** latency histograms for the numbers above, turns by outcome, errors by stage and code, active and ended sessions, loaded models and load times, interruptions, echo rejections, event-loop lag and stalls, process memory, CPU and threads, and GPU memory when CUDA is in use.
+- **Event-loop monitor:** warns whenever something blocks the server's event loop for over 100 ms, since that freezes audio input and interruptions for every conversation.
 
 ## Performance
 
@@ -155,13 +179,6 @@ fusion_runtime/
 
 `docker/` and `modal_deploy.py` exist but haven't been verified yet.
 
-## Roadmap
-
-- **Phase 1, in progress:** `frun` CLI (`models`, `up`, `talk`, `doctor` done; `deploy --target modal` next) and the first GPU measurements
-- **Phase 2:** many conversations per GPU: LLM server sidecar, per-call sessions, admission control
-- **Phase 3:** agents as Python files (`frun up agent.py`): prompts, variables, hooks and tool calling
-- **Phase 4:** deploy environments (`fusion.toml`) and a model picker
-- **Then:** browser/app client, phone calls, managed cloud
 
 ## License
 

@@ -26,6 +26,9 @@ def talk(
         False, "--no-aec",
         help="Turn off echo cancellation. The mic is then muted while the bot talks, so you can't interrupt.",
     ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Print each turn's full timeline, not just the one-line summary.",
+    ),
 ) -> None:
     """Talk to the server with your microphone and speakers. You can interrupt the bot."""
     if not _audio_available():
@@ -42,7 +45,7 @@ def talk(
     if sys.platform == "darwin":
         typer.echo("If the mic bar never moves: System Settings → Privacy & Security → Microphone → allow your terminal.")
 
-    client = _talk_client.VoiceChatClient(uri=url, echo_cancellation=echo_cancellation)
+    client = _talk_client.VoiceChatClient(uri=url, echo_cancellation=echo_cancellation, verbose=verbose)
     try:
         asyncio.run(client.run())
     except KeyboardInterrupt:

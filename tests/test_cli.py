@@ -196,7 +196,8 @@ def test_up_starts_server_with_chosen_profile(monkeypatch):
     port = _free_port()
     result = runner.invoke(app, ["up", "--port", str(port), "--config", "production"])
     assert result.exit_code == 0, result.output
-    assert calls == [("fusion_runtime.server:app", {"host": "127.0.0.1", "port": port, "workers": 1})]
+    assert calls == [("fusion_runtime.server:app",
+                      {"host": "127.0.0.1", "port": port, "workers": 1, "log_level": "info"})]
     assert os.environ["FUSION_CONFIG"] == "production"
     assert f"frun talk --url ws://localhost:{port}/v1/voice/ws" in result.output
 
@@ -253,8 +254,8 @@ class _FakeClient:
     instances = []
     raise_on_run = None
 
-    def __init__(self, uri, echo_cancellation):
-        self.uri, self.echo_cancellation = uri, echo_cancellation
+    def __init__(self, uri, echo_cancellation, verbose=False):
+        self.uri, self.echo_cancellation, self.verbose = uri, echo_cancellation, verbose
         _FakeClient.instances.append(self)
 
     async def run(self):
@@ -320,3 +321,52 @@ def test_version_comes_only_from_pyproject():
     assert fusion_runtime.__version__ == declared
     assert package_version() == declared
     assert server_app.version == declared
+
+
+def test_up_passes_log_settings_to_the_server(monkeypatch):
+    _all_models_installed(monkeypatch)
+    calls = _record_uvicorn(monkeypatch)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    for var in ("FUSION_CONFIG", "FUSION_LOG_FORMAT", "FUSION_LOG_LEVEL", "FUSION_LOG_CONTENT"):
+        monkeypatch.setenv(var, "unset-before-test")
+    result = runner.invoke(app, ["up", "--log-format", "json", "--log-level", "debug", "--log-content"])
+    assert result.exit_code == 0, result.output
+    assert (os.environ["FUSION_LOG_FORMAT"], os.environ["FUSION_LOG_LEVEL"], os.environ["FUSION_LOG_CONTENT"]) == ("json", "debug", "1")
+    assert "writes what users say" in result.output
+    assert calls[0][1]["log_level"] == "warning"  # JSON mode keeps uvicorn's own text logs quiet
+
+
+def test_up_defaults_keep_content_out_of_logs(monkeypatch):
+    _all_models_installed(monkeypatch)
+    _record_uvicorn(monkeypatch)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    for var in ("FUSION_CONFIG", "FUSION_LOG_FORMAT", "FUSION_LOG_LEVEL", "FUSION_LOG_CONTENT"):
+        monkeypatch.setenv(var, "unset-before-test")
+    runner.invoke(app, ["up"])
+    assert (os.environ["FUSION_LOG_FORMAT"], os.environ["FUSION_LOG_CONTENT"]) == ("pretty", "0")
+
+
+def test_talk_passes_verbose(monkeypatch):
+    _fake_client(monkeypatch)
+    runner.invoke(app, ["talk", "--verbose"])
+    assert _FakeClient.instances[-1].verbose is True
+
+
+def test_talk_formats_turn_summary_timeline_and_errors():
+    summary = {"outcome": "completed", "ttfa_ms": 436.2, "response_ms": 310.0, "end_of_turn_wait_ms": 204.0,
+               "stt_transcribe_ms": 208.0, "llm_first_token_ms": 115.0, "llm_tokens_per_second": 58.3,
+               "tts_first_chunk_ms": 220.0, "playback_delay_ms": 35.0}
+    line = _talk_client.format_turn_summary(summary)
+    assert line.startswith("📊 completed: TTFA 436ms · response 310ms")
+    assert "llm 115ms 58 tok/s" in line and "playback +35ms" in line
+
+    interrupted = _talk_client.format_turn_summary({"outcome": "interrupted", "response_ms": 500, "interrupted": True,
+                                                   "interruption_stop_ms": 12})
+    assert "interrupted (stopped in 12ms)" in interrupted and "TTFA" not in interrupted
+
+    timeline = _talk_client.format_timeline([{"event": "speech_start", "t_ms": 0.0}, {"event": "audio_first_sent", "t_ms": 1436.4}])
+    assert "1436 ms  audio_first_sent" in timeline
+
+    error = _talk_client.format_error({"type": "error", "code": "auth_failed", "stage": "llm",
+                                       "message": "401", "fix": "Check the API key", "retryable": False})
+    assert error == "❌ [llm] auth_failed: 401\n   → Check the API key"
