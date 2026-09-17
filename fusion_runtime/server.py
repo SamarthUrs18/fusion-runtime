@@ -16,7 +16,7 @@ import time
 import uuid
 
 from fusion_runtime import __version__
-from fusion_runtime.config import DEVELOPMENT_CONFIG, PRODUCTION_CONFIG
+from fusion_runtime.config import load_profile
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator
 from fusion_runtime.telemetry import LoopMonitor, SessionTrace, describe_error, session_scope, telemetry
 
@@ -38,10 +38,7 @@ async def startup():
     # Use development config by default (CPU-friendly small models),
     # production requires explicit FUSION_CONFIG=production
     config_name = os.getenv("FUSION_CONFIG", "development")
-    config = {
-        "development": DEVELOPMENT_CONFIG,
-        "production": PRODUCTION_CONFIG,
-    }.get(config_name, DEVELOPMENT_CONFIG)
+    config = load_profile(config_name)  # plus FUSION_LLM_URL / _MODEL / _API_KEY_ENV overrides
     telemetry.emit(
         "server.start", stage="server", version=__version__, profile=config_name, pid=os.getpid(),
         python=platform.python_version(), platform=f"{platform.system()} {platform.machine()}",

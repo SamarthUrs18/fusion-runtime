@@ -6,8 +6,8 @@ Cloud providers require explicit opt-in.
 """
 import os
 from pathlib import Path
-from pydantic import BaseModel, Field
-from typing import Literal, Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import Any, Dict, Literal, Optional
 from enum import Enum
 
 
@@ -68,7 +68,21 @@ class Provider(str, Enum):
     PUNCTUATION = "punctuation"
 
 
-class STTConfig(BaseModel):
+class _StageRuntime(BaseModel):
+    """Naming a runtime directly, instead of through `provider`.
+
+    runtime: a built-in name (llama_cpp, ctranslate2, onnx, openai_http), a
+    plugin name or "module:Class". When set, `model` can be any model
+    reference the resolver understands (catalog id, path, hf:owner/repo, URL).
+    family: the model family, for formats that don't describe themselves (ONNX).
+    options: extra settings passed to the runtime as they are.
+    """
+    runtime: Optional[str] = None
+    family: Optional[str] = None
+    options: Dict[str, Any] = Field(default_factory=dict)
+
+
+class STTConfig(_StageRuntime):
     provider: Provider = Provider.FASTER_WHISPER
     model: str = "tiny.en"
     device: str = "auto"  # auto | cpu | cuda — auto falls back to cpu on Mac
@@ -78,7 +92,7 @@ class STTConfig(BaseModel):
     vad_filter: bool = True
 
 
-class LLMConfig(BaseModel):
+class LLMConfig(_StageRuntime):
     provider: Provider = Provider.LLAMA_CPP
     model: str = _LLM_MODEL_7B
     n_ctx: int = 4096
@@ -90,12 +104,23 @@ class LLMConfig(BaseModel):
     max_tokens: int = 512
     # Streaming
     stream: bool = True
-    # API providers
-    api_key: Optional[str] = None
-    api_base: Optional[str] = None
+    # OpenAI-compatible endpoints (provider=openai, or a URL as the model)
+    api_base: Optional[str] = None  # e.g. http://localhost:8000/v1; default https://api.openai.com/v1
+    api_key_env: Optional[str] = None  # name of the environment variable holding the key; never the key itself
+    api_key: Optional[str] = None  # rejected: keys don't belong in config
+
+    @field_validator("api_key")
+    @classmethod
+    def _no_keys_in_config(cls, value):
+        if value is not None:
+            raise ValueError(
+                "don't put API keys in config: export the key in an environment variable "
+                "and set api_key_env to its name (for example api_key_env=\"OPENAI_API_KEY\")"
+            )
+        return value
 
 
-class TTSConfig(BaseModel):
+class TTSConfig(_StageRuntime):
     provider: Provider = Provider.KOKORO
     model: str = _TTS_MODEL
     voice: str = "af_heart"
@@ -196,9 +221,51 @@ PRODUCTION_CONFIG = PipelineConfig(
     tts=TTSConfig(provider=Provider.KOKORO, model=_TTS_MODEL),
 )
 
+# Speech runs locally; the LLM is any OpenAI-compatible endpoint (hosted API, or
+# vLLM / llama-server on another machine). Point it elsewhere with FUSION_LLM_URL.
 HYBRID_CONFIG = PipelineConfig(
-    stt=STTConfig(provider=Provider.FASTER_WHISPER, model="tiny.en", device="cuda"),
-    llm=LLMConfig(provider=Provider.OPENAI, model="gpt-4o-mini", api_key="${OPENAI_API_KEY}"),
+    stt=STTConfig(provider=Provider.FASTER_WHISPER, model="tiny.en"),
+    llm=LLMConfig(provider=Provider.OPENAI, model="gpt-4o-mini", api_key_env="OPENAI_API_KEY", max_tokens=256),
     tts=TTSConfig(provider=Provider.KOKORO, model=_TTS_MODEL),
     allow_cloud_fallback=True,
 )
+
+PROFILES = {"development": DEVELOPMENT_CONFIG, "production": PRODUCTION_CONFIG, "hybrid": HYBRID_CONFIG}
+
+# Environment variables that point any profile's LLM at an OpenAI-compatible endpoint
+LLM_URL_ENV, LLM_MODEL_ENV, LLM_KEY_ENV_ENV = "FUSION_LLM_URL", "FUSION_LLM_MODEL", "FUSION_LLM_API_KEY_ENV"
+
+
+def with_env_overrides(config: PipelineConfig, environ=None) -> PipelineConfig:
+    """Apply FUSION_LLM_URL / FUSION_LLM_MODEL / FUSION_LLM_API_KEY_ENV to a profile.
+
+    FUSION_LLM_URL=http://localhost:8080/v1 frun up   → the LLM is served by that endpoint
+    FUSION_LLM_API_KEY_ENV=GROQ_API_KEY               → the key is read from $GROQ_API_KEY
+    """
+    env = os.environ if environ is None else environ
+    url = env.get(LLM_URL_ENV)
+    if not url:
+        if env.get(LLM_MODEL_ENV) or env.get(LLM_KEY_ENV_ENV):
+            if config.llm.provider != Provider.OPENAI and not config.llm.runtime:
+                raise ValueError(f"{LLM_MODEL_ENV} and {LLM_KEY_ENV_ENV} need {LLM_URL_ENV} (the endpoint to use)")
+            updates = {}
+            if env.get(LLM_MODEL_ENV):
+                updates["model"] = env[LLM_MODEL_ENV]
+            if env.get(LLM_KEY_ENV_ENV):
+                updates["api_key_env"] = env[LLM_KEY_ENV_ENV]
+            return config.model_copy(update={"llm": config.llm.model_copy(update=updates)})
+        return config
+    model = env.get(LLM_MODEL_ENV)
+    if not model:
+        raise ValueError(f"{LLM_URL_ENV} is set; also set {LLM_MODEL_ENV} to the model's name on that server")
+    llm = config.llm.model_copy(update={
+        "provider": Provider.OPENAI, "runtime": None, "api_base": url, "model": model,
+        "api_key_env": env.get(LLM_KEY_ENV_ENV) or None,
+    })
+    return config.model_copy(update={"llm": llm})
+
+
+def load_profile(name: str, environ=None) -> PipelineConfig:
+    if name not in PROFILES:
+        raise ValueError(f"unknown profile {name!r}; choose one of: {', '.join(PROFILES)}")
+    return with_env_overrides(PROFILES[name], environ)

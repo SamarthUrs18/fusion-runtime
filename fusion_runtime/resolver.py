@@ -129,32 +129,42 @@ def resolve(
 
 
 def resolve_stage_config(stage: Stage, stage_config, *, catalog=None, root: Optional[Path] = None) -> ResolvedModel:
-    """Resolve a stage of today's PipelineConfig (provider + model) to a runtime.
+    """Resolve one stage of a PipelineConfig to a runtime.
 
-    Bridges the provider-based config to runtime names until config names
-    runtimes directly. Only settings are copied into options; API keys are not.
+    A stage names its runtime directly (`runtime=`, with any model reference),
+    or through `provider` (the older form, mapped to a runtime here). Settings
+    become runtime options; API keys never do (only the name of the
+    environment variable holding one).
     """
     from fusion_runtime.config import Provider
 
     provider = stage_config.provider
-    settings = stage_config.model_dump(exclude={"provider", "model", "api_key", "api_base"})
-    language = settings.pop("language", None)
-    if language:
-        settings["language"] = language
+    settings = stage_config.model_dump(
+        exclude={"provider", "model", "api_key", "api_base", "runtime", "family", "options"})
+    settings = {k: v for k, v in settings.items() if v is not None}
+    settings.update(stage_config.options)
+    family = stage_config.family
+    ref = stage_config.model
 
-    if stage == "stt" and provider == Provider.FASTER_WHISPER:
-        ref = stage_config.model
-        if "/" not in ref and not ref.startswith(("~", ".")):
-            ref = f"stt/{ref}"  # faster-whisper size names live under stt/ in the model directory
-        return resolve("stt", ref, runtime="ctranslate2", family="whisper", options=settings, catalog=catalog, root=root)
-    if stage == "llm" and provider == Provider.LLAMA_CPP:
-        return resolve("llm", stage_config.model, runtime="llama_cpp", options=settings, catalog=catalog, root=root)
-    if stage == "llm" and provider == Provider.OPENAI:
-        settings["model_name"] = stage_config.model
-        url = stage_config.api_base or "https://api.openai.com/v1"
+    if stage_config.runtime:
+        return resolve(stage, ref, runtime=stage_config.runtime, family=family, options=settings,
+                       catalog=catalog, root=root)
+    if stage == "llm" and (provider == Provider.OPENAI or ref.startswith(("http://", "https://"))):
+        if ref.startswith(("http://", "https://")):
+            url = ref
+        else:
+            settings["model_name"] = ref
+            url = getattr(stage_config, "api_base", None) or "https://api.openai.com/v1"
         return resolve("llm", url, runtime="openai_http", options=settings, catalog=catalog, root=root)
+    if stage == "stt" and provider == Provider.FASTER_WHISPER:
+        if "/" not in ref and not ref.startswith(("~", ".")) and ref not in (catalog or load_catalog()):
+            ref = f"stt/{ref}"  # faster-whisper size names live under stt/ in the model directory
+        return resolve("stt", ref, runtime="ctranslate2", family=family or "whisper", options=settings,
+                       catalog=catalog, root=root)
+    if stage == "llm" and provider == Provider.LLAMA_CPP:
+        return resolve("llm", ref, runtime="llama_cpp", options=settings, catalog=catalog, root=root)
     if stage == "tts" and provider == Provider.KOKORO:
-        return resolve("tts", stage_config.model, runtime="onnx", family="kokoro", options=settings,
+        return resolve("tts", ref, runtime="onnx", family=family or "kokoro", options=settings,
                        catalog=catalog, root=root)
     raise UnsupportedModel(f"no runtime for provider {getattr(provider, 'value', provider)!r} on the {stage} stage")
 

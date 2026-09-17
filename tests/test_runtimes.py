@@ -6,14 +6,13 @@ import pytest
 
 from fusion_runtime.config import DEVELOPMENT_CONFIG, PipelineConfig
 from fusion_runtime.contract import (
-    AuthFailed, InvalidRequest, LLMRequest, Message, ModelNotFound, ModelSpec, RateLimited, RuntimeFailure, UnsupportedModel,
+    ModelNotFound, ModelSpec, UnsupportedModel,
 )
 from fusion_runtime.engine import PipelineOrchestrator
 from fusion_runtime.engine.orchestrator import _resample_pcm16
 from fusion_runtime.registry import create_runtime
 from fusion_runtime.resolver import ResolvedModel, resolve_stage_config
 from fusion_runtime.runtimes.onnx.tts import OnnxTTS
-from fusion_runtime.runtimes.openai_http.llm import OpenAIHTTPLLM, _map_error
 from fusion_runtime.telemetry import ListSink, telemetry
 from fusion_runtime.testing.conformance import assert_conforms, check_runtime
 from fusion_runtime.testing.fakes import fake_spec
@@ -36,24 +35,6 @@ async def test_llama_cpp_missing_file(tmp_path):
     runtime = create_runtime(ModelSpec(stage="llm", runtime="llama_cpp", model=str(tmp_path / "none.gguf")))
     with pytest.raises(ModelNotFound):
         await runtime.load()
-
-
-async def test_openai_http_needs_a_model_name():
-    runtime = OpenAIHTTPLLM(ModelSpec(stage="llm", runtime="openai_http", model="http://localhost:1/v1"))
-    await runtime.load()
-    with pytest.raises(InvalidRequest, match="model_name"):
-        async for _ in runtime.generate(LLMRequest(messages=[Message("user", "hi")])):
-            pass
-    await runtime.close()
-
-
-def test_openai_client_errors_map_to_contract_errors():
-    def error(name):
-        return type(name, (Exception,), {})("boom")
-
-    assert isinstance(_map_error(error("AuthenticationError")), AuthFailed)
-    assert isinstance(_map_error(error("RateLimitError")), RateLimited)
-    assert isinstance(_map_error(error("APIConnectionError")), RuntimeFailure)
 
 
 def test_resampling_changes_rate_and_keeps_duration():

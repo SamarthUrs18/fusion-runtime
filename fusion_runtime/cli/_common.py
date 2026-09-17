@@ -6,12 +6,14 @@ from pathlib import Path
 class Profile(str, Enum):
     development = "development"
     production = "production"
+    hybrid = "hybrid"  # local speech, LLM from an OpenAI-compatible endpoint
 
 
-def profile_config(profile: Profile):
-    from fusion_runtime.config import DEVELOPMENT_CONFIG, PRODUCTION_CONFIG
+def profile_config(profile: Profile, apply_env: bool = True):
+    """The profile's config; with FUSION_LLM_* overrides applied unless apply_env is False."""
+    from fusion_runtime.config import PROFILES, load_profile
 
-    return {Profile.development: DEVELOPMENT_CONFIG, Profile.production: PRODUCTION_CONFIG}[profile]
+    return load_profile(profile.value) if apply_env else PROFILES[profile.value]
 
 
 def short_path(path: Path) -> str:

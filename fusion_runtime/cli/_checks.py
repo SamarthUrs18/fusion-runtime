@@ -44,13 +44,13 @@ def port_in_use(host: str, port: int) -> bool:
     return False
 
 
-def missing_models(profile) -> List[str]:
+def missing_models(profile, apply_env: bool = True) -> List[str]:
     from fusion_runtime.catalog import entries_for_profile, is_installed
     from fusion_runtime.cli._common import profile_config
     from fusion_runtime.config import model_dir
 
     root = model_dir()
-    return [e.id for e in entries_for_profile(profile_config(profile)) if not is_installed(e, root)]
+    return [e.id for e in entries_for_profile(profile_config(profile, apply_env)) if not is_installed(e, root)]
 
 
 @contextlib.contextmanager
@@ -239,14 +239,14 @@ def check_models() -> List[CheckResult]:
     from fusion_runtime.config import model_dir, model_dir_source
 
     results = [CheckResult(INFO, f"Model directory: {short_path(model_dir())} ({model_dir_source()})")]
-    dev_missing = missing_models(Profile.development)
+    dev_missing = missing_models(Profile.development, apply_env=False)
     if dev_missing:
         results.append(CheckResult(FAIL, f"development profile is missing {', '.join(dev_missing)}",
                                    "frun models pull"))
     else:
         results.append(CheckResult(OK, "development profile: all models installed"))
 
-    prod_missing = missing_models(Profile.production)
+    prod_missing = missing_models(Profile.production, apply_env=False)
     if not prod_missing:
         results.append(CheckResult(OK, "production profile: all models installed"))
     else:
@@ -255,6 +255,63 @@ def check_models() -> List[CheckResult]:
             f"production profile is missing {', '.join(prod_missing)}",
             "frun models pull --config production",
         ))
+    return results
+
+
+# ---- LLM endpoint --------------------------------------------------------------
+
+def check_llm_endpoint() -> List[CheckResult]:
+    """The OpenAI-compatible endpoint FUSION_LLM_URL points at, or else the hybrid profile's.
+
+    Talks to the endpoint only when it's configured for use (FUSION_LLM_URL set)
+    or its key is present; never prints the key.
+    """
+    import asyncio
+
+    from fusion_runtime.config import LLM_URL_ENV, load_profile
+
+    overridden = bool(os.getenv(LLM_URL_ENV))
+    try:
+        llm = load_profile("development" if overridden else "hybrid").llm
+    except ValueError as e:
+        return [CheckResult(FAIL, f"LLM endpoint settings are incomplete: {e}", "Set both FUSION_LLM_URL and FUSION_LLM_MODEL")]
+    url = llm.api_base or "https://api.openai.com/v1"
+    source = LLM_URL_ENV if overridden else "hybrid profile"
+    bad = FAIL if overridden else WARN
+    results = [CheckResult(INFO, f"{source}: {llm.model} at {url}")]
+
+    key_env = llm.api_key_env
+    if key_env:
+        if os.getenv(key_env):
+            results.append(CheckResult(OK, f"API key found in ${key_env}"))
+        else:
+            results.append(CheckResult(
+                bad if overridden else INFO,
+                f"${key_env} isn't set" + ("" if overridden else ": only needed for `frun up --config hybrid`"),
+                f"export {key_env}=<your key>",
+            ))
+            if not overridden:
+                return results
+
+    from fusion_runtime.runtimes.openai_http.llm import probe_endpoint
+
+    report = asyncio.run(probe_endpoint(url, key_env, timeout_s=5.0))
+    if not report.reachable:
+        results.append(CheckResult(bad, str(report.error), "Start the server, or fix the URL"))
+        return results
+    if report.auth_ok is False:
+        results.append(CheckResult(bad, f"{url} rejected the API key", f"Check the key in ${key_env}"))
+        return results
+    results.append(CheckResult(OK, f"{url} is reachable"))
+    listed = report.lists(llm.model)
+    if listed is True:
+        results.append(CheckResult(OK, f"{llm.model} is served there"))
+    elif listed is False:
+        shown = ", ".join(report.models[:5]) + ("…" if len(report.models) > 5 else "")
+        results.append(CheckResult(WARN, f"{llm.model} isn't in the endpoint's model list ({shown})",
+                                   "Set FUSION_LLM_MODEL to one of the listed names"))
+    else:
+        results.append(CheckResult(INFO, "The endpoint doesn't list its models, so the name can't be checked"))
     return results
 
 
@@ -297,6 +354,7 @@ SECTIONS: List[tuple] = [
     ("Libraries", [check_torch_pair, check_silero_loads, check_engines]),
     ("Acceleration", [check_acceleration]),
     ("Models", [check_models]),
+    ("LLM endpoint", [check_llm_endpoint]),
     ("Audio (for frun talk)", [check_audio]),
 ]
 

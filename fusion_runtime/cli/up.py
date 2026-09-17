@@ -36,10 +36,37 @@ def up(
         False, "--log-content",
         help="Include transcripts and replies in logs. Off by default: logs show only text lengths.",
     ),
+    llm_url: str = typer.Option(
+        None, "--llm-url", help="Use an OpenAI-compatible endpoint for the LLM, e.g. http://localhost:8080/v1 "
+                                "(vLLM, llama-server, a hosted API). Also: FUSION_LLM_URL.",
+    ),
+    llm_model: str = typer.Option(None, "--llm-model", help="The model's name on that endpoint. Also: FUSION_LLM_MODEL."),
+    llm_api_key_env: str = typer.Option(
+        None, "--llm-api-key-env", help="Name of the environment variable holding the endpoint's API key "
+                                        "(never the key itself). Also: FUSION_LLM_API_KEY_ENV.",
+    ),
 ) -> None:
     """Start the voice server. Talk to it from another terminal with `frun talk`."""
     from fusion_runtime.cli._checks import missing_models, port_in_use
-    from fusion_runtime.config import model_dir
+    from fusion_runtime.config import LLM_KEY_ENV_ENV, LLM_MODEL_ENV, LLM_URL_ENV, model_dir
+
+    for variable, value in ((LLM_URL_ENV, llm_url), (LLM_MODEL_ENV, llm_model), (LLM_KEY_ENV_ENV, llm_api_key_env)):
+        if value:
+            os.environ[variable] = value  # the server reads these at startup
+    try:
+        from fusion_runtime.cli._common import profile_config
+
+        llm = profile_config(config).llm
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    if llm.api_key_env and not os.getenv(llm.api_key_env):
+        typer.echo(
+            f"Error: the LLM endpoint needs an API key in ${llm.api_key_env}, which isn't set.\n"
+            f"Run: export {llm.api_key_env}=<your key>   (or point --llm-url at a local server)",
+            err=True,
+        )
+        raise typer.Exit(1)
 
     missing = missing_models(config)
     if missing:
@@ -70,6 +97,9 @@ def up(
         talk_host = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
         talk_hint = f"frun talk --url ws://{talk_host}:{port}/v1/voice/ws"
     typer.echo(f"Starting fusion-runtime ({config.value} profile) on http://{host}:{port}")
+    if llm.api_base or llm.provider.value == "openai":
+        typer.echo(f"LLM: {llm.model} at {llm.api_base or 'https://api.openai.com/v1'}"
+                   + (f" (key from ${llm.api_key_env})" if llm.api_key_env else ""))
     if host == "0.0.0.0":
         typer.echo("Warning: there's no authentication yet, so anyone who can reach this machine can use it.")
     typer.echo(f"Loading models. Once it says 'Models ready', run `{talk_hint}` in another terminal.\n")

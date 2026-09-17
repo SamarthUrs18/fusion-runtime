@@ -63,7 +63,7 @@ class PipelineOrchestrator:
             capabilities = getattr(runtime, "capabilities", None)
             resolved = self.__dict__.get("resolved_models", {}).get(stage)
             stage_config = getattr(getattr(self, "config", None), stage, None)
-            model = (resolved.catalog_id or resolved.spec.model) if resolved else getattr(stage_config, "model", "")
+            model = _model_label(resolved) if resolved else getattr(stage_config, "model", "")
             schedulers[stage] = ModelScheduler(
                 stage, model=str(model or ""), max_concurrency=getattr(capabilities, "max_concurrency", 1) or 1)
         return schedulers[stage]
@@ -80,7 +80,7 @@ class PipelineOrchestrator:
             # reads file headers (a GGUF vocabulary takes tens of ms): keep it off the event loop
             resolved = await asyncio.get_running_loop().run_in_executor(None, resolve_stage_config, stage, stage_config)
             self.resolved_models[stage] = resolved
-            labels = {"runtime": resolved.spec.runtime, "model": resolved.catalog_id or resolved.spec.model}
+            labels = {"runtime": resolved.spec.runtime, "model": _model_label(resolved)}
             reserved = {"stage", "name", "level", "session_id", "turn_id", "request_id", "duration_ms", "error", "model", "runtime"}
             telemetry.emit("model.resolved", level="debug", stage=stage,
                            **{k: v for k, v in resolved.describe().items() if k not in reserved}, **labels)
@@ -786,13 +786,15 @@ class PipelineOrchestrator:
             resolved = self.__dict__.get("resolved_models", {}).get("llm")
             llm_labels = {
                 "runtime": resolved.spec.runtime if resolved else getattr(getattr(llm_config, "provider", None), "value", None),
-                "model": (resolved.catalog_id or resolved.spec.model) if resolved else getattr(llm_config, "model", None),
+                "model": _model_label(resolved) if resolved else getattr(llm_config, "model", None),
             }
             if turn is not None:
                 turn.mark("llm_request")
                 trace.event("llm.request", turn=turn, stage="llm", messages=len(messages),
                             history_turns=conversation.turns, **llm_labels, **telemetry.content(transcript, "prompt"))
             finish_reason = None
+            # tokens/s is only meaningful when the model decodes while we wait (see Capabilities)
+            measure_decode = getattr(getattr(self.llm, "capabilities", None), "decodes_on_demand", True)
 
             # A new turn has nothing buffered to play, so it's due now. Playback-aware
             # scheduling will move this deadline as the call's unplayed audio changes.
@@ -819,7 +821,7 @@ class PipelineOrchestrator:
                         break
                     except Exception as e:
                         raise tag_stage(e, "llm")
-                    if turn is not None and not first_token:
+                    if turn is not None and not first_token and measure_decode:
                         # Time actually spent waiting on the model for this token. Wall-clock
                         # time would also count TTS synthesis, since the LLM only decodes
                         # when the pipeline asks for the next token.
@@ -1078,6 +1080,11 @@ class PipelineOrchestrator:
             "e2e_p50": sorted([x.e2e_latency_ms for x in m])[len(m)//2],
             "e2e_p99": sorted([x.e2e_latency_ms for x in m])[int(len(m)*0.99)],
         }
+
+
+def _model_label(resolved) -> str:
+    """Short, stable model name for logs and metrics: catalog id, name on the server, or path."""
+    return resolved.catalog_id or resolved.spec.options.get("model_name") or resolved.spec.model
 
 
 def _resample_pcm16(pcm: bytes, rate: int, target: int) -> bytes:

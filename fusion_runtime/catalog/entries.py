@@ -76,17 +76,20 @@ def entries_for_profile(config, catalog: Optional[dict[str, ModelEntry]] = None)
     from fusion_runtime.config import Provider
 
     catalog = catalog or load_catalog()
-    wanted = {
-        "stt": f"stt/{config.stt.model}" if config.stt.provider == Provider.FASTER_WHISPER else None,
-        "llm": config.llm.model if config.llm.provider == Provider.LLAMA_CPP else None,
-        "tts": config.tts.model if config.tts.provider == Provider.KOKORO else None,
-    }
+    local_providers = {"stt": Provider.FASTER_WHISPER, "llm": Provider.LLAMA_CPP, "tts": Provider.KOKORO}
+    wanted = {}
+    for stage, provider in local_providers.items():
+        stage_config = getattr(config, stage)
+        ref = stage_config.model
+        if ref.startswith(("http://", "https://")) or (not stage_config.runtime and stage_config.provider != provider):
+            continue  # served by an endpoint, or by something the catalog doesn't cover
+        wanted[stage] = {ref, f"stt/{ref}"} if stage == "stt" else {ref}
     needed = []
     for entry in catalog.values():
         if entry.stage == "vad":
             if config.vad.provider == Provider.SILERO:
                 needed.append(entry)
-        elif wanted.get(entry.stage) and entry.path == wanted[entry.stage]:
+        elif entry.stage in wanted and (entry.path in wanted[entry.stage] or entry.id in wanted[entry.stage]):
             needed.append(entry)
     return sorted(needed, key=lambda e: STAGES.index(e.stage))
 

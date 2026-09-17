@@ -139,6 +139,9 @@ class Capabilities:
     max_concurrency: int = 1  # requests in flight at once on this loaded model
     memory_bytes: int = 0  # estimate once loaded, for admission control and `frun doctor`
     tools: bool = False  # LLM: accepts tool definitions and emits tool calls
+    decodes_on_demand: bool = True  # LLM: works only while the caller waits for the next chunk (in process).
+    # False for remote servers, which generate ahead into a buffer: time spent waiting per chunk then
+    # measures delivery, not model speed, so the engine doesn't report tokens per second for them.
 
     def __post_init__(self) -> None:
         if self.max_batch < 1 or self.max_concurrency < 1:

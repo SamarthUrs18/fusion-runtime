@@ -93,23 +93,43 @@ Choose a profile with `frun up --config` (or `FUSION_CONFIG` if you start the se
 |---------|-----|-----|-----|-----|
 | `development` (default) | Whisper tiny, CPU int8 | Qwen2.5 0.5B, CPU | Kokoro | Laptops, 8 GB RAM |
 | `production` | Whisper tiny, CUDA | Qwen2.5 7B, all GPU layers | Kokoro | NVIDIA GPU |
+| `hybrid` | Whisper tiny | `gpt-4o-mini` over HTTP (key from `$OPENAI_API_KEY`) | Kokoro | Speech local, LLM elsewhere |
 
 ```bash
 frun up --config production
 ```
 
-In Python, model paths are relative to the model directory:
+### LLM from an OpenAI-compatible endpoint
 
-```python
-from fusion_runtime import PipelineConfig, LLMConfig
+Speech stays local; the LLM comes from vLLM, llama-server, Ollama or a hosted API:
 
-PipelineConfig(
-    llm=LLMConfig(provider="llama_cpp", model="llm/qwen2.5-0.5b-instruct-q4_k_m.gguf"),
-)
-LLMConfig(provider="openai", model="...", api_base="http://localhost:8080/v1")  # any OpenAI-compatible server
+```bash
+frun up --llm-url http://localhost:8080/v1 --llm-model my-model
+export GROQ_API_KEY=...        # the key stays in the environment
+frun up --llm-url https://api.groq.com/openai/v1 --llm-model <model> --llm-api-key-env GROQ_API_KEY
 ```
 
-Only `FUSION_CONFIG`, `FUSION_MODEL_DIR`, `FUSION_LOG_FORMAT`, `FUSION_LOG_LEVEL`, `FUSION_LOG_CONTENT` (set by `frun up`'s log flags) and `FUSION_AEC` (`FUSION_AEC=0` is the same as `frun talk --no-aec`) are read today. The other variables in `.env.example` aren't wired up yet.
+The same settings as environment variables: `FUSION_LLM_URL`, `FUSION_LLM_MODEL`, `FUSION_LLM_API_KEY_ENV`.
+API keys are never accepted in config, only the *name* of the variable holding one. `frun doctor` checks
+that the key is set, the endpoint answers and it serves the model.
+
+### In Python
+
+A stage names its runtime and any model reference (catalog id, path, `hf:owner/repo`, URL):
+
+```python
+from fusion_runtime import PipelineConfig, LLMConfig, STTConfig
+
+PipelineConfig(
+    stt=STTConfig(model="whisper-tiny.en"),
+    llm=LLMConfig(runtime="llama_cpp", model="qwen2.5-0.5b-q4", n_ctx=2048),
+)
+LLMConfig(runtime="openai_http", model="http://localhost:8080/v1",
+          api_key_env="MY_KEY", options={"model_name": "my-model"})
+LLMConfig(runtime="my_package.llm:MyRuntime", model="anything")  # a plugin runtime
+```
+
+Also read: `FUSION_CONFIG`, `FUSION_MODEL_DIR`, `FUSION_LOG_FORMAT`, `FUSION_LOG_LEVEL`, `FUSION_LOG_CONTENT` (set by `frun up`'s log flags) and `FUSION_AEC` (`FUSION_AEC=0` is the same as `frun talk --no-aec`). The other variables in `.env.example` aren't wired up yet.
 
 ## Server API
 

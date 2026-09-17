@@ -18,7 +18,7 @@ def list_models() -> None:
     catalog = load_catalog()
     used_by = {model_id: [] for model_id in catalog}
     for profile in Profile:
-        for entry in entries_for_profile(profile_config(profile), catalog):
+        for entry in entries_for_profile(profile_config(profile, apply_env=False), catalog):
             used_by[entry.id].append(profile.value)
 
     typer.echo(f"Model directory: {short_path(root)}  ({model_dir_source()})\n")
@@ -31,7 +31,8 @@ def list_models() -> None:
         typer.echo("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
 
     for profile in Profile:
-        missing = [e.id for e in entries_for_profile(profile_config(profile), catalog) if not is_installed(e, root)]
+        missing = [e.id for e in entries_for_profile(profile_config(profile, apply_env=False), catalog)
+                   if not is_installed(e, root)]
         if missing:
             flag = "" if profile is Profile.development else f" --config {profile.value}"
             typer.echo(f"\n{profile.value} is missing {', '.join(missing)}. Run: frun models pull{flag}")
