@@ -202,6 +202,7 @@ class SessionTrace:
             "end_of_turn_wait_ms": rounded(turn.between_ms("speech_end", "turn_end_detected")) if realtime else None,
             "turn_end_reason": i.get("turn_end_reason"),
             # responding
+            "llm_queue_ms": rounded(c.get("llm_queue_ms")) if c.get("llm_queue_ms", 0) >= 1 else None,
             "llm_first_token_ms": rounded(turn.between_ms("llm_request", "llm_first_token")),
             "llm_duration_ms": rounded(llm_duration),
             "llm_tokens": tokens or None,

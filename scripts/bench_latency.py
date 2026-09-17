@@ -42,7 +42,7 @@ async def first_audio_latency(orchestrator, audio: bytes, turns: int) -> list[in
 
 
 async def event_loop_lag(llm) -> tuple[float, float, float]:
-    from fusion_runtime.llm import ChatMessage
+    from fusion_runtime.contract import LLMRequest, Message
 
     gaps, running = [], True
 
@@ -55,11 +55,11 @@ async def event_loop_lag(llm) -> tuple[float, float, float]:
             last = now
 
     beat = asyncio.create_task(heartbeat())
-    messages = [
-        ChatMessage("system", "Answer in about three sentences."),
-        ChatMessage("user", "Describe a busy train station."),
-    ]
-    async for _ in llm.generate_stream(messages):
+    request = LLMRequest(messages=[
+        Message("system", "Answer in about three sentences."),
+        Message("user", "Describe a busy train station."),
+    ], max_tokens=256)
+    async for _ in llm.generate(request):
         pass
     running = False
     await beat

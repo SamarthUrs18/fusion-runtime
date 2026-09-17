@@ -105,7 +105,7 @@ async def health():
     return HealthResponse(
         status="healthy" if orchestrator is not None else "starting",
         version=__version__,
-        models_loaded=orchestrator is not None and orchestrator.stt._warm,
+        models_loaded=orchestrator is not None and getattr(orchestrator, "ready", False),
         uptime_s=round(time.monotonic() - _started_at, 1),
         active_sessions=len(_active_sessions),
         config={

@@ -16,7 +16,7 @@ class FakeOrchestrator:
 
     def __init__(self, config):
         self.config = config
-        self.stt = type("STT", (), {"_warm": True})()
+        self.ready = True
 
     async def initialize(self):
         pass

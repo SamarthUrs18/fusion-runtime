@@ -13,9 +13,9 @@ from fusion_runtime.config import (
     DEVELOPMENT_CONFIG,
     HYBRID_CONFIG,
 )
-from fusion_runtime.stt import create_stt, STTBase
-from fusion_runtime.llm import create_llm, LLMBase
-from fusion_runtime.tts import create_tts, TTSBase
+from fusion_runtime.contract import LLMRuntime, STTRuntime, TTSRuntime
+from fusion_runtime.registry import create_runtime, runtime_class
+from fusion_runtime.resolver import resolve_stage_config
 from fusion_runtime.vad import create_vad, create_turn_detector
 from fusion_runtime.engine import PipelineOrchestrator, run_single_turn
 
@@ -40,35 +40,25 @@ class TestConfig:
         assert config.llm.provider == Provider.OPENAI
 
 
-class TestSTTFactory:
-    def test_create_faster_whisper(self):
-        config = STTConfig(provider=Provider.FASTER_WHISPER)
-        stt = create_stt(config)
-        assert isinstance(stt, STTBase)
-    
+class TestBuiltinRuntimes:
+    def test_ctranslate2_is_an_stt_runtime(self):
+        assert issubclass(runtime_class("stt", "ctranslate2"), STTRuntime)
+
+    def test_llama_cpp_and_openai_http_are_llm_runtimes(self):
+        assert issubclass(runtime_class("llm", "llama_cpp"), LLMRuntime)
+        assert issubclass(runtime_class("llm", "openai_http"), LLMRuntime)
+
+    def test_onnx_is_a_tts_runtime(self):
+        assert issubclass(runtime_class("tts", "onnx"), TTSRuntime)
+
     def test_unknown_provider_raises(self):
         # Pydantic rejects unknown providers at validation time
         with pytest.raises(Exception):
             STTConfig(provider="unknown")
 
-
-class TestLLMFactory:
-    def test_create_llama_cpp(self):
-        config = LLMConfig(provider=Provider.LLAMA_CPP)
-        llm = create_llm(config)
-        assert isinstance(llm, LLMBase)
-    
-    def test_create_openai(self):
-        config = LLMConfig(provider=Provider.OPENAI, api_key="test")
-        llm = create_llm(config)
-        assert isinstance(llm, LLMBase)
-
-
-class TestTTSFactory:
-    def test_create_kokoro(self):
-        config = TTSConfig(provider=Provider.KOKORO)
-        tts = create_tts(config)
-        assert isinstance(tts, TTSBase)
+    def test_hybrid_llm_builds_an_http_runtime_without_loading(self, tmp_path):
+        runtime = create_runtime(resolve_stage_config("llm", HYBRID_CONFIG.llm, root=tmp_path).spec)
+        assert isinstance(runtime, LLMRuntime) and runtime.client is None
 
 
 class TestVADFactory:

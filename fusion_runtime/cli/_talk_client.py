@@ -88,6 +88,8 @@ def format_turn_summary(summary: dict) -> str:
         parts.append(f"end-of-turn {ms('end_of_turn_wait_ms')}")
     if summary.get("stt_transcribe_ms") is not None:
         parts.append(f"stt {ms('stt_transcribe_ms')}")
+    if summary.get("llm_queue_ms") is not None:
+        parts.append(f"queued {ms('llm_queue_ms')}")
     if summary.get("llm_first_token_ms") is not None:
         rate = f" {summary['llm_tokens_per_second']:.0f} tok/s" if summary.get("llm_tokens_per_second") else ""
         parts.append(f"llm {ms('llm_first_token_ms')}{rate}")

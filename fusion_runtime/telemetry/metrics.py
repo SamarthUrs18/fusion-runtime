@@ -101,6 +101,10 @@ class TelemetryMetrics:
 
         self.interruptions = Counter("fusion_interruptions", "Barge-ins that stopped a reply", registry=r)
         self.echo_discarded = Counter("fusion_echo_discarded", "User turns discarded as the bot's own echo", registry=r)
+        self.scheduler_wait = Histogram("fusion_scheduler_wait_seconds", "Time a request waited for a model slot",
+                                        ["stage"], buckets=LATENCY_BUCKETS, registry=r)
+        self.scheduler_rejected = Counter("fusion_scheduler_rejected", "Requests refused because a model was at capacity",
+                                          ["stage"], registry=r)
         self.errors = Counter("fusion_errors", "Errors by stage and code", ["stage", "code"], registry=r)
         self.loop_lag = Gauge("fusion_event_loop_lag_seconds", "Worst event-loop delay in the last window", registry=r)
         self.loop_stalls = Counter("fusion_event_loop_stalls", "Times the event loop was blocked over the stall threshold",
@@ -143,6 +147,11 @@ class TelemetryMetrics:
                 self.tts_audio.inc(a["tts_audio_s"])
             if a.get("speech_ms"):
                 self.stt_audio.inc(a["speech_ms"] / 1000)
+        elif name == "scheduler.slot":
+            if event.duration_ms is not None:
+                self.scheduler_wait.labels(event.stage or "?").observe(event.duration_ms / 1000)
+        elif name == "scheduler.rejected":
+            self.scheduler_rejected.labels(event.stage or "?").inc()
         elif name == "barge_in.fired":
             self.interruptions.inc()
         elif name == "echo.discarded":

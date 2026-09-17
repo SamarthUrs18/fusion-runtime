@@ -166,14 +166,19 @@ pytest tests/
 ```
 fusion_runtime/
 ├── cli/          frun commands, one file per command (_talk_client.py is the mic client)
-├── catalog/      model catalog (models.toml), install checks, downloads
+├── catalog/      model catalog (models.toml), install checks, downloads, GGUF metadata
 ├── config.py     settings, profiles, model directory
 ├── server.py     FastAPI + WebSocket server
-├── stt/          base.py, whisper.py
-├── llm/          base.py, llama_cpp.py, openai_compat.py
-├── tts/          base.py, kokoro.py
+├── contract/     the interface every model runtime implements (STT, LLM, TTS)
+├── resolver.py   model reference (catalog id, path, hf:repo, URL) → runtime
+├── registry.py   runtime names and plugins → classes
+├── runtimes/     one adapter per engine, not per model:
+│                 llama_cpp (any GGUF), ctranslate2 (Whisper), onnx (+ Kokoro spec), openai_http
+├── engine/       orchestrator.py (conversation loop), scheduler.py, conversation.py,
+│                 streaming.py (rolling STT), text.py (sentences), barge_in.py, metrics.py
 ├── vad/          base.py, silero.py, turn.py
-├── engine/       orchestrator.py (conversation loop), barge_in.py, metrics.py
+├── telemetry/    events, logs, Prometheus metrics, per-turn traces
+├── testing/      conformance kit and fake runtimes
 └── audio/        echo_canceller.py, duplex_audio.py
 ```
 

@@ -7,9 +7,16 @@
 #   stage     stt | llm | tts | vad
 #   path      what the config profiles point at (see fusion_runtime/config.py)
 #   files     file name in the repo -> size in bytes, saved under local_dir
+#   runtime   the engine that runs it (llama_cpp | ctranslate2 | onnx | torch_hub)
+#   family    pre/post-processing the file format doesn't describe (whisper, kokoro, silero)
+#   languages what it understands or speaks; omitted = many / detected from the file
+#   voices    TTS voices included
 
 ["whisper-tiny.en"]
 stage = "stt"
+runtime = "ctranslate2"
+family = "whisper"
+languages = ["en"]
 description = "Whisper tiny, English only"
 license = "MIT"
 source = "huggingface"
@@ -21,6 +28,7 @@ files = { "config.json" = 2317, "model.bin" = 75537502, "tokenizer.json" = 21284
 
 ["qwen2.5-0.5b-q4"]
 stage = "llm"
+runtime = "llama_cpp"
 description = "Qwen2.5 0.5B Instruct, Q4_K_M (small, for CPU and 8 GB machines)"
 license = "Apache-2.0"
 source = "huggingface"
@@ -32,6 +40,7 @@ files = { "qwen2.5-0.5b-instruct-q4_k_m.gguf" = 491400032 }
 
 ["qwen2.5-7b-q4"]
 stage = "llm"
+runtime = "llama_cpp"
 description = "Qwen2.5 7B Instruct, Q4_K_M (GPU); published as two parts, llama.cpp loads both from the first"
 license = "Apache-2.0"
 source = "huggingface"
@@ -43,6 +52,10 @@ files = { "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf" = 3993201344, "qwen2.
 
 ["kokoro-v1.0"]
 stage = "tts"
+runtime = "onnx"
+family = "kokoro"
+languages = ["en-us", "en-gb"]
+voices = ["af_heart", "af_bella", "am_michael", "bf_emma", "bm_lewis"]
 description = "Kokoro 82M v1.0, ONNX fp32, 5 voices"
 license = "Apache-2.0"
 source = "huggingface"
@@ -56,6 +69,8 @@ files = { "onnx/model.onnx" = 325532232, "voices/af_heart.bin" = 522240, "voices
 
 ["silero-vad"]
 stage = "vad"
+runtime = "torch_hub"
+family = "silero"
 description = "Silero voice activity detection"
 license = "MIT"
 source = "torch_hub"

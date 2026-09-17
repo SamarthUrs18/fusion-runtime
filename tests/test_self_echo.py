@@ -24,9 +24,9 @@ import contextlib
 import pytest
 
 from fusion_runtime.config import PipelineConfig, TurnDetectionConfig
-from fusion_runtime.llm import LLMResult
+from fusion_runtime.contract import LLMChunk
 from fusion_runtime.engine import LatencyBudget, PipelineMetrics, PipelineOrchestrator
-from fusion_runtime.stt import STTResult
+from fusion_runtime.engine.streaming import PartialTranscript
 from fusion_runtime.vad import PunctuationTurnDetector, TurnState
 
 
@@ -127,12 +127,14 @@ class TestPipelineDiscardsSelfEcho:
             def __init__(self):
                 self.user_messages = []
 
-            async def generate_stream(self, messages, budget_ms=None):
+            async def generate(self, request):
+
+                messages = request.messages
                 self.user_messages.append(
                     next(m.content for m in reversed(messages) if m.role == "user")
                 )
-                yield LLMResult(text=bot_reply, is_final=False, tokens_used=1, latency_ms=0)
-                yield LLMResult(text="", is_final=True, tokens_used=1, latency_ms=0)
+                yield LLMChunk(text=bot_reply)
+                yield LLMChunk(finish_reason="stop")
 
         orch = make_orchestrator(min_confident_ms=50, min_silence_ms=400)
         orch.llm = VerboseFakeLLM()
@@ -140,12 +142,12 @@ class TestPipelineDiscardsSelfEcho:
         driver = asyncio.create_task(hold_then_grow_silence(turn_state))
 
         async def stt_stream():
-            yield STTResult(text="tell me about computer.", is_final=True, confidence=1.0, latency_ms=0)
+            yield PartialTranscript(text="tell me about computer.", is_final=True, confidence=1.0, latency_ms=0)
             await asyncio.sleep(0.3)
             # Speaker bleed of `bot_reply` above, transcribed as if it were
             # a brand new turn — a long contiguous run of the bot's own
             # words, exactly the shape seen live.
-            yield STTResult(
+            yield PartialTranscript(
                 text="a device that can process information and perform.",
                 is_final=True, confidence=1.0, latency_ms=0,
             )

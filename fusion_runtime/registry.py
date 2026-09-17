@@ -26,9 +26,13 @@ ENTRY_POINT_GROUP = "fusion_runtime.runtimes"
 
 STAGE_BASES: Dict[str, Type[ModelRuntime]] = {"stt": STTRuntime, "llm": LLMRuntime, "tts": TTSRuntime}
 
-# (stage, name) -> "module:Class". Filled in as runtimes are ported (llama_cpp,
-# ctranslate2, onnx, openai_http).
-BUILTIN_RUNTIMES: Dict[Tuple[str, str], str] = {}
+# (stage, name) -> "module:Class"
+BUILTIN_RUNTIMES: Dict[Tuple[str, str], str] = {
+    ("stt", "ctranslate2"): "fusion_runtime.runtimes.ctranslate2.stt:CTranslate2STT",
+    ("llm", "llama_cpp"): "fusion_runtime.runtimes.llama_cpp.llm:LlamaCppLLM",
+    ("llm", "openai_http"): "fusion_runtime.runtimes.openai_http.llm:OpenAIHTTPLLM",
+    ("tts", "onnx"): "fusion_runtime.runtimes.onnx.tts:OnnxTTS",
+}
 
 _registered: Dict[Tuple[str, str], str] = {}
 

@@ -1,4 +1,4 @@
-"""LlamaCppLLM streaming: decoding must never block the event loop.
+"""llama.cpp runtime streaming: decoding must never block the event loop.
 
 Uses a fake llama.cpp whose decode steps block with time.sleep, like the real
 C calls do. Before decoding moved to a worker thread, the event loop got no
@@ -11,10 +11,12 @@ import time
 
 import pytest
 
-from fusion_runtime.config import LLMConfig, Provider
-from fusion_runtime.llm import ChatMessage, LlamaCppLLM
+from fusion_runtime.contract import Cancelled, LLMRequest, Message, ModelSpec, RuntimeFailure
+from fusion_runtime.runtimes.llama_cpp.llm import LlamaCppLLM
 
-MESSAGES = [ChatMessage(role="user", content="hi")]
+
+def request(**overrides):
+    return LLMRequest(messages=[Message(role="user", content="hi")], **overrides)
 
 
 class FakeLlama:
@@ -24,20 +26,22 @@ class FakeLlama:
         self.active = 0
         self.max_active = 0
 
-    def __call__(self, prompt, max_tokens, temperature, top_p, stream):
-        if not stream:
-            return {"choices": [{"text": "hi", "finish_reason": "stop"}], "usage": {"completion_tokens": 1}}
+    def create_chat_completion(self, messages, max_tokens, temperature, top_p, stop, stream):
+        self.messages = messages
+        assert stream
 
         def gen():
             self.active += 1
             self.max_active = max(self.max_active, self.active)
             try:
+                yield {"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]}
                 for i, token in enumerate(self.tokens):
                     if i == self.fail_at:
                         raise RuntimeError("decode failed")
                     time.sleep(self.step_s)  # a blocking decode step
                     self.decoded += 1
-                    yield {"choices": [{"text": token}]}
+                    yield {"choices": [{"delta": {"content": token}, "finish_reason": None}]}
+                yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
             finally:
                 self.active -= 1
 
@@ -45,21 +49,22 @@ class FakeLlama:
 
 
 def make_llm(fake: FakeLlama) -> LlamaCppLLM:
-    llm = LlamaCppLLM(LLMConfig(provider=Provider.LLAMA_CPP))
+    llm = LlamaCppLLM(ModelSpec(stage="llm", runtime="llama_cpp", model="fake.gguf"))
     llm.llm = fake
-    llm._warm = True
     return llm
 
 
-async def collect(llm):
-    return [r async for r in llm.generate_stream(MESSAGES)]
+async def collect(llm, **overrides):
+    return [chunk async for chunk in llm.generate(request(**overrides))]
 
 
-async def test_streams_tokens_then_final_result():
-    results = await collect(make_llm(FakeLlama()))
-    assert "".join(r.text for r in results) == "Hello, there!"
-    assert [r.is_final for r in results] == [False, False, False, False, True]
-    assert results[-1].tokens_used == 4 and results[-1].finish_reason == "stop"
+async def test_streams_tokens_then_final_chunk():
+    fake = FakeLlama()
+    chunks = await collect(make_llm(fake))
+    assert "".join(c.text for c in chunks) == "Hello, there!"
+    assert [c.finish_reason for c in chunks] == [None, None, None, None, "stop"]
+    assert chunks[-1].usage == {"completion_tokens": 4}
+    assert fake.messages == [{"role": "user", "content": "hi"}]  # chat template applied by llama.cpp from the GGUF
 
 
 async def test_event_loop_keeps_running_while_decoding():
@@ -86,7 +91,7 @@ async def test_decodes_only_while_the_caller_is_waiting():
     # While TTS synthesizes a sentence the pipeline stops pulling tokens. Decoding
     # ahead during that time, even one token, made CPU synthesis much slower.
     fake = FakeLlama(tokens=["x"] * 20, step_s=0.005)
-    stream = make_llm(fake).generate_stream(MESSAGES)
+    stream = make_llm(fake).generate(request())
     await stream.__anext__()
     await stream.__anext__()
     await asyncio.sleep(0.2)  # caller busy, not asking for more
@@ -97,8 +102,10 @@ async def test_decodes_only_while_the_caller_is_waiting():
 async def test_stopping_early_stops_decoding():
     fake = FakeLlama(tokens=["x"] * 100, step_s=0.01)
     llm = make_llm(fake)
-    async for result in llm.generate_stream(MESSAGES):
-        if result.tokens_used == 2:
+    received = 0
+    async for _ in llm.generate(request()):
+        received += 1
+        if received == 2:
             break  # what the orchestrator does on barge-in
     await asyncio.sleep(0.2)
     assert fake.decoded < 10, f"kept decoding {fake.decoded} tokens nobody will hear"
@@ -110,20 +117,41 @@ async def test_concurrent_callers_take_turns_on_one_context():
     llm = make_llm(fake)
     first, second = await asyncio.gather(collect(llm), collect(llm))
     assert fake.max_active == 1, "two replies decoded on one llama.cpp context at once"
-    assert "".join(r.text for r in first) == "abc" == "".join(r.text for r in second)
+    assert "".join(c.text for c in first) == "abc" == "".join(c.text for c in second)
 
 
 async def test_decode_errors_reach_the_caller():
     llm = make_llm(FakeLlama(fail_at=2))
-    with pytest.raises(RuntimeError, match="decode failed"):
+    with pytest.raises(RuntimeFailure, match="decode failed"):
         await collect(llm)
 
 
 async def test_a_new_reply_works_after_an_abandoned_one():
     fake = FakeLlama(tokens=["x"] * 50, step_s=0.01)
     llm = make_llm(fake)
-    async for _ in llm.generate_stream(MESSAGES):
+    async for _ in llm.generate(request()):
         break
     fake.tokens = ["ok"]
-    results = await asyncio.wait_for(collect(llm), timeout=2)
-    assert "".join(r.text for r in results) == "ok"
+    chunks = await asyncio.wait_for(collect(llm), timeout=2)
+    assert "".join(c.text for c in chunks) == "ok"
+
+
+async def test_cancel_token_stops_decoding_and_raises_cancelled():
+    fake = FakeLlama(tokens=["x"] * 100, step_s=0.01)
+    llm = make_llm(fake)
+    req = request()
+    stream = llm.generate(req)
+    await stream.__anext__()
+    req.cancel.cancel("barge_in")
+    with pytest.raises(Cancelled):
+        async for _ in stream:
+            pass
+    await asyncio.sleep(0.2)
+    assert fake.decoded < 10 and fake.active == 0
+
+
+async def test_tool_requests_are_rejected_until_supported():
+    from fusion_runtime.contract import InvalidRequest, ToolSpec
+
+    with pytest.raises(InvalidRequest, match="tool calling"):
+        await collect(make_llm(FakeLlama()), tools=(ToolSpec("lookup_order", "Find an order", {"type": "object"}),))

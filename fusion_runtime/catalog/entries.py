@@ -27,6 +27,10 @@ class ModelEntry:
     files: dict = field(default_factory=dict)  # repo file name -> size in bytes
     builds: Optional[str] = None  # extra file assembled after download, under local_dir
     size: int = 0  # for sources without a file list
+    runtime: str = ""  # engine that runs it: llama_cpp | ctranslate2 | onnx | torch_hub
+    family: Optional[str] = None  # processing the file format doesn't describe (whisper, kokoro)
+    languages: Optional[tuple] = None  # None = many, or read from the model itself
+    voices: tuple = ()
 
     @property
     def total_bytes(self) -> int:
@@ -47,7 +51,13 @@ class UnknownModelError(ValueError):
 
 def load_catalog() -> dict[str, ModelEntry]:
     raw = tomllib.loads(package_files("fusion_runtime.catalog").joinpath("models.toml").read_text())
-    return {model_id: ModelEntry(id=model_id, **fields) for model_id, fields in raw.items()}
+    catalog = {}
+    for model_id, fields in raw.items():
+        for key in ("languages", "voices"):  # tuples keep entries hashable and read-only
+            if key in fields:
+                fields[key] = tuple(fields[key])
+        catalog[model_id] = ModelEntry(id=model_id, **fields)
+    return catalog
 
 
 def get_entries(ids: list[str], catalog: Optional[dict[str, ModelEntry]] = None) -> list[ModelEntry]:

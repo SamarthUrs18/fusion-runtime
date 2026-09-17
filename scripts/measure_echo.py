@@ -47,15 +47,17 @@ def load_speech():
     test fixture repeated."""
     try:
         from fusion_runtime.config import DEVELOPMENT_CONFIG
-        from fusion_runtime.tts import create_tts
+        from fusion_runtime.contract import TTSRequest
+        from fusion_runtime.registry import create_runtime
+        from fusion_runtime.resolver import resolve_stage_config
 
         async def synthesize():
-            tts = create_tts(DEVELOPMENT_CONFIG.tts)
-            await tts.warmup()
-            return await tts.synthesize(TEXT)
+            tts = create_runtime(resolve_stage_config("tts", DEVELOPMENT_CONFIG.tts).spec)
+            await tts.load()
+            return b"".join([chunk.pcm async for chunk in tts.synthesize(TTSRequest(text=TEXT, voice=DEVELOPMENT_CONFIG.tts.voice))])
 
         result = asyncio.run(synthesize())
-        return np.frombuffer(result.audio, dtype=np.int16).astype(np.float64) / 32768.0, "Kokoro"
+        return np.frombuffer(result, dtype=np.int16).astype(np.float64) / 32768.0, "Kokoro"
     except Exception as exc:
         voice, rate = sf.read(os.path.join(ROOT, "tests", "fixtures", "hello.wav"), dtype="float64")
         looped = np.tile(np.concatenate([voice, np.zeros(rate // 4)]), 5)

@@ -9,9 +9,10 @@ import threading
 import numpy as np
 import pytest
 
-from fusion_runtime.config import PipelineConfig, STTConfig
+from fusion_runtime.config import PipelineConfig
+from fusion_runtime.contract import ModelSpec, STTRequest, Transcript
 from fusion_runtime.engine import PipelineOrchestrator
-from fusion_runtime.stt.whisper import FasterWhisperSTT
+from fusion_runtime.runtimes.ctranslate2.stt import CTranslate2STT
 from fusion_runtime.telemetry import ListSink, telemetry
 
 MAIN = threading.main_thread()
@@ -42,16 +43,11 @@ class LazyWhisperModel:
 
 
 async def test_whisper_decoding_happens_off_the_event_loop():
-    stt = FasterWhisperSTT(STTConfig())
+    stt = CTranslate2STT(ModelSpec(stage="stt", runtime="ctranslate2", model="whisper"))
     stt.model = LazyWhisperModel()
-    stt._warm = True
 
-    async def one_second_of_audio():
-        for _ in range(50):
-            yield b"\x00\x00" * 320
-
-    results = [r async for r in stt.transcribe_stream(one_second_of_audio())]
-    assert results and results[0].text == " hello  there"
+    results = await stt.transcribe([STTRequest(audio=b"\x00\x00" * 16000)])
+    assert isinstance(results[0], Transcript) and results[0].text == " hello  there"
     assert stt.model.decode_threads, "segments were never decoded"
     assert MAIN not in stt.model.decode_threads, "Whisper segments were decoded on the event loop thread"
 

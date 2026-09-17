@@ -10,11 +10,13 @@ import time
 from collections import deque
 
 from fusion_runtime.config import PipelineConfig, TurnDetectionConfig
-from fusion_runtime.stt import STTBase, STTResult, create_stt
-from fusion_runtime.llm import LLMBase, LLMResult, ChatMessage, create_llm
-from fusion_runtime.tts import TTSBase, TTSResult, create_tts
+from fusion_runtime.contract import LLMRequest, LLMRuntime, STTRequest, STTRuntime, TTSRequest, TTSRuntime
 from fusion_runtime.vad import VADBase, VADResult, TurnDetectorBase, TurnState, create_vad, create_turn_detector
 from fusion_runtime.engine.barge_in import BargeInState
+from fusion_runtime.engine.conversation import Conversation
+from fusion_runtime.engine.scheduler import ModelScheduler
+from fusion_runtime.engine.streaming import PartialTranscript, raise_if_error, rolling_transcripts
+from fusion_runtime.engine.text import speakable_segments
 from fusion_runtime.engine.metrics import LatencyBudget, PipelineMetrics, StageBudget
 from fusion_runtime.telemetry import SessionTrace, describe_error, tag_stage, telemetry
 
@@ -30,9 +32,11 @@ class PipelineOrchestrator:
     
     def __init__(self, config: PipelineConfig):
         self.config = config
-        self.stt: STTBase = create_stt(config.stt)
-        self.llm: LLMBase = create_llm(config.llm)
-        self.tts: TTSBase = create_tts(config.tts)
+        # Model runtimes, shared by every conversation. Resolved and loaded by initialize().
+        self.stt: Optional[STTRuntime] = None
+        self.llm: Optional[LLMRuntime] = None
+        self.tts: Optional[TTSRuntime] = None
+        self.ready = False
         self.vad: VADBase = create_vad(config.vad)
         self.turn_detector: TurnDetectorBase = create_turn_detector(config.turn_detection)
         
@@ -42,30 +46,60 @@ class PipelineOrchestrator:
         
         # Metrics
         self.metrics_history: deque = deque(maxlen=1000)
-    
+
+        # What each stage's model resolved to (runtime, format, metadata), filled in by initialize()
+        self.resolved_models: dict = {}
+
+    def scheduler(self, stage: str) -> ModelScheduler:
+        """The queue in front of a stage's shared model, created on first use.
+
+        Its concurrency comes from the loaded runtime's capabilities (the
+        in-process llama.cpp model decodes one reply at a time; an HTTP
+        endpoint takes many).
+        """
+        schedulers = self.__dict__.setdefault("_schedulers", {})
+        if stage not in schedulers:
+            runtime = getattr(self, stage, None)
+            capabilities = getattr(runtime, "capabilities", None)
+            resolved = self.__dict__.get("resolved_models", {}).get(stage)
+            stage_config = getattr(getattr(self, "config", None), stage, None)
+            model = (resolved.catalog_id or resolved.spec.model) if resolved else getattr(stage_config, "model", "")
+            schedulers[stage] = ModelScheduler(
+                stage, model=str(model or ""), max_concurrency=getattr(capabilities, "max_concurrency", 1) or 1)
+        return schedulers[stage]
+
+    async def _load_runtime(self, stage: str):
+        """Resolve a stage's model to a runtime, then load and warm it."""
+        from fusion_runtime.registry import create_runtime
+        from fusion_runtime.resolver import resolve_stage_config
+
+        stage_config = getattr(self.config, stage)
+        labels = {"model": getattr(stage_config, "model", None)}
+        t0 = time.perf_counter()
+        try:
+            # reads file headers (a GGUF vocabulary takes tens of ms): keep it off the event loop
+            resolved = await asyncio.get_running_loop().run_in_executor(None, resolve_stage_config, stage, stage_config)
+            self.resolved_models[stage] = resolved
+            labels = {"runtime": resolved.spec.runtime, "model": resolved.catalog_id or resolved.spec.model}
+            reserved = {"stage", "name", "level", "session_id", "turn_id", "request_id", "duration_ms", "error", "model", "runtime"}
+            telemetry.emit("model.resolved", level="debug", stage=stage,
+                           **{k: v for k, v in resolved.describe().items() if k not in reserved}, **labels)
+            runtime = create_runtime(resolved.spec)
+            await runtime.load()
+        except Exception as e:
+            tag_stage(e, stage)
+            telemetry.emit("model.load_failed", level="error", stage=stage, error=describe_error(e, stage), **labels)
+            raise
+        setattr(self, stage, runtime)
+        telemetry.emit("model.loaded", stage=stage, duration_ms=(time.perf_counter() - t0) * 1000, **labels)
+
     async def initialize(self):
-        """Load and warm up all models, reporting each one's load time."""
+        """Resolve, load and warm up all models, reporting each one's load time."""
         started = time.perf_counter()
         telemetry.emit("models.loading", stage="server")
-
-        async def load(stage: str, warmup):
-            stage_config = getattr(self.config, stage)
-            t0 = time.perf_counter()
-            try:
-                await warmup()
-            except Exception as e:
-                tag_stage(e, stage)
-                telemetry.emit("model.load_failed", level="error", stage=stage, error=describe_error(e, stage),
-                               runtime=stage_config.provider.value, model=stage_config.model)
-                raise
-            telemetry.emit("model.loaded", stage=stage, duration_ms=(time.perf_counter() - t0) * 1000,
-                           runtime=stage_config.provider.value, model=stage_config.model)
-
-        await asyncio.gather(
-            load("stt", self.stt.warmup),
-            load("llm", self.llm.warmup),
-            load("tts", self.tts.warmup),
-        )
+        await asyncio.gather(self._load_runtime("stt"), self._load_runtime("llm"), self._load_runtime("tts"))
+        self.__dict__.pop("_schedulers", None)  # size queues from the loaded runtimes' capabilities
+        self.ready = True
         # Load Silero once now, so sessions only copy it (see _load_vad_frame_model).
         await self._load_vad_frame_model()
         telemetry.emit("models.ready", stage="server", duration_ms=(time.perf_counter() - started) * 1000)
@@ -77,6 +111,12 @@ class PipelineOrchestrator:
         pool = self.__dict__.pop("_vad_pool", None)
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
+        self.ready = False
+        for stage in ("stt", "llm", "tts"):
+            runtime = self.__dict__.get(stage)
+            if runtime is not None:
+                with contextlib.suppress(Exception):
+                    await runtime.close()
         if self._batch_task:
             self._batch_task.cancel()
             try:
@@ -453,18 +493,25 @@ class PipelineOrchestrator:
         turn_state: Optional[TurnState] = None,
         stt_reset: Optional[asyncio.Event] = None,
         trace: Optional[SessionTrace] = None,
-    ) -> AsyncIterator[STTResult]:
+    ) -> AsyncIterator[PartialTranscript]:
         """VAD + STT with streaming partial results."""
         stt_start = time.perf_counter()
-        stt_budget = budget.allocate("stt", 100)
+        budget.allocate("stt", 100)
+        stt_config = getattr(self.config, "stt", None)
+        stt_scheduler = self.scheduler("stt")
+        session_id = trace.session_id if trace is not None else None
+
+        async def transcribe(pcm: bytes):
+            request = STTRequest(audio=pcm, language=getattr(stt_config, "language", None), session_id=session_id)
+            async with stt_scheduler.slot(request):
+                results = await self.stt.transcribe([request])
+            return raise_if_error(results[0])
 
         # Apply VAD filter
         vad_filtered = self._apply_vad(audio_stream, turn_state, trace)
 
-        # Stream STT
-        stream = self.stt.transcribe_stream(
-            vad_filtered, budget_ms=stt_budget.remaining_ms, reset_signal=stt_reset
-        )
+        # Stream STT: re-transcribe the turn so far as speech arrives (see engine/streaming.py)
+        stream = rolling_transcripts(vad_filtered, transcribe, reset_signal=stt_reset)
         while True:
             try:
                 result = await stream.__anext__()
@@ -595,7 +642,7 @@ class PipelineOrchestrator:
     
     async def _llm_stage(
         self,
-        stt_stream: AsyncIterator[STTResult],
+        stt_stream: AsyncIterator[PartialTranscript],
         system_prompt: str,
         budget: LatencyBudget,
         metrics: PipelineMetrics,
@@ -604,6 +651,7 @@ class PipelineOrchestrator:
         stt_reset: Optional[asyncio.Event] = None,
         barge_in: Optional[BargeInState] = None,
         trace: Optional[SessionTrace] = None,
+        conversation: Optional[Conversation] = None,
     ) -> AsyncIterator[str]:
         """LLM streaming, gated by real (forward-measured) silence rather
         than reacting only when new STT text happens to arrive.
@@ -625,6 +673,11 @@ class PipelineOrchestrator:
         `stt_stream` concurrently, so consuming one never blocks the other
         the way a single sequential loop would.
         """
+        if conversation is None:
+            llm_config = getattr(self.config, "llm", None)
+            conversation = Conversation.for_context(
+                system_prompt, getattr(llm_config, "n_ctx", None), getattr(llm_config, "max_tokens", None))
+        llm_scheduler = self.scheduler("llm")
         llm_start = time.perf_counter()
         first_token = True
         response_buffer = ""
@@ -723,97 +776,112 @@ class PipelineOrchestrator:
                 # (and duplicate) speech we've already acted on.
                 stt_reset.set()
 
-            messages = [
-                ChatMessage(role="system", content=system_prompt),
-                ChatMessage(role="user", content=transcript),
-            ]
-            llm_budget = budget.allocate("llm", 150)
+            messages = conversation.messages_for(transcript)
+            budget.allocate("llm", 150)
 
             if barge_in is not None:
                 barge_in.mark_speaking()
 
             llm_config = getattr(self.config, "llm", None)
+            resolved = self.__dict__.get("resolved_models", {}).get("llm")
             llm_labels = {
-                "runtime": getattr(getattr(llm_config, "provider", None), "value", None),
-                "model": getattr(llm_config, "model", None),
+                "runtime": resolved.spec.runtime if resolved else getattr(getattr(llm_config, "provider", None), "value", None),
+                "model": (resolved.catalog_id or resolved.spec.model) if resolved else getattr(llm_config, "model", None),
             }
             if turn is not None:
                 turn.mark("llm_request")
                 trace.event("llm.request", turn=turn, stage="llm", messages=len(messages),
-                            **llm_labels, **telemetry.content(transcript, "prompt"))
+                            history_turns=conversation.turns, **llm_labels, **telemetry.content(transcript, "prompt"))
             finish_reason = None
 
-            stream = self.llm.generate_stream(messages, budget_ms=llm_budget.remaining_ms)
-            while True:
-                waited_from = time.monotonic()
-                try:
-                    llm_result = await stream.__anext__()
-                except StopAsyncIteration:
-                    break
-                except Exception as e:
-                    raise tag_stage(e, "llm")
-                if turn is not None and not first_token:
-                    # Time actually spent waiting on the model for this token. Wall-clock
-                    # time would also count TTS synthesis, since the LLM only decodes
-                    # when the pipeline asks for the next token.
-                    turn.add("llm_decode_ms", (time.monotonic() - waited_from) * 1000)
-                if barge_in is not None and barge_in.interrupted.is_set():
-                    # The watcher caught real user speech starting while we
-                    # were mid-reply — stop forwarding further tokens for
-                    # this turn right away. The "interrupted" emit already
-                    # went out from the watcher itself, not from here, so
-                    # the client hears about it as early as possible.
-                    barge_in.interrupted.clear()
-                    finish_reason = "interrupted"
-                    if turn is not None:
-                        turn.mark("llm_stopped")
-                        trace.event("llm.stopped", turn=turn, stage="llm", reason="barge_in",
-                                    stop_ms=turn.between_ms("barge_in_fired", "llm_stopped"))
-                    await stream.aclose()
-                    if emit:
-                        # A normal reply only gets printed client-side on
-                        # its is_final event — without this, a cut-off
-                        # reply would vanish from the transcript entirely
-                        # (its audio played partially, but nothing shown).
+            # A new turn has nothing buffered to play, so it's due now. Playback-aware
+            # scheduling will move this deadline as the call's unplayed audio changes.
+            request = LLMRequest(
+                messages=messages,
+                max_tokens=getattr(llm_config, "max_tokens", 512),
+                temperature=getattr(llm_config, "temperature", 0.7),
+                top_p=getattr(llm_config, "top_p", 0.9),
+                session_id=trace.session_id if trace is not None else None,
+                deadline=time.monotonic(),
+            )
+            async with llm_scheduler.slot(request) as slot:
+                if turn is not None:
+                    turn.add("llm_queue_ms", slot.wait_ms)
+                    if slot.queued_ahead:
+                        trace.event("llm.queued", turn=turn, stage="llm", duration_ms=slot.wait_ms,
+                                    queued_ahead=slot.queued_ahead)
+                stream = self.llm.generate(request)
+                while True:
+                    waited_from = time.monotonic()
+                    try:
+                        llm_result = await stream.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    except Exception as e:
+                        raise tag_stage(e, "llm")
+                    if turn is not None and not first_token:
+                        # Time actually spent waiting on the model for this token. Wall-clock
+                        # time would also count TTS synthesis, since the LLM only decodes
+                        # when the pipeline asks for the next token.
+                        turn.add("llm_decode_ms", (time.monotonic() - waited_from) * 1000)
+                    if barge_in is not None and barge_in.interrupted.is_set():
+                        # The watcher caught real user speech starting while we
+                        # were mid-reply — stop forwarding further tokens for
+                        # this turn right away. The "interrupted" emit already
+                        # went out from the watcher itself, not from here, so
+                        # the client hears about it as early as possible.
+                        barge_in.interrupted.clear()
+                        finish_reason = "interrupted"
+                        if turn is not None:
+                            turn.mark("llm_stopped")
+                            trace.event("llm.stopped", turn=turn, stage="llm", reason="barge_in",
+                                        stop_ms=turn.between_ms("barge_in_fired", "llm_stopped"))
+                        await stream.aclose()
+                        if emit:
+                            # A normal reply only gets printed client-side on
+                            # its is_final event — without this, a cut-off
+                            # reply would vanish from the transcript entirely
+                            # (its audio played partially, but nothing shown).
+                            emit({
+                                "type": "response",
+                                "text": response_buffer,
+                                "is_final": True,
+                                "interrupted": True,
+                            })
+                        break
+
+                    if first_token:
+                        metrics.llm_first_token_ms = (time.perf_counter() - metrics.pipeline_start) * 1000
+                        first_token = False
+                        if turn is not None:
+                            turn.mark("llm_first_token")
+                            trace.event("llm.first_token", turn=turn, stage="llm",
+                                        duration_ms=turn.between_ms("llm_request", "llm_first_token"), **llm_labels)
+
+                    is_final = llm_result.finish_reason is not None
+                    if is_final:
+                        metrics.llm_total_ms = (time.perf_counter() - llm_start) * 1000
+                        finish_reason = llm_result.finish_reason
+
+                    if llm_result.text:
+                        response_buffer += llm_result.text
+                        if turn is not None:
+                            turn.add("llm_tokens")
+
+                    # The terminal chunk from most providers carries no text
+                    # (text="", is_final=True) — it must still be emitted, or
+                    # the client's "is_final" completion event never arrives
+                    # and nothing ever gets printed even though TTS already
+                    # spoke the reply.
+                    if emit and (llm_result.text or is_final):
                         emit({
                             "type": "response",
                             "text": response_buffer,
-                            "is_final": True,
-                            "interrupted": True,
+                            "is_final": is_final,
                         })
-                    break
 
-                if first_token:
-                    metrics.llm_first_token_ms = (time.perf_counter() - metrics.pipeline_start) * 1000
-                    first_token = False
-                    if turn is not None:
-                        turn.mark("llm_first_token")
-                        trace.event("llm.first_token", turn=turn, stage="llm",
-                                    duration_ms=turn.between_ms("llm_request", "llm_first_token"), **llm_labels)
-
-                if llm_result.is_final:
-                    metrics.llm_total_ms = (time.perf_counter() - llm_start) * 1000
-                    finish_reason = llm_result.finish_reason or "stop"
-
-                if llm_result.text:
-                    response_buffer += llm_result.text
-                    if turn is not None:
-                        turn.add("llm_tokens")
-
-                # The terminal chunk from most providers carries no text
-                # (text="", is_final=True) — it must still be emitted, or
-                # the client's "is_final" completion event never arrives
-                # and nothing ever gets printed even though TTS already
-                # spoke the reply.
-                if emit and (llm_result.text or llm_result.is_final):
-                    emit({
-                        "type": "response",
-                        "text": response_buffer,
-                        "is_final": llm_result.is_final,
-                    })
-
-                if llm_result.text:
-                    yield llm_result.text
+                    if llm_result.text:
+                        yield llm_result.text
 
             if barge_in is not None:
                 barge_in.mark_idle()
@@ -833,6 +901,7 @@ class PipelineOrchestrator:
             # off — either way it's what actually got spoken, and it's
             # what the next candidate "user" turn gets checked against.
             last_bot_text = response_buffer
+            conversation.add_turn(transcript, response_buffer, interrupted=finish_reason == "interrupted")
             response_buffer = ""
             first_token = True
 
@@ -909,43 +978,60 @@ class PipelineOrchestrator:
         metrics: PipelineMetrics,
         trace: Optional[SessionTrace] = None,
     ) -> AsyncIterator[bytes]:
-        """TTS streaming from LLM tokens."""
+        """Speak the reply sentence by sentence as the LLM streams it."""
         tts_start = time.perf_counter()
         first_chunk = True
-        
-        tts_budget = budget.allocate("tts", 100)
-        
-        stream = self.tts.synthesize_stream(llm_stream, budget_ms=tts_budget.remaining_ms)
-        while True:
+        budget.allocate("tts", 100)
+        tts_config = getattr(self.config, "tts", None)
+        output_rate = getattr(tts_config, "sample_rate", 24000)
+        tts_scheduler = self.scheduler("tts")
+        session_id = trace.session_id if trace is not None else None
+
+        async for segment in speakable_segments(llm_stream):
+            if not segment.strip():
+                continue
+            request = TTSRequest(
+                text=segment,
+                voice=getattr(tts_config, "voice", None),
+                speed=getattr(tts_config, "speed", 1.0),
+                session_id=session_id,
+            )
+            stream = self.tts.synthesize(request)
             try:
-                tts_result = await stream.__anext__()
-            except StopAsyncIteration:
-                break
-            except Exception as e:
-                raise tag_stage(e, "tts")
-            if trace is not None and trace.responding is not None and tts_result.audio:
-                turn = trace.responding
-                audio_s = len(tts_result.audio) / 2 / (tts_result.sample_rate or 24000)
-                turn.add("tts_chunks")
-                turn.add("tts_audio_s", audio_s)
-                turn.add("tts_synth_ms", tts_result.latency_ms or 0.0)
-                if "tts_first_chunk" not in turn.marks:
-                    turn.mark("tts_first_chunk")
-                    trace.event("tts.first_chunk", turn=turn, stage="tts", duration_ms=tts_result.latency_ms,
-                                audio_ms=round(audio_s * 1000),
-                                since_first_token_ms=turn.between_ms("llm_first_token", "tts_first_chunk"))
-                else:
-                    trace.event("tts.chunk", turn=turn, level="debug", stage="tts", duration_ms=tts_result.latency_ms,
-                                audio_ms=round(audio_s * 1000))
-            if first_chunk:
-                metrics.tts_first_chunk_ms = (time.perf_counter() - metrics.pipeline_start) * 1000
-                first_chunk = False
-            
-            if tts_result.is_final:
-                metrics.tts_total_ms = (time.perf_counter() - tts_start) * 1000
-            
-            yield tts_result.audio
-    
+                while True:
+                    # A slot per chunk, never held while the audio goes downstream
+                    started = time.perf_counter()
+                    async with tts_scheduler.slot(request):
+                        try:
+                            chunk = await stream.__anext__()
+                        except StopAsyncIteration:
+                            break
+                        except Exception as e:
+                            raise tag_stage(e, "tts")
+                    synth_ms = (time.perf_counter() - started) * 1000
+                    pcm = _resample_pcm16(chunk.pcm, chunk.sample_rate, output_rate)
+                    if trace is not None and trace.responding is not None and pcm:
+                        turn = trace.responding
+                        audio_s = len(pcm) / 2 / output_rate
+                        turn.add("tts_chunks")
+                        turn.add("tts_audio_s", audio_s)
+                        turn.add("tts_synth_ms", synth_ms)
+                        if "tts_first_chunk" not in turn.marks:
+                            turn.mark("tts_first_chunk")
+                            trace.event("tts.first_chunk", turn=turn, stage="tts", duration_ms=synth_ms,
+                                        audio_ms=round(audio_s * 1000),
+                                        since_first_token_ms=turn.between_ms("llm_first_token", "tts_first_chunk"))
+                        else:
+                            trace.event("tts.chunk", turn=turn, level="debug", stage="tts", duration_ms=synth_ms,
+                                        audio_ms=round(audio_s * 1000))
+                    if first_chunk:
+                        metrics.tts_first_chunk_ms = (time.perf_counter() - metrics.pipeline_start) * 1000
+                        first_chunk = False
+                    yield pcm
+            finally:
+                await stream.aclose()
+        metrics.tts_total_ms = (time.perf_counter() - tts_start) * 1000
+
     # ============ Batching Support ============
     
     async def _batch_worker(self):
@@ -992,6 +1078,18 @@ class PipelineOrchestrator:
             "e2e_p50": sorted([x.e2e_latency_ms for x in m])[len(m)//2],
             "e2e_p99": sorted([x.e2e_latency_ms for x in m])[int(len(m)*0.99)],
         }
+
+
+def _resample_pcm16(pcm: bytes, rate: int, target: int) -> bytes:
+    """Linear resampling of mono 16-bit PCM, when a TTS model's rate differs from the output rate."""
+    if rate == target or not pcm:
+        return pcm
+    import numpy as np
+
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    count = max(1, round(len(samples) * target / rate))
+    positions = np.linspace(0, len(samples) - 1, count)
+    return np.interp(positions, np.arange(len(samples)), samples).astype(np.int16).tobytes()
 
 
 # Convenience function for single-turn (non-streaming) usage

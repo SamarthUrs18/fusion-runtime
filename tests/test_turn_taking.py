@@ -22,9 +22,9 @@ import contextlib
 import pytest
 
 from fusion_runtime.config import PipelineConfig
-from fusion_runtime.llm import LLMResult
+from fusion_runtime.contract import LLMChunk
 from fusion_runtime.engine import LatencyBudget, PipelineMetrics, PipelineOrchestrator
-from fusion_runtime.stt import STTResult
+from fusion_runtime.engine.streaming import PartialTranscript
 from fusion_runtime.vad import PunctuationTurnDetector, TurnState
 
 
@@ -36,12 +36,14 @@ class FakeLLM:
     def __init__(self):
         self.user_messages = []
 
-    async def generate_stream(self, messages, budget_ms=None):
+    async def generate(self, request):
+
+        messages = request.messages
         self.user_messages.append(
             next(m.content for m in reversed(messages) if m.role == "user")
         )
-        yield LLMResult(text="ok", is_final=False, tokens_used=1, latency_ms=0)
-        yield LLMResult(text="", is_final=True, tokens_used=1, latency_ms=0)
+        yield LLMChunk(text="ok")
+        yield LLMChunk(finish_reason="stop")
 
 
 def make_orchestrator(min_confident_ms: int = 100, min_silence_ms: int = 400) -> PipelineOrchestrator:
@@ -57,7 +59,7 @@ def make_orchestrator(min_confident_ms: int = 100, min_silence_ms: int = 400) ->
 async def stt_once_then_stall(text: str, is_final: bool = True):
     """Yields one STT result, then hangs forever without closing — like a
     live session where the user might still say more later."""
-    yield STTResult(text=text, is_final=is_final, confidence=1.0, latency_ms=0)
+    yield PartialTranscript(text=text, is_final=is_final, confidence=1.0, latency_ms=0)
     await asyncio.Event().wait()
 
 
@@ -194,7 +196,7 @@ class TestTurnTiming:
         turn_state.silence_ms = 0.0  # never crosses either threshold
 
         async def finite_stt_stream():
-            yield STTResult(text="I did not finish", is_final=False, confidence=1.0, latency_ms=0)
+            yield PartialTranscript(text="I did not finish", is_final=False, confidence=1.0, latency_ms=0)
 
         tokens = [
             tok
@@ -209,7 +211,7 @@ class TestTurnTiming:
         assert tokens == ["ok"], "pending transcript should be flushed as a final turn when the source ends"
 
     async def test_supersedes_rather_than_concatenates_stt_results(self):
-        """Each STTResult restates the whole turn so far (see STTResult's
+        """Each PartialTranscript restates the whole turn so far (see PartialTranscript's
         docstring). Appending them instead of replacing stacks overlapping
         re-transcriptions of the same speech, which is what produced
         transcripts like "but I cannot. but I can't speak to you right. but
@@ -222,9 +224,9 @@ class TestTurnTiming:
         async def growing_stt_stream():
             # Successive re-transcriptions of one utterance, each superseding
             # the last — exactly what the real STT emits as a turn grows.
-            yield STTResult(text="I can't", is_final=False, confidence=1.0, latency_ms=0)
-            yield STTResult(text="I can't speak", is_final=False, confidence=1.0, latency_ms=0)
-            yield STTResult(text="I can't speak to you now.", is_final=True, confidence=1.0, latency_ms=0)
+            yield PartialTranscript(text="I can't", is_final=False, confidence=1.0, latency_ms=0)
+            yield PartialTranscript(text="I can't speak", is_final=False, confidence=1.0, latency_ms=0)
+            yield PartialTranscript(text="I can't speak to you now.", is_final=True, confidence=1.0, latency_ms=0)
 
         async for _ in orch._llm_stage(
             growing_stt_stream(),
