@@ -10,15 +10,21 @@ import time
 from collections import deque
 
 from fusion_runtime.config import PipelineConfig, TurnDetectionConfig
-from fusion_runtime.contract import LLMRequest, LLMRuntime, STTRequest, STTRuntime, TTSRequest, TTSRuntime
-from fusion_runtime.vad import VADBase, VADResult, TurnDetectorBase, TurnState, create_vad, create_turn_detector
+from fusion_runtime.contract import (
+    Cancelled, LLMRequest, LLMRuntime, STTRequest, STTRuntime, TTSRequest, TTSRuntime, TurnDetector, TurnRequest,
+)
+from fusion_runtime.vad import VADBase, VADResult, TurnState, create_vad
 from fusion_runtime.engine.barge_in import BargeInState
 from fusion_runtime.engine.conversation import Conversation
 from fusion_runtime.engine.scheduler import ModelScheduler
-from fusion_runtime.engine.streaming import PartialTranscript, raise_if_error, rolling_transcripts
-from fusion_runtime.engine.text import speakable_segments
+from fusion_runtime.engine.streaming import PartialTranscript, TurnTranscriber, raise_if_error
+from fusion_runtime.engine.text import END_OF_REPLY, REPLY_CUT_OFF, speakable_segments, words
 from fusion_runtime.engine.metrics import LatencyBudget, PipelineMetrics, StageBudget
 from fusion_runtime.telemetry import SessionTrace, describe_error, tag_stage, telemetry
+
+
+# Silence after which the user's last words are transcribed, ahead of the turn ending
+FINALIZE_AFTER_SILENCE_MS = 150
 
 
 class PipelineOrchestrator:
@@ -38,7 +44,7 @@ class PipelineOrchestrator:
         self.tts: Optional[TTSRuntime] = None
         self.ready = False
         self.vad: VADBase = create_vad(config.vad)
-        self.turn_detector: TurnDetectorBase = create_turn_detector(config.turn_detection)
+        self.turn_detector: Optional[TurnDetector] = None  # loaded by initialize(); None means silence only
         
         # Batching
         self._batch_queue: asyncio.Queue = asyncio.Queue()
@@ -49,6 +55,12 @@ class PipelineOrchestrator:
 
         # What each stage's model resolved to (runtime, format, metadata), filled in by initialize()
         self.resolved_models: dict = {}
+
+    def _turn_detector_name(self) -> str:
+        turn_config = getattr(getattr(self, "config", None), "turn_detection", None)
+        if turn_config is None:
+            return "silence"
+        return turn_config.runtime or getattr(turn_config.provider, "value", None) or "silence"
 
     def scheduler(self, stage: str) -> ModelScheduler:
         """The queue in front of a stage's shared model, created on first use.
@@ -93,11 +105,31 @@ class PipelineOrchestrator:
         setattr(self, stage, runtime)
         telemetry.emit("model.loaded", stage=stage, duration_ms=(time.perf_counter() - t0) * 1000, **labels)
 
+    async def _load_turn_detector(self) -> None:
+        """Load the configured turn detector (the built-in silence detector by default)."""
+        from fusion_runtime.registry import create_runtime
+        from fusion_runtime.turns import turn_detector_spec
+
+        spec = turn_detector_spec(self.config.turn_detection)
+        labels = {"runtime": spec.runtime, "model": spec.model or None}
+        t0 = time.perf_counter()
+        try:
+            detector = create_runtime(spec)
+            await detector.load()
+        except Exception as e:
+            tag_stage(e, "turn")
+            telemetry.emit("model.load_failed", level="error", stage="turn", error=describe_error(e, "turn"), **labels)
+            raise
+        self.turn_detector = detector
+        telemetry.emit("model.loaded", stage="turn", duration_ms=(time.perf_counter() - t0) * 1000,
+                       uses_audio=detector.uses_audio, uses_history=detector.uses_history, **labels)
+
     async def initialize(self):
         """Resolve, load and warm up all models, reporting each one's load time."""
         started = time.perf_counter()
         telemetry.emit("models.loading", stage="server")
-        await asyncio.gather(self._load_runtime("stt"), self._load_runtime("llm"), self._load_runtime("tts"))
+        await asyncio.gather(self._load_runtime("stt"), self._load_runtime("llm"), self._load_runtime("tts"),
+                             self._load_turn_detector())
         self.__dict__.pop("_schedulers", None)  # size queues from the loaded runtimes' capabilities
         self.ready = True
         # Load Silero once now, so sessions only copy it (see _load_vad_frame_model).
@@ -112,7 +144,7 @@ class PipelineOrchestrator:
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
         self.ready = False
-        for stage in ("stt", "llm", "tts"):
+        for stage in ("stt", "llm", "tts", "turn_detector"):
             runtime = self.__dict__.get(stage)
             if runtime is not None:
                 with contextlib.suppress(Exception):
@@ -162,7 +194,6 @@ class PipelineOrchestrator:
         
         # Reset state
         await self.vad.reset()
-        await self.turn_detector.reset()
         turn_state = TurnState()
         stt_reset = asyncio.Event()
         # Callers can pass their own so they can trigger interruption from
@@ -268,7 +299,7 @@ class PipelineOrchestrator:
         output and our own known LLM text on equal footing for comparison
         (STT never emits punctuation the same way twice; we don't want a
         stray comma to break an otherwise-exact word match)."""
-        return re.sub(r"[^a-z0-9\s]", " ", text.lower()).split()
+        return words(text)
 
     @classmethod
     def _looks_like_self_echo(cls, candidate: str, bot_text: str, config: TurnDetectionConfig) -> bool:
@@ -509,16 +540,11 @@ class PipelineOrchestrator:
 
         # Apply VAD filter
         vad_filtered = self._apply_vad(audio_stream, turn_state, trace)
+        detector = self.__dict__.get("turn_detector")
+        if turn_state is not None and getattr(detector, "uses_audio", False):
+            vad_filtered = self._keep_turn_audio(vad_filtered, turn_state)
 
-        # Stream STT: re-transcribe the turn so far as speech arrives (see engine/streaming.py)
-        stream = rolling_transcripts(vad_filtered, transcribe, reset_signal=stt_reset)
-        while True:
-            try:
-                result = await stream.__anext__()
-            except StopAsyncIteration:
-                break
-            except Exception as e:
-                raise tag_stage(e, "stt")
+        def note(result: PartialTranscript) -> None:
             if result.text and trace is not None:
                 turn = trace.listening_turn()
                 turn.add("stt_windows")
@@ -533,17 +559,47 @@ class PipelineOrchestrator:
                 turn.mark("stt_last_partial", overwrite=True)
             if result.text:
                 if emit:
-                    # Always partial here — `result.is_final` is just
-                    # Whisper's own per-window guess (it ends windows in
-                    # punctuation constantly, mid-sentence or not) and is no
-                    # longer treated as authoritative. `_llm_stage`'s silence
-                    # watcher emits the one real "is_final" transcript event
-                    # once a turn has actually ended.
+                    # Always partial: the one "is_final" transcript event for a turn is sent by
+                    # _llm_stage once turn detection has decided the turn is over.
                     emit({"type": "transcript", "text": result.text, "is_final": False})
-            if result.is_final:
-                metrics.stt_latency_ms = (time.perf_counter() - stt_start) * 1000
+            metrics.stt_latency_ms = (time.perf_counter() - stt_start) * 1000
+
+        # Re-transcribe the turn so far as speech arrives (see engine/streaming.py). Turn
+        # detection reaches the transcriber through turn_state, to transcribe the last
+        # words during a pause and to start the next turn.
+        transcriber = TurnTranscriber(transcribe)
+        if turn_state is not None:
+            async def finalize():
+                try:
+                    result = await transcriber.finalize()
+                except Exception as e:
+                    raise tag_stage(e, "stt")
+                if result is not None:
+                    note(result)
+                return result
+
+            turn_state.finalize_transcript = finalize
+            turn_state.start_next_turn = transcriber.reset
+        stream = transcriber.stream(vad_filtered, reset_signal=stt_reset)
+        while True:
+            try:
+                result = await stream.__anext__()
+            except StopAsyncIteration:
+                break
+            except Exception as e:
+                raise tag_stage(e, "stt")
+            note(result)
             yield result
     
+    async def _keep_turn_audio(self, chunks: AsyncIterator[bytes], turn_state: TurnState) -> AsyncIterator[bytes]:
+        """Keep the latest seconds of this turn's speech for a turn detector that uses audio."""
+        limit = int(self.config.turn_detection.detector_audio_s * 16000) * 2
+        async for chunk in chunks:
+            turn_state.speech_audio.extend(chunk)
+            if len(turn_state.speech_audio) > limit:
+                del turn_state.speech_audio[:len(turn_state.speech_audio) - limit]
+            yield chunk
+
     async def _apply_vad(
         self,
         audio_stream: AsyncIterator[bytes],
@@ -688,14 +744,41 @@ class PipelineOrchestrator:
         last_bot_text = ""
         pending_transcript = ""
         turn_ready = asyncio.Event()
-        min_confident_ms = self.config.turn_detection.min_confident_silence_ms
-        min_silence_ms = self.config.turn_detection.min_silence_ms
+        turn_config = self.config.turn_detection
+        detector = self.__dict__.get("turn_detector")
+        detector_name = self._turn_detector_name()
+        ask_detector = detector is not None and getattr(detector, "refines_wait", True)
+        # The detector's latest answer, and the transcript (plus audio length) it was about
+        prediction = {"key": None, "p": None, "ms": None}
+        predict_task: Optional[asyncio.Task] = None
+        detector_failed = False
         last_stt_activity = time.monotonic()
+        last_turn_started: Optional[float] = None
+
+        heard_language: Optional[str] = None  # what STT detected most recently (when not fixed in config)
+
+        def turn_language() -> Optional[str]:
+            return getattr(getattr(self.config, "stt", None), "language", None) or heard_language
+
+        pending_audio_bytes = 0  # how much of the turn's audio pending_transcript covers
+
+        def take_transcript(result) -> None:
+            """Use a transcript unless one covering more of the turn is already in hand."""
+            nonlocal pending_transcript, pending_audio_bytes, last_stt_activity
+            covers = getattr(result, "audio_bytes", 0)
+            if result.text and (covers >= pending_audio_bytes or not covers):
+                pending_transcript = result.text
+                pending_audio_bytes = covers
+                last_stt_activity = time.monotonic()
 
         async def accumulate_stt():
-            nonlocal pending_transcript, last_stt_activity
+            nonlocal pending_transcript, last_stt_activity, heard_language
             async for stt_result in stt_stream:
-                if stt_result.text:
+                if stt_result.language:
+                    heard_language = stt_result.language
+                if stt_result.text and getattr(stt_result, "audio_bytes", 0):
+                    take_transcript(stt_result)
+                elif stt_result.text:
                     # Replace, don't append — each STTResult restates the
                     # whole turn so far (see STTResult's docstring), so
                     # appending would stack overlapping re-transcriptions
@@ -703,7 +786,49 @@ class PipelineOrchestrator:
                     pending_transcript = stt_result.text
                     last_stt_activity = time.monotonic()
 
-        def record_turn_end(reason: str, threshold_ms: float, text: str, **measured) -> None:
+        def prediction_key(text: str):
+            audio_len = len(turn_state.speech_audio) if turn_state is not None and detector.uses_audio else 0
+            return (text, audio_len)
+
+        async def predict(text: str, key) -> None:
+            nonlocal detector_failed
+            history = conversation.messages_for("")[1:-1] if detector.uses_history else ()
+            request = TurnRequest(
+                transcript=text,
+                history=tuple(history[-turn_config.detector_history_messages:]) if history else (),
+                audio=bytes(turn_state.speech_audio) if detector.uses_audio and turn_state is not None else None,
+                silence_ms=turn_state.silence_ms if turn_state is not None else 0.0,
+                session_id=trace.session_id if trace is not None else None,
+                language=turn_language(),
+            )
+            started = time.perf_counter()
+            try:
+                async with self.scheduler("turn").slot(request):
+                    result = await detector.predict(request)
+                p = min(1.0, max(0.0, float(result.end_of_turn)))
+                prediction.update(key=key, p=p, ms=(time.perf_counter() - started) * 1000)
+            except (asyncio.CancelledError, Cancelled):
+                raise
+            except Exception as e:
+                prediction.update(key=key, p=None, ms=None)
+                if not detector_failed:  # once per call: the default wait keeps working meanwhile
+                    detector_failed = True
+                    telemetry.emit("turn.detector_failed", level="warning", stage="turn",
+                                   error=describe_error(e, "turn"), detector=detector_name,
+                                   impact=f"turns end after the default {turn_config.min_silence_ms} ms pause")
+
+        def wait_ms(text: str):
+            """How much silence ends the turn, given the detector's latest answer for this text."""
+            p = prediction["p"] if ask_detector and prediction["key"] is not None and prediction["key"][0] == text else None
+            if p is None:
+                return turn_config.min_silence_ms, None
+            if p >= turn_config.likely_threshold:
+                return turn_config.min_confident_silence_ms, p
+            if p < turn_config.unlikely_threshold:
+                return turn_config.max_silence_ms, p
+            return turn_config.min_silence_ms, p
+
+        def record_turn_end(reason: str, threshold_ms: float, text: str, p=None, **measured) -> None:
             if trace is None:
                 return
             turn = trace.listening_turn()
@@ -711,61 +836,143 @@ class PipelineOrchestrator:
                 return
             turn.mark("turn_end_detected")
             turn.info["turn_end_reason"] = reason
+            if p is not None:
+                turn.info["end_of_turn_probability"] = round(p, 3)
             trace.event(
-                "turn.end_detected", turn=turn, stage="turn", reason=reason,
-                sounded_complete=self.turn_detector.looks_complete(text), threshold_ms=threshold_ms,
+                "turn.end_detected", turn=turn, stage="turn", reason=reason, detector=detector_name,
+                end_of_turn_probability=round(p, 3) if p is not None else None,
+                prediction_ms=round(prediction["ms"], 1) if p is not None and prediction["ms"] is not None else None,
+                threshold_ms=threshold_ms,
                 wait_ms=turn.between_ms("speech_end", "turn_end_detected") if trace.realtime_audio else None,
                 speech_ms=turn.between_ms("speech_start", "speech_end"),
                 **{k: round(v) for k, v in measured.items()},
             )
 
+        finalize_task: Optional[asyncio.Task] = None
+
+        async def last_words_transcribed() -> None:
+            """Wait for the words said since the last partial transcript, if any are being transcribed."""
+            nonlocal finalize_task
+            finalize = getattr(turn_state, "finalize_transcript", None)
+            if finalize is None:
+                return
+            if finalize_task is None:
+                finalize_task = asyncio.create_task(finalize())
+            try:
+                result = await asyncio.shield(finalize_task)
+            except Exception:
+                finalize_task = None
+                raise
+            finalize_task = None
+            if result is not None:
+                take_transcript(result)
+
         async def watch_for_turn_end():
-            while True:
-                await asyncio.sleep(0.05)
-                text = pending_transcript.strip()
-                if not text:
-                    continue
-                # A confidently-complete-sounding utterance only needs a
-                # brief confirmation pause; anything ambiguous waits for
-                # the longer, safer silence — so a clear "thanks, bye."
-                # responds fast while a trailed-off "so I was..." doesn't
-                # get answered mid-thought.
-                threshold = (
-                    min_confident_ms
-                    if self.turn_detector.looks_complete(text)
-                    else min_silence_ms
-                )
+            nonlocal predict_task, finalize_task
+            finalized_this_pause = False
+            try:
+                while True:
+                    await asyncio.sleep(0.05)
+                    paused_ms = turn_state.silence_ms if turn_state is not None and turn_state.vad_active else 0.0
+                    if paused_ms == 0:
+                        finalized_this_pause = False
+                    if finalize_task is not None and finalize_task.done():
+                        await last_words_transcribed()  # collect it (or raise its error)
+                    elif (finalize_task is None and not finalized_this_pause and paused_ms >= FINALIZE_AFTER_SILENCE_MS
+                          and getattr(turn_state, "finalize_transcript", None) is not None):
+                        finalized_this_pause = True
+                        # The user paused: transcribe their last words now, so the transcript is
+                        # complete by the time the pause is long enough to end the turn.
+                        finalize_task = asyncio.create_task(turn_state.finalize_transcript())
+                    text = pending_transcript.strip()
+                    if not text:
+                        continue
 
-                vad_ok = turn_state is not None and turn_state.vad_active
-                if vad_ok and turn_state.silence_ms >= threshold:
-                    record_turn_end("silence", threshold, text, silence_ms=turn_state.silence_ms)
-                    turn_ready.set()
-                    continue
+                    if ask_detector:
+                        # Ask again when the words change; audio-based detectors also
+                        # when the user pauses with more speech than last time.
+                        key, last = prediction_key(text), prediction["key"]
+                        if last is None or last[0] != text:
+                            stale = True
+                        else:
+                            paused = turn_state is not None and turn_state.silence_ms > 0
+                            stale = detector.uses_audio and paused and key[1] > last[1]
+                        if stale and (predict_task is None or predict_task.done()):
+                            predict_task = asyncio.create_task(predict(text, key))
 
-                # Fallback: elapsed wall-clock time since the last newly
-                # recognized word, independent of VAD. Without this, VAD
-                # being unavailable (e.g. failing to load — this exact
-                # failure mode silently broke a prior session's turn
-                # detection entirely) or just never reporting true silence
-                # in a noisy room would wait on a threshold that can never
-                # be reached and hang forever. When VAD *is* active this
-                # only acts as a distant safety net (extra grace period on
-                # top of the normal threshold), since VAD is the fast,
-                # accurate signal in that case.
-                idle_ms = (time.monotonic() - last_stt_activity) * 1000
-                idle_ceiling = threshold if not vad_ok else threshold + 1500
-                if idle_ms >= idle_ceiling:
-                    record_turn_end("no_new_words" if vad_ok else "no_vad_idle", threshold, text, idle_ms=idle_ms)
-                    turn_ready.set()
+                    threshold, p = wait_ms(text)
+                    vad_ok = turn_state is not None and turn_state.vad_active
+                    if vad_ok and turn_state.silence_ms >= threshold:
+                        await last_words_transcribed()
+                        if turn_state.silence_ms < threshold:
+                            continue  # they started talking again while the last words were transcribed
+                        text = pending_transcript.strip()
+                        record_turn_end("silence", threshold, text, p, silence_ms=turn_state.silence_ms)
+                        turn_ready.set()
+                        continue
+
+                    # Fallback: elapsed wall-clock time since the last newly
+                    # recognized word, independent of VAD. Without this, VAD
+                    # being unavailable (e.g. failing to load — this exact
+                    # failure mode silently broke a prior session's turn
+                    # detection entirely) or just never reporting true silence
+                    # in a noisy room would wait on a threshold that can never
+                    # be reached and hang forever. When VAD *is* active this
+                    # only acts as a distant safety net (extra grace period on
+                    # top of the normal threshold), since VAD is the fast,
+                    # accurate signal in that case.
+                    idle_ms = (time.monotonic() - last_stt_activity) * 1000
+                    idle_ceiling = threshold if not vad_ok else threshold + 1500
+                    if idle_ms >= idle_ceiling:
+                        await last_words_transcribed()
+                        record_turn_end("no_new_words" if vad_ok else "no_vad_idle", threshold,
+                                        pending_transcript.strip(), p, idle_ms=idle_ms)
+                        turn_ready.set()
+            finally:
+                for task in (predict_task, finalize_task):
+                    if task is not None and not task.done():
+                        task.cancel()
+
+        def start_next_turn() -> None:
+            """This turn's words are taken: anything heard from now on belongs to the next turn."""
+            nonlocal pending_audio_bytes
+            pending_audio_bytes = 0
+            if turn_state is not None:
+                turn_state.speech_audio.clear()
+                if turn_state.start_next_turn is not None:
+                    turn_state.start_next_turn()
+
+        def resume_previous_turn() -> None:
+            """If the user cut off the last reply right after their turn ended, they weren't done:
+            fold that turn into this one instead of answering it separately."""
+            window_s = turn_config.resume_window_ms / 1000
+            fired_at = getattr(barge_in, "fired_at", None)
+            if not window_s or last_turn_started is None or fired_at is None:
+                return
+            gap_s = fired_at - last_turn_started
+            if not 0 <= gap_s <= window_s:
+                return
+            retracted = conversation.retract_last_turn()
+            if retracted is None and not conversation.has_carried_text:
+                return
+            if trace is not None:
+                trace.event("turn.resumed", turn=trace.listening_turn(), stage="turn", gap_ms=round(gap_s * 1000),
+                            window_ms=turn_config.resume_window_ms,
+                            hint="the user kept talking right after a pause, so both parts are answered as one turn")
+            if emit:
+                emit({"type": "turn_resumed"})
 
         async def process_turn(transcript: str) -> AsyncIterator[str]:
-            nonlocal first_token, response_buffer, last_bot_text
+            nonlocal first_token, response_buffer, last_bot_text, last_turn_started
+            resume_previous_turn()
+            last_turn_started = time.monotonic()
             turn = None
             if trace is not None:
                 if "turn_end_detected" not in trace.listening_turn().marks:
                     record_turn_end("audio_ended", 0, transcript)
                 turn = trace.start_responding()
-                trace.event("stt.final", turn=turn, stage="stt", **telemetry.content(transcript))
+                turn.info["language"] = turn_language()
+                trace.event("stt.final", turn=turn, stage="stt", language=turn_language(), **telemetry.content(transcript))
             if emit:
                 # The one authoritative "is_final" transcript event for
                 # this turn — every event out of _stt_stage was a partial.
@@ -775,6 +982,7 @@ class PipelineOrchestrator:
                 # done, so the next turn's transcript doesn't re-include
                 # (and duplicate) speech we've already acted on.
                 stt_reset.set()
+            start_next_turn()
 
             messages = conversation.messages_for(transcript)
             budget.allocate("llm", 150)
@@ -805,6 +1013,7 @@ class PipelineOrchestrator:
                 top_p=getattr(llm_config, "top_p", 0.9),
                 session_id=trace.session_id if trace is not None else None,
                 deadline=time.monotonic(),
+                language=turn_language(),
             )
             async with llm_scheduler.slot(request) as slot:
                 if turn is not None:
@@ -850,6 +1059,7 @@ class PipelineOrchestrator:
                                 "is_final": True,
                                 "interrupted": True,
                             })
+                        yield REPLY_CUT_OFF  # drop words already generated but not yet spoken
                         break
 
                     if first_token:
@@ -884,6 +1094,10 @@ class PipelineOrchestrator:
 
                     if llm_result.text:
                         yield llm_result.text
+                    if is_final:
+                        # Lets TTS speak the last sentence now, while this turn is still open,
+                        # instead of waiting for a token after the final full stop that never comes
+                        yield END_OF_REPLY
 
             if barge_in is not None:
                 barge_in.mark_idle()
@@ -928,6 +1142,7 @@ class PipelineOrchestrator:
                     # buffer still gets flushed instead of dragging this
                     # echoed audio into whatever the user says next.
                     stt_reset.set()
+                start_next_turn()
                 return
             async for token in process_turn(candidate):
                 yield token
@@ -994,6 +1209,7 @@ class PipelineOrchestrator:
                 continue
             request = TTSRequest(
                 text=segment,
+                language=getattr(tts_config, "language", None),
                 voice=getattr(tts_config, "voice", None),
                 speed=getattr(tts_config, "speed", 1.0),
                 session_id=session_id,

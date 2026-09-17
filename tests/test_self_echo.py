@@ -27,7 +27,8 @@ from fusion_runtime.config import PipelineConfig, TurnDetectionConfig
 from fusion_runtime.contract import LLMChunk
 from fusion_runtime.engine import LatencyBudget, PipelineMetrics, PipelineOrchestrator
 from fusion_runtime.engine.streaming import PartialTranscript
-from fusion_runtime.vad import PunctuationTurnDetector, TurnState
+from fusion_runtime.engine.text import END_OF_REPLY
+from fusion_runtime.vad import TurnState
 
 
 def make_orchestrator(min_confident_ms: int = 50, min_silence_ms: int = 400) -> PipelineOrchestrator:
@@ -35,7 +36,7 @@ def make_orchestrator(min_confident_ms: int = 50, min_silence_ms: int = 400) -> 
     orch.config = PipelineConfig()
     orch.config.turn_detection.min_confident_silence_ms = min_confident_ms
     orch.config.turn_detection.min_silence_ms = min_silence_ms
-    orch.turn_detector = PunctuationTurnDetector(orch.config.turn_detection)
+    orch.turn_detector = None  # silence only
     return orch
 
 
@@ -136,20 +137,20 @@ class TestPipelineDiscardsSelfEcho:
                 yield LLMChunk(text=bot_reply)
                 yield LLMChunk(finish_reason="stop")
 
-        orch = make_orchestrator(min_confident_ms=50, min_silence_ms=400)
+        orch = make_orchestrator(min_confident_ms=50, min_silence_ms=50)
         orch.llm = VerboseFakeLLM()
         turn_state = TurnState()
         driver = asyncio.create_task(hold_then_grow_silence(turn_state))
 
         async def stt_stream():
-            yield PartialTranscript(text="tell me about computer.", is_final=True, confidence=1.0, latency_ms=0)
+            yield PartialTranscript(text="tell me about computer.", confidence=1.0, latency_ms=0)
             await asyncio.sleep(0.3)
             # Speaker bleed of `bot_reply` above, transcribed as if it were
             # a brand new turn — a long contiguous run of the bot's own
             # words, exactly the shape seen live.
             yield PartialTranscript(
                 text="a device that can process information and perform.",
-                is_final=True, confidence=1.0, latency_ms=0,
+                confidence=1.0, latency_ms=0,
             )
             await asyncio.Event().wait()  # keep the stream open, like a live session
 
@@ -164,6 +165,7 @@ class TestPipelineDiscardsSelfEcho:
         try:
             first_turn, task1 = await next_token_checkpoints(gen, [0.3])
             assert first_turn[-1] == bot_reply, "the genuine first turn should still get a real reply"
+            assert await gen.__anext__() == END_OF_REPLY  # the reply's end marker, for TTS
 
             second_turn, task2 = await next_token_checkpoints(gen, [1.0])
             assert second_turn[-1] is None, "no token should be produced for a discarded echo turn"

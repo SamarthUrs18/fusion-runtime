@@ -99,6 +99,9 @@ class TelemetryMetrics:
         self.tts_audio = Counter("fusion_tts_audio_seconds", "Seconds of speech synthesized", registry=r)
         self.stt_audio = Counter("fusion_stt_speech_seconds", "Seconds of user speech detected", registry=r)
 
+        self.turns_resumed = Counter("fusion_turns_resumed",
+                                     "Turns joined to the previous one because the user kept talking after a pause",
+                                     registry=r)
         self.interruptions = Counter("fusion_interruptions", "Barge-ins that stopped a reply", registry=r)
         self.echo_discarded = Counter("fusion_echo_discarded", "User turns discarded as the bot's own echo", registry=r)
         self.scheduler_wait = Histogram("fusion_scheduler_wait_seconds", "Time a request waited for a model slot",
@@ -152,6 +155,8 @@ class TelemetryMetrics:
                 self.scheduler_wait.labels(event.stage or "?").observe(event.duration_ms / 1000)
         elif name == "scheduler.rejected":
             self.scheduler_rejected.labels(event.stage or "?").inc()
+        elif name == "turn.resumed":
+            self.turns_resumed.inc()
         elif name == "barge_in.fired":
             self.interruptions.inc()
         elif name == "echo.discarded":

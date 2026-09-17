@@ -209,6 +209,10 @@ class VoiceChatClient:
             # The server decided a "user" turn was really the bot's own voice
             # and dropped it. Shown so a wrong call is visible too.
             print(f'\n🪞 (server discarded likely self-echo: "{msg.get("text", "")}")')
+        elif mtype == "turn_resumed":
+            # The caller kept talking right after a pause: the cut-off reply is dropped and
+            # what they said before and after the pause is answered as one turn.
+            print("\n↪  (you kept talking, so both parts are answered together)")
         elif mtype == "turn.trace":
             print(f"\n{format_turn_summary(msg.get('summary', {}))}")
             if self.verbose and msg.get("timeline"):

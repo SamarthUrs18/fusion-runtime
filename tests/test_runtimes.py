@@ -115,3 +115,28 @@ async def test_real_runtime_conforms(stage):
         with wave.open(str(FIXTURE), "rb") as wav:
             kwargs["stt_audio"] = wav.readframes(wav.getnframes())
     assert_conforms(await check_runtime(runtime, **kwargs))
+
+
+async def test_fake_turn_detector_conforms():
+    from fusion_runtime.testing.fakes import FakeTurnDetector
+
+    assert_conforms(await check_runtime(FakeTurnDetector(fake_spec("turn", uses_audio=True, uses_history=True))))
+
+
+async def test_silence_detector_conforms():
+    from fusion_runtime.turns.silence import SilenceTurnDetector
+
+    assert_conforms(await check_runtime(SilenceTurnDetector(ModelSpec(stage="turn", runtime="silence", model=""))))
+
+
+async def test_a_broken_turn_detector_plugin_fails_startup_with_a_reason(monkeypatch):
+    orch = PipelineOrchestrator(PipelineConfig())
+    orch.config.turn_detection.runtime = "no_such_package.turns:Detector"
+    sink = ListSink()
+    telemetry.add_sink(sink)
+    try:
+        with pytest.raises(Exception, match="PYTHONPATH"):
+            await orch._load_turn_detector()
+    finally:
+        telemetry.remove_sink(sink)
+    assert sink.named("model.load_failed")[0].stage == "turn"

@@ -29,6 +29,9 @@ from fusion_runtime.contract import (
     Transcript,
     TTSRequest,
     TTSRuntime,
+    TurnDetector,
+    TurnPrediction,
+    TurnRequest,
 )
 
 
@@ -180,5 +183,36 @@ class FakeTTSRuntime(_FakeBase, TTSRuntime):
                 tone = (int(3000 * math.sin(2 * math.pi * 220 * (index * samples_per_chunk + n) / rate))
                         for n in range(samples_per_chunk))
                 yield AudioChunk(pcm=struct.pack(f"<{samples_per_chunk}h", *tone), sample_rate=rate)
+        finally:
+            self._exit()
+
+
+class FakeTurnDetector(_FakeBase, TurnDetector):
+    """Says a transcript ending in sentence punctuation is finished (0.9), anything else isn't (0.1).
+
+    Options: uses_audio, uses_history (declared needs), step_s.
+    """
+
+    def __init__(self, spec: ModelSpec):
+        super().__init__(spec)
+        self._init_fake()
+        self.uses_audio = bool(spec.options.get("uses_audio", False))
+        self.uses_history = bool(spec.options.get("uses_history", False))
+        self.requests: List[TurnRequest] = []
+
+    @property
+    def capabilities(self) -> Capabilities:
+        return Capabilities(streaming_output=False, max_concurrency=self.spec.options.get("max_concurrency", 4))
+
+    async def predict(self, request: TurnRequest) -> TurnPrediction:
+        if not request.transcript.strip():
+            raise InvalidRequest("transcript must not be empty")
+        request.cancel.raise_if_cancelled()
+        self._enter()
+        try:
+            await self._step(request)
+            self.requests.append(request)
+            finished = request.transcript.rstrip().endswith((".", "!", "?"))
+            return TurnPrediction(0.9 if finished else 0.1)
         finally:
             self._exit()

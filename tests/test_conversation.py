@@ -83,7 +83,7 @@ async def test_llm_stage_sends_history_on_later_turns():
     conversation = Conversation("sys")
 
     async def one_turn(text):
-        yield PartialTranscript(text=text, is_final=True, confidence=1.0, latency_ms=0)
+        yield PartialTranscript(text=text, confidence=1.0, latency_ms=0)
 
     for text in ("book a table", "for two"):
         async for _ in orch._llm_stage(one_turn(text), "sys", LatencyBudget(total_ms=500), PipelineMetrics(),
@@ -93,3 +93,14 @@ async def test_llm_stage_sends_history_on_later_turns():
     assert orch.llm.calls[0] == [("system", "sys"), ("user", "book a table")]
     assert orch.llm.calls[1] == [("system", "sys"), ("user", "book a table"), ("assistant", "Sure."), ("user", "for two")]
     assert orch.scheduler("llm").completed == 2 and orch.scheduler("llm").in_flight == 0
+
+
+def test_retracting_a_turn_carries_the_words_and_drops_the_cut_off_reply():
+    conversation = Conversation("sys")
+    conversation.add_turn("book a table", "For how many?")
+    conversation.add_turn("hello", "Hi! How can I")
+    assert conversation.retract_last_turn() == "hello"
+    assert conversation.has_carried_text
+    messages = conversation.messages_for("my name is Priya")
+    assert [m.content for m in messages] == ["sys", "book a table", "For how many?", "hello my name is Priya"]
+    assert Conversation("sys").retract_last_turn() is None

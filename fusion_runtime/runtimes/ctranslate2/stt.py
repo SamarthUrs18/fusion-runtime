@@ -56,6 +56,12 @@ class CTranslate2STT(STTRuntime):
             raise ModelNotFound(f"Whisper model not found at {path}. Run: frun models pull")
         self.model = await asyncio.get_running_loop().run_in_executor(None, self._build, str(path))
         self._languages = self._detect_languages()
+        language = self._default_language()
+        if not self.capabilities.supports_language(language):
+            raise InvalidRequest(
+                f"{path.name} is an English-only Whisper model, but the configured language is {language!r}. "
+                "Use a multilingual Whisper model (without .en in its name), or set language=\"en\""
+            )
         if self.spec.options.get("warmup", True):
             await asyncio.get_running_loop().run_in_executor(
                 None, self._transcribe_sync, b"\x00\x00" * WHISPER_SAMPLE_RATE, self._default_language())

@@ -218,6 +218,21 @@ def test_up_llm_flags_set_the_endpoint_for_the_server(monkeypatch):
     assert "LLM: qwen-local at http://localhost:8080/v1" in result.output
 
 
+def test_up_turn_flags_reach_the_server(monkeypatch):
+    for name in LLM_ENV + ("FUSION_TURN_DETECTOR", "FUSION_TURN_WAIT_MS", "FUSION_INTERRUPT_AFTER_MS"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("FUSION_CONFIG", "unset")
+    monkeypatch.setattr("uvicorn.run", lambda *a, **k: None)
+    monkeypatch.setattr("fusion_runtime.cli._checks.missing_models", lambda *a, **k: [])
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    result = cli.invoke(app, ["up", "--turn-wait-ms", "1200", "--turn-detector", "my_pkg.turns:Model",
+                              "--interrupt-after-ms", "450"])
+    assert result.exit_code == 0, result.output
+    assert os.environ["FUSION_TURN_WAIT_MS"] == "1200" and os.environ["FUSION_TURN_DETECTOR"] == "my_pkg.turns:Model"
+    assert os.environ["FUSION_INTERRUPT_AFTER_MS"] == "450"
+    assert "agent answers after 1200 ms of silence" in result.output and "talking over it for 450 ms interrupts" in result.output
+
+
 def test_up_url_without_model_is_an_error(monkeypatch):
     monkeypatch.setenv("FUSION_LLM_URL", "")
     result = cli.invoke(app, ["up", "--llm-url", "http://localhost:8080/v1"])

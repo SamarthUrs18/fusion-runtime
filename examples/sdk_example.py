@@ -10,33 +10,26 @@ from fusion_runtime import (
     STTConfig,
     LLMConfig,
     TTSConfig,
-    Provider,
+    TurnDetectionConfig,
     run_single_turn,
 )
 
 
 async def main():
-    # Create config (customize providers as needed)
+    # Models by catalog id (see `frun models list`); download them with `frun models pull`.
     config = PipelineConfig(
-        stt=STTConfig(
-            provider=Provider.FASTER_WHISPER,
-            model="tiny.en",
-            device="cuda",
-            compute_type="float16",
-        ),
-        llm=LLMConfig(
-            provider=Provider.LLAMA_CPP,
-            model="Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-            n_gpu_layers=-1,
-        ),
-        tts=TTSConfig(
-            provider=Provider.KOKORO,
-            model="kokoro-v1.0.onnx",
-            voice="af_heart",
-        ),
+        stt=STTConfig(model="whisper-tiny.en", language="en"),
+        llm=LLMConfig(runtime="llama_cpp", model="qwen2.5-0.5b-q4", n_ctx=2048, max_tokens=256),
+        tts=TTSConfig(model="kokoro-v1.0", voice="af_heart"),
+        # When the caller has finished: answer after 500 ms of silence; talking over the agent for
+        # 300 ms interrupts it. For shorter waits on
+        # finished sentences and longer ones mid-thought, plug in a turn detector model, e.g.
+        #   TurnDetectionConfig(runtime="my_package.turns:MyDetector", model="...", min_silence_ms=500)
+        # (see examples/turn_detector_plugin.py).
+        turn_detection=TurnDetectionConfig(min_silence_ms=500, barge_in_min_speech_ms=300, resume_window_ms=1500),
         target_latency_ms=500,
     )
-    
+
     # Initialize orchestrator
     orchestrator = PipelineOrchestrator(config)
     await orchestrator.initialize()

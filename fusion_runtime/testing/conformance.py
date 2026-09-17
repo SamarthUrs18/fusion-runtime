@@ -34,6 +34,9 @@ from fusion_runtime.contract import (
     Transcript,
     TTSRequest,
     TTSRuntime,
+    TurnDetector,
+    TurnPrediction,
+    TurnRequest,
 )
 
 UNSUPPORTED_LANGUAGE = "zz"  # a code no runtime will claim
@@ -119,8 +122,10 @@ async def check_runtime(
         await _llm_checks(runtime, run, cancel_timeout_s, llm_prompt)
     elif isinstance(runtime, STTRuntime):
         await _stt_checks(runtime, run, stt_audio or bytes(16000 * 2))
+    elif isinstance(runtime, TurnDetector):
+        await _turn_checks(runtime, run, stt_audio or bytes(16000 * 2))
     else:
-        report.outcomes.append(CheckOutcome("is a known stage", False, "not an STT, LLM or TTS runtime"))
+        report.outcomes.append(CheckOutcome("is a known stage", False, "not an STT, LLM, TTS or turn detector runtime"))
 
     async def close_twice() -> None:
         await runtime.close()
@@ -327,3 +332,48 @@ async def _stt_checks(runtime: STTRuntime, run, audio: bytes) -> None:
             _require(len(results) == 1 and isinstance(results[0], InvalidRequest),
                      f"unsupported language gave {type(results[0]).__name__ if results else 'nothing'}")
         await run("reports an unsupported language as InvalidRequest", unsupported_language)
+
+
+async def _turn_checks(runtime: TurnDetector, run, audio: bytes) -> None:
+    caps = runtime.capabilities
+    history = (Message("assistant", "Welcome, how can I help?"),)
+
+    def request(**overrides) -> TurnRequest:
+        base = {"transcript": "I'd like to book a table for two.", "silence_ms": 300.0}
+        if runtime.uses_audio:
+            base["audio"] = audio
+        if runtime.uses_history:
+            base["history"] = history
+        return TurnRequest(**{**base, **overrides})
+
+    async def gives_a_probability():
+        started = asyncio.get_running_loop().time()
+        results = [await runtime.predict(request(transcript=t))
+                   for t in ("I'd like to book a table for two.", "I'd like to book a table for")]
+        elapsed_ms = (asyncio.get_running_loop().time() - started) * 1000 / len(results)
+        for result in results:
+            _require(isinstance(result, TurnPrediction), f"returned {type(result).__name__}, not TurnPrediction")
+            _require(isinstance(result.end_of_turn, (int, float)) and 0.0 <= result.end_of_turn <= 1.0,
+                     f"end_of_turn {result.end_of_turn!r} is not a probability in [0, 1]")
+        if elapsed_ms > 250:
+            raise CheckFailed(f"{elapsed_ms:.0f} ms per prediction: too slow to shorten waits (aim for < 100 ms)")
+        return f"finished {results[0].end_of_turn:.2f} vs unfinished {results[1].end_of_turn:.2f}, {elapsed_ms:.0f} ms each"
+
+    async def rejects_empty_transcript():
+        await _expect_raises(lambda: runtime.predict(request(transcript="  ")), InvalidRequest, "empty transcript")
+
+    async def cancel_before_start():
+        r = request()
+        r.cancel.cancel("conformance check")
+        await _expect_raises(lambda: runtime.predict(r), Cancelled, "already-cancelled request")
+
+    async def concurrent_predictions():
+        count = max(1, min(caps.max_concurrency, 3))
+        results = await asyncio.gather(*(runtime.predict(request()) for _ in range(count)))
+        _require(all(isinstance(r, TurnPrediction) for r in results), "a concurrent prediction failed")
+        return f"{count} at once"
+
+    await run("returns an end-of-turn probability quickly", gives_a_probability)
+    await run("rejects an empty transcript with InvalidRequest", rejects_empty_transcript)
+    await run("raises Cancelled for an already-cancelled request", cancel_before_start)
+    await run("serves concurrent predictions up to max_concurrency", concurrent_predictions)

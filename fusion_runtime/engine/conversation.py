@@ -69,6 +69,24 @@ class Conversation:
         if overflow > 0:
             del self.history[:overflow + overflow % 2]
 
+    def retract_last_turn(self) -> Optional[str]:
+        """Undo the last exchange: the user wasn't finished, they paused.
+
+        Their words carry into their next message, and the reply they cut off
+        leaves the history (the agent effectively hadn't answered yet).
+        Returns the retracted user text, or None if there was nothing to undo.
+        """
+        if len(self.history) >= 2 and self.history[-1].role == "assistant":
+            self.history.pop()
+            user_text = self.history.pop().content
+            self._carried_user_text = f"{user_text} {self._carried_user_text}".strip()
+            return user_text
+        return None
+
+    @property
+    def has_carried_text(self) -> bool:
+        return bool(self._carried_user_text)
+
     @property
     def turns(self) -> int:
         return len(self.history) // 2

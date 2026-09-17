@@ -33,6 +33,7 @@ class BargeInState:
     playing: bool = False
     interrupted: asyncio.Event = field(default_factory=asyncio.Event)
     speaking_since: Optional[float] = None
+    fired_at: Optional[float] = None  # time.monotonic() of the latest interruption
     _fired: bool = False
 
     @property
@@ -60,4 +61,5 @@ class BargeInState:
         """Record an interruption: cancels in-flight generation and stops
         watching until the next reply starts."""
         self._fired = True
+        self.fired_at = time.monotonic()
         self.interrupted.set()

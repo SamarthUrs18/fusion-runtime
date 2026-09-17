@@ -17,14 +17,17 @@ import importlib
 from importlib.metadata import entry_points
 from typing import Dict, List, Tuple, Type
 
-from fusion_runtime.contract.common import STAGES, ModelRuntime, ModelSpec, Stage
+from fusion_runtime.contract.common import RUNTIME_STAGES, ModelRuntime, ModelSpec, Stage
 from fusion_runtime.contract.llm import LLMRuntime
 from fusion_runtime.contract.stt import STTRuntime
 from fusion_runtime.contract.tts import TTSRuntime
+from fusion_runtime.contract.turn import TurnDetector
 
 ENTRY_POINT_GROUP = "fusion_runtime.runtimes"
 
-STAGE_BASES: Dict[str, Type[ModelRuntime]] = {"stt": STTRuntime, "llm": LLMRuntime, "tts": TTSRuntime}
+STAGE_BASES: Dict[str, Type[ModelRuntime]] = {
+    "stt": STTRuntime, "llm": LLMRuntime, "tts": TTSRuntime, "turn": TurnDetector,
+}
 
 # (stage, name) -> "module:Class"
 BUILTIN_RUNTIMES: Dict[Tuple[str, str], str] = {
@@ -32,6 +35,7 @@ BUILTIN_RUNTIMES: Dict[Tuple[str, str], str] = {
     ("llm", "llama_cpp"): "fusion_runtime.runtimes.llama_cpp.llm:LlamaCppLLM",
     ("llm", "openai_http"): "fusion_runtime.runtimes.openai_http.llm:OpenAIHTTPLLM",
     ("tts", "onnx"): "fusion_runtime.runtimes.onnx.tts:OnnxTTS",
+    ("turn", "silence"): "fusion_runtime.turns.silence:SilenceTurnDetector",
 }
 
 _registered: Dict[Tuple[str, str], str] = {}
@@ -57,7 +61,7 @@ def _plugin_targets() -> Dict[Tuple[str, str], str]:
     found = {}
     for ep in entry_points(group=ENTRY_POINT_GROUP):
         stage, _, name = ep.name.partition(".")
-        if stage in STAGES and name:
+        if stage in RUNTIME_STAGES and name:
             found[(stage, name)] = ep.value
     return found
 
@@ -100,7 +104,10 @@ def _import(target: str):
     try:
         module = importlib.import_module(module_name)
     except ImportError as e:
-        raise UnknownRuntime(f"Can't import runtime module {module_name!r}: {e}") from e
+        raise UnknownRuntime(
+            f"Can't import runtime module {module_name!r}: {e}. "
+            "Install the package that provides it, or make sure it's on PYTHONPATH"
+        ) from e
     try:
         obj = module
         for part in attr.split("."):
@@ -111,5 +118,5 @@ def _import(target: str):
 
 
 def _check_stage(stage: str) -> None:
-    if stage not in STAGES:
-        raise ValueError(f"stage must be one of {', '.join(STAGES)}, got {stage!r}")
+    if stage not in RUNTIME_STAGES:
+        raise ValueError(f"stage must be one of {', '.join(RUNTIME_STAGES)}, got {stage!r}")

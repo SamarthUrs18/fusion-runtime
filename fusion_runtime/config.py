@@ -65,7 +65,7 @@ class Provider(str, Enum):
     SILERO = "silero"
 
     # Turn Detection
-    PUNCTUATION = "punctuation"
+    SILENCE = "silence"  # end the turn after a pause; plug in a model with TurnDetectionConfig.runtime
 
 
 class _StageRuntime(BaseModel):
@@ -87,7 +87,7 @@ class STTConfig(_StageRuntime):
     model: str = "tiny.en"
     device: str = "auto"  # auto | cpu | cuda — auto falls back to cpu on Mac
     compute_type: str = "auto"  # auto | int8 | float16 — auto picks int8 on CPU
-    language: Optional[str] = "en"
+    language: Optional[str] = "en"  # what callers speak (BCP-47 code: "en", "hi", "es"); None = detect per turn
     beam_size: int = 1
     vad_filter: bool = True
 
@@ -124,6 +124,7 @@ class TTSConfig(_StageRuntime):
     provider: Provider = Provider.KOKORO
     model: str = _TTS_MODEL
     voice: str = "af_heart"
+    language: Optional[str] = None  # None = the voice's own language (Kokoro: af_ = American English)
     sample_rate: int = 24000
     speed: float = 1.0
     # Streaming
@@ -139,22 +140,41 @@ class VADConfig(BaseModel):
 
 
 class TurnDetectionConfig(BaseModel):
-    provider: Provider = Provider.PUNCTUATION
-    unlikely_threshold: float = 0.08
-    # Two-tier trailing-silence requirement before a turn is considered
-    # over, measured going *forward* from when the user actually stopped
-    # talking (not from whenever the next STT result happens to arrive —
-    # see PipelineOrchestrator._llm_stage's silence watcher for why that
-    # distinction matters). The shorter threshold applies when the
-    # accumulated transcript already looks sentence-complete
-    # (TurnDetectorBase.looks_complete); the longer one is the safety net
-    # for anything ambiguous — a trailed-off or mid-thought pause — so an
-    # ordinary breath doesn't get mistaken for the end of the turn.
-    min_confident_silence_ms: int = 200
-    min_silence_ms: int = 700
-    # Required *sustained* speech (per Silero VAD, while the bot is
-    # generating/speaking) before treating it as a genuine interruption
-    # rather than a noise blip or residual echo of the bot's own voice.
+    """When the user's turn is over, and the agent may speak.
+
+    By default a turn ends after `min_silence_ms` of silence: set it to how
+    long the agent should wait before answering. Longer is more patient with
+    people who pause mid-sentence; shorter answers faster.
+
+    A turn detector model can refine that wait (see fusion_runtime.contract.turn):
+    it predicts how likely the user is done, and the wait becomes
+    `min_confident_silence_ms` when that's likely (>= likely_threshold) and
+    `max_silence_ms` when it's unlikely (< unlikely_threshold). Silence always
+    has to confirm the end of a turn; a detector that's slow or fails just
+    leaves the default wait in place.
+    """
+    provider: Provider = Provider.SILENCE
+    runtime: Optional[str] = None  # a turn detector: plugin name ("my_detector"), or "module:Class"
+    model: Optional[str] = None  # model reference passed to the detector (path, hf:owner/repo, URL), if it needs one
+    options: Dict[str, Any] = Field(default_factory=dict)  # passed to the detector as they are
+
+    min_silence_ms: int = 500  # the wait before the agent speaks
+    min_confident_silence_ms: int = 300  # when the detector says the user is likely done
+    max_silence_ms: int = 1800  # when the detector says the user is likely mid-thought
+    likely_threshold: float = 0.85
+    unlikely_threshold: float = 0.15
+    detector_timeout_ms: int = 250  # predictions slower than this don't hold the turn up
+    detector_audio_s: float = 8.0  # most recent speech kept for detectors that use audio
+    detector_history_messages: int = 6  # recent messages given to detectors that use history
+
+    # Speaking again this soon after a turn ended (and cutting off the reply)
+    # continues that turn instead of starting a new one: "hello ... my name is"
+    # reaches the LLM as one message. 0 turns this off.
+    resume_window_ms: int = 1500
+
+    # How long the caller must talk over the agent before it stops (interruption).
+    # Shorter stops sooner; longer ignores coughs, "mm-hm" and leftover echo of
+    # the agent's own voice. Measured as sustained speech by Silero VAD.
     barge_in_min_speech_ms: int = 300
     # Text-domain self-echo rejection: a candidate "user" turn is discarded
     # (never sent to the LLM) if a long enough run of its words appears
@@ -234,6 +254,10 @@ PROFILES = {"development": DEVELOPMENT_CONFIG, "production": PRODUCTION_CONFIG, 
 
 # Environment variables that point any profile's LLM at an OpenAI-compatible endpoint
 LLM_URL_ENV, LLM_MODEL_ENV, LLM_KEY_ENV_ENV = "FUSION_LLM_URL", "FUSION_LLM_MODEL", "FUSION_LLM_API_KEY_ENV"
+# ...and choose the turn detector and the pause before the agent speaks
+TURN_DETECTOR_ENV, TURN_WAIT_ENV = "FUSION_TURN_DETECTOR", "FUSION_TURN_WAIT_MS"
+# ...and how long the caller must talk over the agent before it stops
+INTERRUPT_AFTER_ENV = "FUSION_INTERRUPT_AFTER_MS"
 
 
 def with_env_overrides(config: PipelineConfig, environ=None) -> PipelineConfig:
@@ -243,6 +267,7 @@ def with_env_overrides(config: PipelineConfig, environ=None) -> PipelineConfig:
     FUSION_LLM_API_KEY_ENV=GROQ_API_KEY               → the key is read from $GROQ_API_KEY
     """
     env = os.environ if environ is None else environ
+    config = _with_turn_overrides(config, env)
     url = env.get(LLM_URL_ENV)
     if not url:
         if env.get(LLM_MODEL_ENV) or env.get(LLM_KEY_ENV_ENV):
@@ -263,6 +288,23 @@ def with_env_overrides(config: PipelineConfig, environ=None) -> PipelineConfig:
         "api_key_env": env.get(LLM_KEY_ENV_ENV) or None,
     })
     return config.model_copy(update={"llm": llm})
+
+
+def _with_turn_overrides(config: PipelineConfig, env) -> PipelineConfig:
+    updates = {}
+    if env.get(TURN_DETECTOR_ENV):
+        updates["runtime"] = env[TURN_DETECTOR_ENV]
+    for variable, field_name in ((TURN_WAIT_ENV, "min_silence_ms"), (INTERRUPT_AFTER_ENV, "barge_in_min_speech_ms")):
+        if env.get(variable):
+            try:
+                updates[field_name] = int(env[variable])
+            except ValueError:
+                raise ValueError(f"{variable} must be a whole number of milliseconds, got {env[variable]!r}") from None
+            if updates[field_name] < 0:
+                raise ValueError(f"{variable} can't be negative")
+    if not updates:
+        return config
+    return config.model_copy(update={"turn_detection": config.turn_detection.model_copy(update=updates)})
 
 
 def load_profile(name: str, environ=None) -> PipelineConfig:

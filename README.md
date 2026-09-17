@@ -129,6 +129,41 @@ LLMConfig(runtime="openai_http", model="http://localhost:8080/v1",
 LLMConfig(runtime="my_package.llm:MyRuntime", model="anything")  # a plugin runtime
 ```
 
+### Turn detection: when the agent answers
+
+By default the agent answers after **500 ms of silence**, and stops speaking once the caller has
+talked over it for **300 ms**. Both are settings:
+
+```bash
+frun up --turn-wait-ms 800          # more patient with callers who pause mid-sentence (FUSION_TURN_WAIT_MS)
+frun up --interrupt-after-ms 500    # ignore coughs and "mm-hm" in noisy places (FUSION_INTERRUPT_AFTER_MS)
+```
+
+In Python: `TurnDetectionConfig(min_silence_ms=..., barge_in_min_speech_ms=..., resume_window_ms=...)`.
+
+- **Speaking again right after a pause continues the same turn.** If the caller cuts off the reply
+  within 1.5 s of their turn ending (`resume_window_ms`), both parts reach the LLM as one message:
+  "hello ... my name is Priya" is answered once, not twice.
+- **Turn detector models plug in.** A detector predicts whether the caller is done, from the words,
+  the conversation or the audio. The wait then shortens to `min_confident_silence_ms` when they're
+  likely done, and stretches to `max_silence_ms` when they're likely mid-thought. Silence always
+  confirms the end of a turn, and a detector that's slow or fails just leaves the default wait.
+
+```bash
+frun up --turn-detector my_package.turns:MyDetector    # or a plugin name (FUSION_TURN_DETECTOR)
+```
+
+Write one by implementing `fusion_runtime.contract.TurnDetector.predict`, and check it with the
+conformance kit: see [examples/turn_detector_plugin.py](examples/turn_detector_plugin.py). No
+detector model is bundled yet; use any model whose license allows your use.
+
+### Languages
+
+Set what callers speak with `STTConfig(language="hi")` (`None` detects it per turn; English-only
+Whisper models like `tiny.en` refuse other languages at startup). Kokoro speaks its voice's language,
+or `TTSConfig(language=...)`. Reply text is split into sentences for speech in any script (`.` `।` `。`
+`؟` …), and decimals like "3.5" aren't cut. The catalog currently has English models only.
+
 Also read: `FUSION_CONFIG`, `FUSION_MODEL_DIR`, `FUSION_LOG_FORMAT`, `FUSION_LOG_LEVEL`, `FUSION_LOG_CONTENT` (set by `frun up`'s log flags) and `FUSION_AEC` (`FUSION_AEC=0` is the same as `frun talk --no-aec`). The other variables in `.env.example` aren't wired up yet.
 
 ## Server API
@@ -152,7 +187,7 @@ Every stage emits structured events with a timestamp, session id, turn id, stage
 
 ```
 20:47:49.441  95b134d2 t1   vad      speech_start       audio_offset_ms=192 probability=0.88
-20:47:52.162  95b134d2 t1   turn     end_detected       reason=silence sounded_complete=True wait_ms=269
+20:47:52.162  95b134d2 t1   turn     end_detected       reason=silence detector=silence threshold_ms=500 wait_ms=569
 20:47:52.334  95b134d2 t1   llm      first_token        171ms runtime=llama_cpp model=llm/qwen2.5-0.5b-instruct-q4_k_m.gguf
 20:47:52.670  95b134d2 t1   tts      first_chunk        326ms audio_ms=2525
 20:47:52.671  95b134d2 t1   audio    first_sent         response_ms=509 ttfa_ms=778

@@ -5,6 +5,7 @@ OpenAI-compatible HTTP), never per model. Check a runtime with
 `fusion_runtime.testing.conformance`.
 """
 from fusion_runtime.contract.common import (
+    RUNTIME_STAGES,
     STAGES,
     AdapterError,
     AuthFailed,
@@ -26,3 +27,4 @@ from fusion_runtime.contract.common import (
 from fusion_runtime.contract.llm import LLMChunk, LLMRequest, LLMRuntime, Message, ToolCall, ToolSpec
 from fusion_runtime.contract.stt import STTRequest, STTResult, STTRuntime, Transcript
 from fusion_runtime.contract.tts import AudioChunk, TTSRequest, TTSRuntime
+from fusion_runtime.contract.turn import TurnDetector, TurnPrediction, TurnRequest

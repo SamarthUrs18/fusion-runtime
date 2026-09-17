@@ -1,6 +1,6 @@
-"""Turn detection: deciding when the user has finished speaking."""
-from abc import ABC
-from dataclasses import dataclass
+"""State shared between voice activity detection and turn detection."""
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Optional
 
 
 @dataclass
@@ -18,38 +18,10 @@ class TurnState:
     """
     silence_ms: float = 0.0
     vad_active: bool = False
-
-
-class TurnDetectorBase(ABC):
-    """Base class for End-of-Turn *content* detection.
-
-    This answers exactly one question — "does this accumulated transcript
-    read like a finished utterance on its own?" — and nothing about timing.
-    Silence timing is handled separately, by an always-running watcher in
-    `PipelineOrchestrator._llm_stage` (see its docstring for why this had
-    to be split out: reacting to silence only when a *new* STT result
-    arrives means the silence being measured is the pause *before* that
-    new speech, not a pause *after* the user actually stopped talking —
-    which is backwards, and was cutting turns off mid-sentence on any
-    ordinary thinking-pause). The watcher uses this signal only to pick
-    between a short confirmation pause (confidently complete) and a
-    longer, safer one (ambiguous) — it doesn't own the decision.
-    """
-
-    def __init__(self, config):
-        self.config = config
-
-    def looks_complete(self, text: str) -> bool:
-        """Default heuristic: ends with sentence-ending punctuation.
-        Subclasses (e.g. a real EoT model) can override with something
-        smarter — text + prosody, not just the trailing character."""
-        return text.strip().endswith((".", "!", "?", "。", "！", "？"))
-
-    async def reset(self):
-        pass
-
-
-class PunctuationTurnDetector(TurnDetectorBase):
-    """Text ending in sentence punctuation counts as a finished thought, so a
-    shorter pause ends the turn. Uses TurnDetectorBase's `looks_complete`."""
-    pass
+    # This turn's speech so far (16-bit PCM, 16 kHz), kept only when the turn
+    # detector uses audio; trimmed to the most recent seconds.
+    speech_audio: bytearray = field(default_factory=bytearray)
+    # Set by the STT stage: transcribe the words since the last partial (returns a
+    # PartialTranscript or None), and start the next turn's transcript right away.
+    finalize_transcript: Optional[Callable[[], Awaitable[Any]]] = None
+    start_next_turn: Optional[Callable[[], None]] = None

@@ -24,6 +24,10 @@ VOICE_LANGUAGES = {
 }
 
 
+# Short codes to the phonemizer's names
+ESPEAK_ALIASES = {"en": "en-us", "fr": "fr-fr", "pt": "pt-br"}
+
+
 class KokoroFamily:
     sample_rate = SAMPLE_RATE
 
@@ -62,8 +66,10 @@ class KokoroFamily:
         return tuple(sorted(found)) or ("en-us",)
 
     def language_for(self, voice: str, language: Optional[str]) -> str:
+        """The phonemizer's language code: from the request if given ("en" means American), else the voice's."""
         if language:
-            return language.lower()
+            code = language.lower().replace("_", "-")
+            return ESPEAK_ALIASES.get(code, code)
         return VOICE_LANGUAGES.get(voice[:1], "en-us")
 
     def synthesize(self, text: str, voice: str, speed: float, language: Optional[str]) -> bytes:

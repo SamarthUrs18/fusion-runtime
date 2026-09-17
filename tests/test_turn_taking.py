@@ -25,7 +25,11 @@ from fusion_runtime.config import PipelineConfig
 from fusion_runtime.contract import LLMChunk
 from fusion_runtime.engine import LatencyBudget, PipelineMetrics, PipelineOrchestrator
 from fusion_runtime.engine.streaming import PartialTranscript
-from fusion_runtime.vad import PunctuationTurnDetector, TurnState
+from fusion_runtime.contract import Capabilities, TurnDetector, TurnPrediction
+from fusion_runtime.engine.barge_in import BargeInState
+from fusion_runtime.engine.conversation import Conversation
+from fusion_runtime.telemetry import ListSink, telemetry
+from fusion_runtime.vad import TurnState
 
 
 class FakeLLM:
@@ -46,20 +50,48 @@ class FakeLLM:
         yield LLMChunk(finish_reason="stop")
 
 
-def make_orchestrator(min_confident_ms: int = 100, min_silence_ms: int = 400) -> PipelineOrchestrator:
+class FakeDetector(TurnDetector):
+    """A turn detector model stand-in: a fixed probability, optional delay or failure."""
+
+    def __init__(self, probability=0.5, delay_s=0.0, fail=False, uses_audio=False, uses_history=False):
+        from fusion_runtime.contract import ModelSpec
+
+        super().__init__(ModelSpec(stage="turn", runtime="fake", model=""))
+        self.probability, self.delay_s, self.fail = probability, delay_s, fail
+        self.uses_audio, self.uses_history = uses_audio, uses_history
+        self.requests = []
+
+    @property
+    def capabilities(self):
+        return Capabilities(max_concurrency=4)
+
+    async def load(self):
+        pass
+
+    async def predict(self, request):
+        self.requests.append(request)
+        await asyncio.sleep(self.delay_s)
+        if self.fail:
+            raise RuntimeError("detector model crashed")
+        return TurnPrediction(self.probability)
+
+
+def make_orchestrator(min_confident_ms: int = 100, min_silence_ms: int = 400, max_silence_ms: int = 900,
+                      detector=None) -> PipelineOrchestrator:
     orch = PipelineOrchestrator.__new__(PipelineOrchestrator)
     orch.config = PipelineConfig()
     orch.config.turn_detection.min_confident_silence_ms = min_confident_ms
     orch.config.turn_detection.min_silence_ms = min_silence_ms
-    orch.turn_detector = PunctuationTurnDetector(orch.config.turn_detection)
+    orch.config.turn_detection.max_silence_ms = max_silence_ms
+    orch.turn_detector = detector  # None: silence only, the default
     orch.llm = FakeLLM()
     return orch
 
 
-async def stt_once_then_stall(text: str, is_final: bool = True):
+async def stt_once_then_stall(text: str):
     """Yields one STT result, then hangs forever without closing — like a
     live session where the user might still say more later."""
-    yield PartialTranscript(text=text, is_final=is_final, confidence=1.0, latency_ms=0)
+    yield PartialTranscript(text=text, confidence=1.0, latency_ms=0)
     await asyncio.Event().wait()
 
 
@@ -115,51 +147,69 @@ async def next_token_checkpoints(gen, checkpoints):
     return results, task
 
 
+async def first_reply_times(orch, text, checkpoints, turn_state=None):
+    turn_state = turn_state or TurnState()
+    driver = asyncio.create_task(hold_then_grow_silence(turn_state, hold_ms=0))
+    gen = orch._llm_stage(stt_once_then_stall(text), "system prompt", LatencyBudget(total_ms=500), PipelineMetrics(),
+                          turn_state=turn_state)
+    try:
+        results, task = await next_token_checkpoints(gen, checkpoints)
+        await cancel_and_wait(task)
+        return results
+    finally:
+        driver.cancel()
+        await gen.aclose()
+
+
 class TestTurnTiming:
-    async def test_confident_text_fires_after_short_silence(self):
-        orch = make_orchestrator(min_confident_ms=100, min_silence_ms=400)
-        turn_state = TurnState()
-        driver = asyncio.create_task(hold_then_grow_silence(turn_state, hold_ms=0))
+    async def test_default_waits_the_configured_silence_even_after_punctuation(self):
+        """Whisper writes "Hello." for a greeting the user hasn't finished ("hello ... my name is").
+        Punctuation must not shorten the wait: that's what cut people off mid-sentence."""
+        results = await first_reply_times(make_orchestrator(min_silence_ms=400), "Hello.", [0.25, 0.6])
+        assert results[0] is None, "answered before the configured silence, because of a full stop"
+        assert results[-1] == "ok"
 
-        gen = orch._llm_stage(
-            stt_once_then_stall("Thanks, bye."),  # ends in punctuation -> "complete"
-            "system prompt",
-            LatencyBudget(total_ms=500),
-            PipelineMetrics(),
-            turn_state=turn_state,
-        )
+    async def test_likely_finished_prediction_answers_after_the_short_wait(self):
+        detector = FakeDetector(probability=0.95)
+        results = await first_reply_times(make_orchestrator(min_confident_ms=100, min_silence_ms=400, detector=detector),
+                                          "Book a table for two at seven.", [0.3])
+        assert results[-1] == "ok"
+        assert detector.requests[0].transcript == "Book a table for two at seven."
+
+    async def test_mid_thought_prediction_waits_longer(self):
+        detector = FakeDetector(probability=0.05)
+        orch = make_orchestrator(min_silence_ms=400, max_silence_ms=900, detector=detector)
+        results = await first_reply_times(orch, "I would like a table for", [0.6, 1.2])
+        assert results[0] is None, "a likely mid-thought pause got the normal wait"
+        assert results[-1] == "ok"
+
+    async def test_failing_detector_keeps_the_default_wait_and_warns_once(self):
+        sink = ListSink()
+        telemetry.add_sink(sink)
         try:
-            # Should fire well before min_silence_ms (400ms) — it only
-            # needed the short confident-completion threshold (100ms).
-            results, task = await next_token_checkpoints(gen, [0.3])
-            assert results[-1] == "ok", "confidently-complete text should respond on the short threshold"
+            orch = make_orchestrator(min_silence_ms=300, detector=FakeDetector(fail=True))
+            results = await first_reply_times(orch, "Hello there", [0.6])
         finally:
-            await cancel_and_wait(task)
-            driver.cancel()
-            await gen.aclose()
+            telemetry.remove_sink(sink)
+        assert results[-1] == "ok"
+        failures = sink.named("turn.detector_failed")
+        assert len(failures) == 1 and failures[0].error is not None
 
-    async def test_ambiguous_text_waits_for_long_silence(self):
-        orch = make_orchestrator(min_confident_ms=100, min_silence_ms=400)
+    async def test_slow_detector_never_holds_the_turn(self):
+        orch = make_orchestrator(min_confident_ms=50, min_silence_ms=300, detector=FakeDetector(0.95, delay_s=5))
+        results = await first_reply_times(orch, "Thanks, bye.", [0.2, 0.6])
+        assert results[0] is None and results[-1] == "ok"
+
+    async def test_audio_and_history_detectors_get_what_they_declare(self):
+        detector = FakeDetector(probability=0.95, uses_audio=True, uses_history=True)
+        orch = make_orchestrator(min_confident_ms=50, detector=detector)
         turn_state = TurnState()
-        driver = asyncio.create_task(hold_then_grow_silence(turn_state, hold_ms=0))
-
-        gen = orch._llm_stage(
-            stt_once_then_stall("I did"),  # no terminal punctuation -> "ambiguous"
-            "system prompt",
-            LatencyBudget(total_ms=500),
-            PipelineMetrics(),
-            turn_state=turn_state,
-        )
-        try:
-            # Must not fire on the short (confident) threshold (0.2s)...
-            # but must eventually fire once the long one (0.4s) is crossed.
-            results, task = await next_token_checkpoints(gen, [0.2, 0.5])
-            assert results[0] is None, "ambiguous text fired on the short threshold, not the long one"
-            assert results[-1] == "ok", "ambiguous text never completed even after the long silence threshold"
-        finally:
-            await cancel_and_wait(task)
-            driver.cancel()
-            await gen.aclose()
+        turn_state.speech_audio.extend(b"\x01\x00" * 1600)
+        await first_reply_times(orch, "Yes please.", [0.4], turn_state=turn_state)
+        request = detector.requests[0]
+        assert request.audio == b"\x01\x00" * 1600
+        assert request.history == ()
+        assert turn_state.speech_audio == bytearray(), "turn audio must be cleared once the turn is answered"
 
     async def test_does_not_fire_while_speech_is_still_ongoing(self):
         """The actual regression case: text that already looks complete,
@@ -196,7 +246,7 @@ class TestTurnTiming:
         turn_state.silence_ms = 0.0  # never crosses either threshold
 
         async def finite_stt_stream():
-            yield PartialTranscript(text="I did not finish", is_final=False, confidence=1.0, latency_ms=0)
+            yield PartialTranscript(text="I did not finish", confidence=1.0, latency_ms=0)
 
         tokens = [
             tok
@@ -208,7 +258,7 @@ class TestTurnTiming:
                 turn_state=turn_state,
             )
         ]
-        assert tokens == ["ok"], "pending transcript should be flushed as a final turn when the source ends"
+        assert [t for t in tokens if t] == ["ok"], "pending transcript should be flushed as a final turn when the source ends"
 
     async def test_supersedes_rather_than_concatenates_stt_results(self):
         """Each PartialTranscript restates the whole turn so far (see PartialTranscript's
@@ -224,9 +274,9 @@ class TestTurnTiming:
         async def growing_stt_stream():
             # Successive re-transcriptions of one utterance, each superseding
             # the last — exactly what the real STT emits as a turn grows.
-            yield PartialTranscript(text="I can't", is_final=False, confidence=1.0, latency_ms=0)
-            yield PartialTranscript(text="I can't speak", is_final=False, confidence=1.0, latency_ms=0)
-            yield PartialTranscript(text="I can't speak to you now.", is_final=True, confidence=1.0, latency_ms=0)
+            yield PartialTranscript(text="I can't", confidence=1.0, latency_ms=0)
+            yield PartialTranscript(text="I can't speak", confidence=1.0, latency_ms=0)
+            yield PartialTranscript(text="I can't speak to you now.", confidence=1.0, latency_ms=0)
 
         async for _ in orch._llm_stage(
             growing_stt_stream(),
@@ -269,6 +319,117 @@ class TestTurnTiming:
         finally:
             await cancel_and_wait(task)
             await gen.aclose()
+
+
+class TestInterruptedReplies:
+    async def test_unspoken_words_of_a_cut_off_reply_never_start_the_next_reply(self):
+        """ "Your table is booked for—" (interrupted) must not come back as
+        "Your table is booked for Sure, 8 pm works." in the next reply."""
+        from fusion_runtime.engine.text import speakable_segments
+
+        orch = make_orchestrator(min_silence_ms=50)
+        orch.config.turn_detection.resume_window_ms = 0
+        barge_in = BargeInState()
+        replies = [["Your", " table", " is", " booked", " for"], ["Sure", ",", " 8", " pm", " works", "."]]
+        answered = asyncio.Event()
+
+        class LLM:
+            async def generate(self, request):
+                words = replies.pop(0)
+                for i, word in enumerate(words):
+                    if replies and i == 4:
+                        barge_in.fire()  # the caller talks over the first reply
+                    yield LLMChunk(text=word)
+                answered.set()
+                yield LLMChunk(finish_reason="stop")
+
+        orch.llm = LLM()
+        turn_state = TurnState()
+        driver = asyncio.create_task(hold_then_grow_silence(turn_state, hold_ms=0))
+
+        async def stt():
+            yield PartialTranscript(text="Book a table.", confidence=1.0, latency_ms=0)
+            await asyncio.sleep(0.3)
+            yield PartialTranscript(text="Actually make it 8 pm.", confidence=1.0, latency_ms=0)
+
+        try:
+            tokens = orch._llm_stage(stt(), "sys", LatencyBudget(total_ms=500), PipelineMetrics(),
+                                     turn_state=turn_state, barge_in=barge_in)
+            segments = [segment async for segment in speakable_segments(tokens)]
+        finally:
+            driver.cancel()
+        assert segments == ["Your table is booked", "Sure, 8 pm works."] or segments == ["Sure, 8 pm works."]
+        assert not any("booked" in s and "Sure" in s for s in segments)
+
+
+
+class TestResumedTurns:
+    async def test_speaking_right_after_a_pause_joins_the_previous_turn(self):
+        """ "hello" ... pause ... "my name is Priya": the reply to "hello" gets cut off by the
+        user continuing, so the LLM must see one message, not two separate turns."""
+        orch = make_orchestrator(min_silence_ms=50)
+        calls = []
+        first_reply_started = asyncio.Event()
+
+        class RecordingLLM:
+            async def generate(self, request):
+                calls.append([(m.role, m.content) for m in request.messages])
+                first_reply_started.set()
+                yield LLMChunk(text="Hi!")
+                yield LLMChunk(finish_reason="stop")
+
+        orch.llm = RecordingLLM()
+        barge_in = BargeInState()
+        turn_state = TurnState()
+        driver = asyncio.create_task(hold_then_grow_silence(turn_state, hold_ms=0))
+
+        async def stt():
+            yield PartialTranscript(text="Hello.", confidence=1.0, latency_ms=0)
+            await first_reply_started.wait()
+            await asyncio.sleep(0.05)
+            barge_in.fire()  # the user talked over the reply to "hello"
+            yield PartialTranscript(text="My name is Priya.", confidence=1.0, latency_ms=0)
+
+        try:
+            async for _ in orch._llm_stage(stt(), "sys", LatencyBudget(total_ms=500), PipelineMetrics(),
+                                           turn_state=turn_state, barge_in=barge_in, conversation=Conversation("sys")):
+                pass
+        finally:
+            driver.cancel()
+        assert calls[1] == [("system", "sys"), ("user", "Hello. My name is Priya.")]
+
+    async def test_a_later_interruption_is_a_new_turn(self):
+        orch = make_orchestrator(min_silence_ms=50)
+        orch.config.turn_detection.resume_window_ms = 100
+        calls = []
+        replied = asyncio.Event()
+
+        class RecordingLLM:
+            async def generate(self, request):
+                calls.append([m.content for m in request.messages])
+                replied.set()
+                yield LLMChunk(text="Hi!")
+                yield LLMChunk(finish_reason="stop")
+
+        orch.llm = RecordingLLM()
+        barge_in = BargeInState()
+        turn_state = TurnState()
+        driver = asyncio.create_task(hold_then_grow_silence(turn_state, hold_ms=0))
+
+        async def stt():
+            yield PartialTranscript(text="Hello.", confidence=1.0, latency_ms=0)
+            await replied.wait()
+            await asyncio.sleep(0.3)  # well past the resume window
+            barge_in.fire()
+            yield PartialTranscript(text="What are your hours?", confidence=1.0, latency_ms=0)
+
+        try:
+            async for _ in orch._llm_stage(stt(), "sys", LatencyBudget(total_ms=500), PipelineMetrics(),
+                                           turn_state=turn_state, barge_in=barge_in, conversation=Conversation("sys")):
+                pass
+        finally:
+            driver.cancel()
+        assert calls[1] == ["sys", "Hello.", "Hi!", "What are your hours?"]
 
 
 if __name__ == "__main__":

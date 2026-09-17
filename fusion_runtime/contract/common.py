@@ -14,8 +14,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Literal, Mapping, Optional, Tuple
 
-Stage = Literal["stt", "llm", "tts"]
-STAGES: Tuple[Stage, ...] = ("stt", "llm", "tts")
+Stage = Literal["stt", "llm", "tts", "turn"]
+STAGES: Tuple[Stage, ...] = ("stt", "llm", "tts")  # model stages the resolver handles
+RUNTIME_STAGES: Tuple[Stage, ...] = STAGES + ("turn",)  # everything the registry can load (turn detectors too)
 
 
 # ---- cancellation -----------------------------------------------------------------

@@ -40,6 +40,21 @@ def up(
         None, "--llm-url", help="Use an OpenAI-compatible endpoint for the LLM, e.g. http://localhost:8080/v1 "
                                 "(vLLM, llama-server, a hosted API). Also: FUSION_LLM_URL.",
     ),
+    turn_detector: str = typer.Option(
+        None, "--turn-detector",
+        help="A turn detector model: a plugin name or module:Class. Default: end the turn after a pause. "
+             "Also: FUSION_TURN_DETECTOR.",
+    ),
+    turn_wait_ms: int = typer.Option(
+        None, "--turn-wait-ms", min=0,
+        help="Silence (ms) before the agent answers. Longer suits people who pause mid-sentence. "
+             "Default 500. Also: FUSION_TURN_WAIT_MS.",
+    ),
+    interrupt_after_ms: int = typer.Option(
+        None, "--interrupt-after-ms", min=0,
+        help="How long (ms) the caller must talk over the agent before it stops. Longer ignores coughs "
+             "and echo; shorter stops sooner. Default 300. Also: FUSION_INTERRUPT_AFTER_MS.",
+    ),
     llm_model: str = typer.Option(None, "--llm-model", help="The model's name on that endpoint. Also: FUSION_LLM_MODEL."),
     llm_api_key_env: str = typer.Option(
         None, "--llm-api-key-env", help="Name of the environment variable holding the endpoint's API key "
@@ -48,15 +63,21 @@ def up(
 ) -> None:
     """Start the voice server. Talk to it from another terminal with `frun talk`."""
     from fusion_runtime.cli._checks import missing_models, port_in_use
-    from fusion_runtime.config import LLM_KEY_ENV_ENV, LLM_MODEL_ENV, LLM_URL_ENV, model_dir
+    from fusion_runtime.config import (
+        INTERRUPT_AFTER_ENV, LLM_KEY_ENV_ENV, LLM_MODEL_ENV, LLM_URL_ENV, TURN_DETECTOR_ENV, TURN_WAIT_ENV, model_dir,
+    )
 
-    for variable, value in ((LLM_URL_ENV, llm_url), (LLM_MODEL_ENV, llm_model), (LLM_KEY_ENV_ENV, llm_api_key_env)):
+    for variable, value in ((LLM_URL_ENV, llm_url), (LLM_MODEL_ENV, llm_model), (LLM_KEY_ENV_ENV, llm_api_key_env),
+                            (TURN_DETECTOR_ENV, turn_detector),
+                            (TURN_WAIT_ENV, str(turn_wait_ms) if turn_wait_ms is not None else None),
+                            (INTERRUPT_AFTER_ENV, str(interrupt_after_ms) if interrupt_after_ms is not None else None)):
         if value:
             os.environ[variable] = value  # the server reads these at startup
     try:
         from fusion_runtime.cli._common import profile_config
 
-        llm = profile_config(config).llm
+        profile = profile_config(config)
+        llm = profile.llm
     except ValueError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
@@ -97,6 +118,10 @@ def up(
         talk_host = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
         talk_hint = f"frun talk --url ws://{talk_host}:{port}/v1/voice/ws"
     typer.echo(f"Starting fusion-runtime ({config.value} profile) on http://{host}:{port}")
+    turns = profile.turn_detection
+    typer.echo(f"Turn detection: {turns.runtime or 'silence'}, agent answers after {turns.min_silence_ms} ms of silence"
+               + (" (shorter or longer when the detector is sure)" if turns.runtime else "")
+               + f"; talking over it for {turns.barge_in_min_speech_ms} ms interrupts")
     if llm.api_base or llm.provider.value == "openai":
         typer.echo(f"LLM: {llm.model} at {llm.api_base or 'https://api.openai.com/v1'}"
                    + (f" (key from ${llm.api_key_env})" if llm.api_key_env else ""))

@@ -65,6 +65,12 @@ class OnnxTTS(TTSRuntime):
         voice = self.spec.options.get("voice")
         if voice and voice not in self.family.voices:
             raise InvalidRequest(f"voice {voice!r} isn't in this model; available: {', '.join(self.family.voices)}")
+        language = self.spec.options.get("language")
+        if language and not self.capabilities.supports_language(language):
+            raise InvalidRequest(
+                f"no voice here speaks {language!r} (these voices speak {', '.join(self.family.languages)}). "
+                "Download voices for that language, or change TTSConfig.language"
+            )
         if self.spec.options.get("warmup", True):
             async for _ in self.synthesize(TTSRequest(text="Warmup.")):
                 pass
@@ -78,14 +84,15 @@ class OnnxTTS(TTSRuntime):
         voice = request.voice or self.default_voice
         if voice not in self.family.voices:
             raise InvalidRequest(f"unknown voice {voice!r}; available: {', '.join(self.family.voices)}")
-        if request.language and not self.capabilities.supports_language(request.language):
-            raise InvalidRequest(f"language {request.language!r} isn't supported by these voices")
+        language = request.language or self.spec.options.get("language")
+        if language and not self.capabilities.supports_language(language):
+            raise InvalidRequest(f"language {language!r} isn't supported by these voices")
         request.cancel.raise_if_cancelled()
         if not self._loaded:
             raise RuntimeFailure("model not loaded")
         try:
             pcm = await asyncio.get_running_loop().run_in_executor(
-                None, self.family.synthesize, request.text, voice, request.speed, request.language)
+                None, self.family.synthesize, request.text, voice, request.speed, language)
         except Exception as e:
             raise RuntimeFailure(f"{self.spec.family} synthesis failed: {e}") from e
         if request.cancel.cancelled:

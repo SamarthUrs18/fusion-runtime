@@ -16,7 +16,7 @@ from fusion_runtime.config import (
 from fusion_runtime.contract import LLMRuntime, STTRuntime, TTSRuntime
 from fusion_runtime.registry import create_runtime, runtime_class
 from fusion_runtime.resolver import resolve_stage_config
-from fusion_runtime.vad import create_vad, create_turn_detector
+from fusion_runtime.vad import create_vad
 from fusion_runtime.engine import PipelineOrchestrator, run_single_turn
 
 
@@ -69,12 +69,21 @@ class TestVADFactory:
         assert vad is not None
 
 
-class TestTurnDetectorFactory:
-    def test_create_punctuation(self):
+class TestTurnDetectors:
+    def test_default_is_the_silence_detector(self):
         from fusion_runtime.config import TurnDetectionConfig
-        config = TurnDetectionConfig(provider=Provider.PUNCTUATION)
-        detector = create_turn_detector(config)
-        assert detector is not None
+        from fusion_runtime.contract import TurnDetector
+        from fusion_runtime.turns import turn_detector_spec
+
+        detector = create_runtime(turn_detector_spec(TurnDetectionConfig()))
+        assert isinstance(detector, TurnDetector) and detector.refines_wait is False
+
+    def test_a_plugin_detector_is_named_in_config(self):
+        from fusion_runtime.config import TurnDetectionConfig
+        from fusion_runtime.turns import turn_detector_spec
+
+        spec = turn_detector_spec(TurnDetectionConfig(runtime="my_pkg.turns:Detector", model="hf:org/eou", options={"x": 1}))
+        assert (spec.stage, spec.runtime, spec.model, dict(spec.options)) == ("turn", "my_pkg.turns:Detector", "hf:org/eou", {"x": 1})
 
 
 # Integration tests (require models downloaded)
