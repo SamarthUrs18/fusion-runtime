@@ -282,9 +282,38 @@ Measured on the `tests/fixtures/hello.wav` clip.
 
 ## Development
 
+Either tool works; both read the same `pyproject.toml`.
+
 ```bash
-pip install -e ".[dev,talk]"
+uv sync --extra dev --extra talk     # creates .venv and installs the locked versions
+```
+
+```bash
+pip install -e ".[dev,talk]"         # into whatever Python you are using
+```
+
+```bash
 pytest tests/
+```
+
+`uv.lock` pins every version, which is why it is committed: the torch and
+torchaudio releases have to match exactly, and drifting apart once broke voice
+detection silently for days. Run `uv lock` after changing a dependency.
+`.python-version` keeps everyone on 3.11, the version this is tested against.
+
+First install takes a while whichever tool you use: `llama-cpp-python` is
+published as source only, so it compiles (a few minutes, and it needs a C++
+toolchain — on macOS, Xcode command line tools).
+
+### On an NVIDIA GPU
+
+GPU builds of torch and llama.cpp aren't on PyPI, so they come from NVIDIA's
+own indexes:
+
+```bash
+pip install -e ".[cuda]"                                                        # onnxruntime-gpu
+pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu124
+pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
 ```
 
 ```

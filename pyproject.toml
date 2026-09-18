@@ -50,13 +50,13 @@ frun = "fusion_runtime.cli:main"
 fusion-runtime = "fusion_runtime.cli:main"
 
 [project.optional-dependencies]
+# GPU builds of torch and llama-cpp-python don't come from PyPI: they live on
+# NVIDIA-specific indexes, which an extra can't point at. So this extra holds
+# only what PyPI can give, and the README has the two index commands for the
+# rest. ("torch[cuda]" and "llama-cpp-python[cuda]" were listed here and quietly
+# installed CPU builds, since those extras don't exist.)
 cuda = [
-    "llama-cpp-python[cuda]>=0.2.80",
     "onnxruntime-gpu>=1.18.0",
-    # Keep in lockstep with the base torch/torchaudio pin above — same
-    # ABI-matching reasoning applies regardless of CPU vs CUDA build.
-    "torch[cuda]==2.9.1",
-    "torchaudio[cuda]==2.9.1",
 ]
 dev = [
     "pytest>=8.0.0",
