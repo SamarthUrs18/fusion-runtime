@@ -6,7 +6,7 @@ fine-tunes) with the same code. The engine decides when to transcribe
 
 Options (from config): device (auto | cpu | cuda), compute_type (auto | int8 |
 float16 | ...), beam_size, vad_filter, language (default when a request has
-none), cpu_threads, warmup (default true).
+none), cpu_threads, warmup (default true), no_speech_threshold.
 """
 import asyncio
 from typing import List, Optional, Sequence
@@ -26,6 +26,14 @@ from fusion_runtime.contract import (
 )
 
 WHISPER_SAMPLE_RATE = 16000
+
+# Whisper invents text when it hears almost nothing — usually phrases from the
+# videos it was trained on ("Thank you for watching", "We'll see you guys").
+# It reports how sure it is that a segment is *not* speech, and those inventions
+# score high: measured on this pipeline, real speech is 0.01-0.2, while faint
+# leaked audio that produced a hallucination was 0.68. Segments above this are
+# dropped rather than answered.
+DEFAULT_NO_SPEECH_THRESHOLD = 0.6
 
 
 class CTranslate2STT(STTRuntime):
@@ -98,7 +106,8 @@ class CTranslate2STT(STTRuntime):
         faster-whisper's transcribe() returns a lazy generator: the decoding
         happens while iterating the segments. Iterating them back on the event
         loop froze the whole server for ~200 ms per window, so the text is
-        joined here, inside the thread.
+        joined here, inside the thread. Segments the model itself says probably
+        aren't speech are dropped (see DEFAULT_NO_SPEECH_THRESHOLD).
         """
         import numpy as np
 
@@ -112,7 +121,15 @@ class CTranslate2STT(STTRuntime):
             condition_on_previous_text=False,  # each call is one self-contained window
             initial_prompt=prompt,
         )
-        return " ".join(segment.text for segment in segments), info
+        threshold = options.get("no_speech_threshold", DEFAULT_NO_SPEECH_THRESHOLD)
+        kept, dropped = [], []
+        for segment in segments:
+            score = getattr(segment, "no_speech_prob", None)
+            if threshold is not None and score is not None and score > threshold:
+                dropped.append((segment.text, score))
+            else:
+                kept.append(segment.text)
+        return " ".join(kept), info, dropped
 
     async def transcribe(self, requests: Sequence[STTRequest]) -> List[STTResult]:
         results: List[STTResult] = []
@@ -134,10 +151,19 @@ class CTranslate2STT(STTRuntime):
             if self.model is None:
                 raise RuntimeFailure("model not loaded")
             try:
-                text, info = await asyncio.get_running_loop().run_in_executor(
+                text, info, dropped = await asyncio.get_running_loop().run_in_executor(
                     None, self._transcribe_sync, request.audio, _whisper_language(language), request.prompt)
             except Exception as e:
                 raise RuntimeFailure(f"Whisper transcription failed: {e}") from e
+            if dropped:
+                from fusion_runtime.telemetry import telemetry
+
+                telemetry.emit(
+                    "stt.invented_speech_dropped", level="debug", stage="stt", session_id=request.session_id,
+                    request_id=request.id, segments=len(dropped),
+                    no_speech_prob=round(max(score for _, score in dropped), 3),
+                    hint="the model was mostly sure this wasn't speech, so its guess wasn't answered",
+                )
             if request.cancel.cancelled:  # the result arrived after nobody wanted it
                 raise Cancelled(request.cancel.reason or "cancelled")
             return Transcript(

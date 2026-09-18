@@ -6,7 +6,7 @@ import pytest
 
 from fusion_runtime.config import DEVELOPMENT_CONFIG, PipelineConfig
 from fusion_runtime.contract import (
-    ModelNotFound, ModelSpec, UnsupportedModel,
+    ModelNotFound, ModelSpec, STTRequest, UnsupportedModel,
 )
 from fusion_runtime.engine import PipelineOrchestrator
 from fusion_runtime.engine.orchestrator import _resample_pcm16
@@ -140,3 +140,56 @@ async def test_a_broken_turn_detector_plugin_fails_startup_with_a_reason(monkeyp
     finally:
         telemetry.remove_sink(sink)
     assert sink.named("model.load_failed")[0].stage == "turn"
+
+
+class _Segment:
+    def __init__(self, text, no_speech_prob):
+        self.text, self.no_speech_prob = text, no_speech_prob
+
+
+class _Info:
+    language, language_probability = "en", 1.0
+
+
+class _WhisperWithGuesses:
+    """faster-whisper reports how sure it is that a segment isn't speech."""
+
+    def __init__(self, segments):
+        self.segments = segments
+
+    def transcribe(self, audio, **options):
+        return iter(self.segments), _Info()
+
+
+async def _transcribe(segments, **options):
+    from fusion_runtime.runtimes.ctranslate2.stt import CTranslate2STT
+
+    stt = CTranslate2STT(ModelSpec(stage="stt", runtime="ctranslate2", model="whisper", options=options))
+    stt.model = _WhisperWithGuesses(segments)
+    results = await stt.transcribe([STTRequest(audio=b"\x00\x00" * 16000)])
+    return results[0]
+
+
+async def test_invented_speech_is_dropped_but_real_speech_is_kept():
+    """Whisper invents phrases from its training videos when it hears almost nothing
+    ("Thank you for watching"); it scores those as probably-not-speech."""
+    sink = ListSink()
+    telemetry.add_sink(sink)
+    try:
+        real = await _transcribe([_Segment(" Hello, how are you?", 0.011)])
+        invented = await _transcribe([_Segment(" Thank you for watching.", 0.68)])
+        mixed = await _transcribe([_Segment(" I want a refund.", 0.05), _Segment(" We'll see you guys.", 0.7)])
+    finally:
+        telemetry.remove_sink(sink)
+    assert real.text == " Hello, how are you?"
+    assert invented.text == ""
+    assert mixed.text == " I want a refund."
+    dropped = sink.named("stt.invented_speech_dropped")
+    assert len(dropped) == 2 and dropped[0].attrs["no_speech_prob"] == 0.68
+
+
+async def test_the_threshold_is_a_setting():
+    quiet = [_Segment(" maybe words", 0.65)]
+    assert (await _transcribe(quiet, no_speech_threshold=0.9)).text == " maybe words"
+    assert (await _transcribe(quiet, no_speech_threshold=None)).text == " maybe words"  # off
+    assert (await _transcribe(quiet)).text == ""
