@@ -259,6 +259,15 @@ TURN_DETECTOR_ENV, TURN_WAIT_ENV = "FUSION_TURN_DETECTOR", "FUSION_TURN_WAIT_MS"
 # ...and how long the caller must talk over the agent before it stops
 INTERRUPT_AFTER_ENV = "FUSION_INTERRUPT_AFTER_MS"
 
+# Authentication. The two sides are deliberately not named alike: a server
+# declares which keys it ACCEPTS, a client sends the one key it HAS, and on a
+# development machine both live in the same .env.
+ACCEPTED_KEYS_ENV = "FUSION_ACCEPTED_KEYS"  # server: keys it accepts
+ACCEPTED_KEYS_FILE_ENV = "FUSION_ACCEPTED_KEYS_FILE"  # server: the same, from a file it can re-read
+API_KEY_ENV = "FUSION_API_KEY"  # client: the key `frun talk` presents
+TOKEN_TTL_ENV = "FUSION_SESSION_TOKEN_TTL_S"  # how long a browser's session token lives
+TRUSTED_PROXY_ENV = "FUSION_TRUSTED_PROXY"  # believe X-Forwarded-*; only true behind your own proxy
+
 
 def with_env_overrides(config: PipelineConfig, environ=None) -> PipelineConfig:
     """Apply FUSION_LLM_URL / FUSION_LLM_MODEL / FUSION_LLM_API_KEY_ENV to a profile.

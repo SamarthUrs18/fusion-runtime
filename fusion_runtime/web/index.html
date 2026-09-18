@@ -95,6 +95,12 @@
 
   // A token may be handed to the page (?token=...); the page never holds an API key.
   var token = new URLSearchParams(location.search).get("token");
+  if (token) {
+    // Out of the address bar before anyone screenshots it, bookmarks it or pastes
+    // it into a bug report. It is single use and short lived, but no reason to leave
+    // it lying in browser history.
+    try { history.replaceState(null, "", location.pathname); } catch (e) { /* older browser */ }
+  }
   var session = FusionRuntime.attach({ button: "#talk", token: token });
 
   document.getElementById("snippet").textContent =

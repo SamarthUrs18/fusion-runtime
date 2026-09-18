@@ -117,11 +117,89 @@ it says the caller interrupted, queued audio is dropped immediately, including t
 sentence already synthesized.
 
 **Two things to know before deploying it.** Browsers only hand over a microphone on `https://`
-(or `localhost`), so the page and the WebSocket both need TLS — `https://` and `wss://`. And there
-is no authentication yet: anything reachable can use the server. The client already takes a
-`token` (never an API key, which doesn't belong in a page) for when that lands.
+(or `localhost`), so the page and the WebSocket both need TLS — `https://` and `wss://`. And a page
+never holds an API key: your backend mints a short-lived `token` for it, which is what `token:`
+above is for. See [Authentication](#authentication).
 
 Working example: [examples/website.html](examples/website.html).
+
+## Authentication
+
+Generate a key, and put it where the server runs:
+
+```bash
+frun key new
+```
+
+```bash
+FUSION_ACCEPTED_KEYS=web:frun_kR7m…      # .env, or the environment
+```
+
+**Without keys the server answers on localhost only**, and `frun up --host 0.0.0.0` refuses to
+start. That isn't a warning you can dismiss: a runtime reachable from elsewhere with no
+authentication is someone else's GPU, on your bill.
+
+Two kinds of client, because only one of them can keep a secret:
+
+| Client | Presents |
+|---|---|
+| `frun talk`, your backend, curl | the key: `Authorization: Bearer <key>` (or `frun talk --key`) |
+| a browser page | a session token its backend minted — never a key |
+
+On your own machine you only set `FUSION_ACCEPTED_KEYS`: talking to a server on `localhost`,
+`frun talk` and `frun token` use a key it accepts. `FUSION_API_KEY` is for reaching a server
+somewhere else, and is never used as a fallback for a remote address — that would send your
+server's key to someone else's.
+
+```bash
+curl -X POST https://your-server/v1/sessions -H "Authorization: Bearer $FUSION_API_KEY"
+# {"token":"…","expires_in":60,"ws_url":"wss://your-server/v1/voice/ws?token=…"}
+```
+
+The token works once and expires in about a minute, so a leaked URL, screenshot or log line is
+worthless by the time anyone reads it. For your own machine, `frun token` prints a console URL
+with one in it.
+
+**Rotating and revoking.** `FUSION_ACCEPTED_KEYS` takes a list, so a rotation is: add the new key,
+move clients across, drop the old one. Point `FUSION_ACCEPTED_KEYS_FILE` at a file instead and
+`kill -HUP` re-reads it without restarting — which matters on a GPU, where a restart reloads the
+models. Removing a key is complete: its tokens are dropped and its conversations are closed.
+
+`frun keys list` shows names and fingerprints, never keys; the same fingerprint appears in the
+logs, so you can tell which key is busy or failing.
+
+### Limits
+
+Authentication says who may use the server; these say how much of it one caller may take. All
+optional, defaults shown.
+
+| Variable | Default | Caps |
+|---|---|---|
+| `FUSION_MAX_SESSIONS` | 4 | conversations at once |
+| `FUSION_MAX_SESSIONS_PER_KEY` | all of it for one key; all but one when keys are shared | per key |
+| `FUSION_MAX_MESSAGE_BYTES` | 1 MB | one WebSocket message |
+| `FUSION_MAX_TURN_AUDIO_S` | 60 | speech without a pause |
+| `FUSION_MAX_SESSION_S` | 900 | one conversation |
+| `FUSION_IDLE_TIMEOUT_S` | 60 | a socket that went quiet |
+| `FUSION_CONNECTIONS_PER_MINUTE` | 30 | new sockets, and failed keys, per address |
+| `FUSION_TOKENS_PER_MINUTE` | 600 | tokens one key may mint |
+
+### Origins and proxies
+
+`FUSION_ALLOWED_ORIGINS=https://shopkart.example` lists the websites whose pages may open a
+socket. Unset means only pages this server itself serves — browsers do not stop one site
+connecting to another, so the server checks. Clients that aren't browsers send no `Origin` and are
+unaffected.
+
+Behind a proxy that terminates TLS (RunPod's, nginx, Cloudflare), name it:
+
+```bash
+FUSION_TRUSTED_PROXY=10.0.0.0/8      # or =1 when nothing else can reach the port
+```
+
+Until you do, its `X-Forwarded-*` headers are ignored — anyone who can reach the port can write
+those headers — and `/v1/sessions` will refuse to mint a token over what looks like plain HTTP.
+The forwarded address is used for counting only, never to decide who may in.
 
 ## The `frun` CLI
 
@@ -131,6 +209,10 @@ Working example: [examples/website.html](examples/website.html).
 | `frun up --config production --host 0.0.0.0 --port 8080` | Production models, reachable from other machines |
 | `frun up --log-format json` | One JSON log line per event, for deployments and log collectors (see [Observability](#observability)) |
 | `frun talk` | Talks to the server with your mic and speakers, with a one-line latency summary per turn |
+| `frun talk --key <key>` | ...to a server with authentication on. Also: `FUSION_API_KEY` |
+| `frun key new [name]` | Generates a key. Shown once — nothing stores it |
+| `frun keys list` | The configured keys: names and fingerprints, never the keys |
+| `frun token` | Mints a session token and prints a console URL to open |
 | `frun talk --verbose` | Also prints each turn's full timeline |
 | `frun talk --url ws://host:8080/v1/voice/ws` | Talks to a server elsewhere |
 | `frun models list` | Shows every model, its size, whether it's installed, and which profile uses it |
@@ -282,14 +364,15 @@ Also read: `FUSION_CONFIG`, `FUSION_MODEL_DIR`, `FUSION_LOG_FORMAT`, `FUSION_LOG
 |----------|---------|
 | `GET /` | The console: open it in a browser and talk to the agent |
 | `GET /fusion-runtime.js` | The browser client, for your own pages (see [Put it on a website](#put-it-on-a-website)) |
-| `GET /health` | Status and loaded models |
+| `POST /v1/sessions` | Mints a browser's session token. Needs the key |
+| `GET /health` | Status and loaded models. Open: load balancers need it |
 | `POST /v1/voice/chat` | base64 audio in; audio out plus every turn's text and metrics (`transcript`, `response_text`, `turns[].user/.agent/.outcome/.metrics`) |
 | `POST /v1/voice/stream` | One turn, streamed PCM response |
 | `WS /v1/voice/ws` | Real-time conversation: raw 16 kHz PCM in, 24 kHz PCM and JSON events out. The first message gives both rates |
 | `GET /metrics` | Prometheus metrics (see [Observability](#observability)) |
 | `GET /v1/metrics/summary` | P50/P99 of recent single-shot runs, as JSON |
 
-There's no authentication yet, which is why `frun up` only listens on `127.0.0.1` unless you pass `--host`.
+Everything except `/health`, `/` and `/fusion-runtime.js` needs a key — or, on a WebSocket, a session token. See [Authentication](#authentication).
 
 WebSocket clients receive, besides audio: `transcript`, `response`, `interrupted`, `echo_discarded`, `turn.trace` (every turn's summary and timeline) and `error` (`code`, `message`, `stage`, `retryable`, `fix`; never a stack trace).
 

@@ -63,7 +63,13 @@ def test_frun_reads_it(tmp_path, monkeypatch):
 
 
 def test_the_example_file_only_lists_variables_that_exist():
-    """A .env.example naming settings nothing reads is worse than none."""
+    """A .env.example naming settings nothing reads is worse than none.
+
+    It is a starting file, not a reference: the rarely-changed knobs (limits,
+    token lifetime, a keys file) live in the README, so this checks that
+    everything listed is real and that the essentials are present — not that
+    every variable appears.
+    """
     import re
 
     text = Path(__file__).resolve().parent.parent.joinpath(".env.example").read_text()
@@ -74,5 +80,13 @@ def test_the_example_file_only_lists_variables_that_exist():
         "FUSION_TURN_WAIT_MS", "FUSION_INTERRUPT_AFTER_MS", "FUSION_TURN_DETECTOR",
         "FUSION_LLM_URL", "FUSION_LLM_MODEL", "FUSION_LLM_API_KEY_ENV",
         "FUSION_LOG_FORMAT", "FUSION_LOG_LEVEL", "FUSION_LOG_CONTENT", "FUSION_AEC",
+        "FUSION_ACCEPTED_KEYS", "FUSION_ACCEPTED_KEYS_FILE", "FUSION_SESSION_TOKEN_TTL_S",
+        "FUSION_TRUSTED_PROXY", "FUSION_API_KEY", "FUSION_ALLOWED_ORIGINS",
+        "FUSION_MAX_SESSIONS", "FUSION_MAX_SESSIONS_PER_KEY", "FUSION_MAX_MESSAGE_BYTES",
+        "FUSION_MAX_TURN_AUDIO_S", "FUSION_MAX_SESSION_S", "FUSION_IDLE_TIMEOUT_S",
+        "FUSION_CONNECTIONS_PER_MINUTE", "FUSION_TOKENS_PER_MINUTE",
     }
-    assert named == known, f"unwired: {named - known}, missing: {known - named}"
+    assert named <= known, f"names nothing reads: {named - known}"
+    essentials = {"HF_TOKEN", "FUSION_ACCEPTED_KEYS", "FUSION_API_KEY", "FUSION_AGENT",
+                  "FUSION_TURN_WAIT_MS", "FUSION_LLM_URL"}
+    assert essentials <= named, f"missing from the example: {essentials - named}"

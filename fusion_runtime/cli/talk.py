@@ -31,6 +31,10 @@ def talk(
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Print each turn's full timeline, not just the one-line summary.",
     ),
+    key: str = typer.Option(
+        None, "--key", help="The API key to present, when the server has authentication on. "
+                            "Also: FUSION_API_KEY.",
+    ),
 ) -> None:
     """Talk to the server with your microphone and speakers. You can interrupt the bot."""
     if not _audio_available():
@@ -47,7 +51,10 @@ def talk(
     if sys.platform == "darwin":
         typer.echo("If the mic bar never moves: System Settings → Privacy & Security → Microphone → allow your terminal.")
 
-    client = _talk_client.VoiceChatClient(uri=url, echo_cancellation=echo_cancellation, verbose=verbose)
+    from fusion_runtime.security import client_key
+
+    client = _talk_client.VoiceChatClient(uri=url, echo_cancellation=echo_cancellation, verbose=verbose,
+                                          key=key or client_key(url))
     try:
         asyncio.run(client.run())
     except KeyboardInterrupt:

@@ -73,7 +73,8 @@ def up(
     """Start the voice server. Talk to it from another terminal with `frun talk`."""
     from fusion_runtime.cli._checks import missing_models, port_answers_over_ipv6, port_in_use
     from fusion_runtime.config import (
-        INTERRUPT_AFTER_ENV, LLM_KEY_ENV_ENV, LLM_MODEL_ENV, LLM_URL_ENV, TURN_DETECTOR_ENV, TURN_WAIT_ENV, model_dir,
+        ACCEPTED_KEYS_ENV, API_KEY_ENV, INTERRUPT_AFTER_ENV, LLM_KEY_ENV_ENV, LLM_MODEL_ENV, LLM_URL_ENV, TURN_DETECTOR_ENV,
+        TURN_WAIT_ENV, model_dir,
     )
 
     for variable, value in ((LLM_URL_ENV, llm_url), (LLM_MODEL_ENV, llm_model), (LLM_KEY_ENV_ENV, llm_api_key_env),
@@ -141,6 +142,36 @@ def up(
             f"  lsof -nP -iTCP:{port} -sTCP:LISTEN     (or use: frun up --port {port + 1})"
         )
 
+    # Keys are read here as well as in the server, so a mistake stops the command
+    # rather than leaving a server running that isn't protected the way you think.
+    from fusion_runtime.security import ConfigurationError, KeySet, is_loopback
+
+    auth_error = None
+    try:
+        keys = KeySet.from_environment()
+        auth_state = f"on ({len(keys)} key{'s' if len(keys) != 1 else ''})" if keys \
+            else "off — this server answers on localhost only"
+    except ConfigurationError as e:
+        keys, auth_state = None, "misconfigured"
+        auth_error = f"Error: {e}"
+    reachable_from_elsewhere = not (is_loopback(host) or host == "localhost")
+    if keys is not None and not keys and reachable_from_elsewhere:
+        # The likely mistake, named: the two variables do different jobs, and only
+        # one of them protects a server.
+        has_client_key = bool(os.getenv(API_KEY_ENV))
+        mixup = (f"\n  ({API_KEY_ENV} is set, but that is the key a client sends. A server needs "
+                 f"{ACCEPTED_KEYS_ENV}.)" if has_client_key else "")
+        auth_error = (
+            f"Error: {host} is reachable from other machines and no keys are set, so anyone who can\n"
+            f"  reach this port could use your GPU. Generate a key first:\n"
+            f"    frun key new\n"
+            f"  then put it in .env (or export it) as {ACCEPTED_KEYS_ENV}=<the key>.{mixup}"
+        )
+
+    if auth_error:
+        typer.echo(auth_error, err=True)
+        raise typer.Exit(1)
+
     talk_hint = "frun talk"
     if (host, port) not in (("127.0.0.1", 8000), ("localhost", 8000), ("0.0.0.0", 8000)):
         talk_host = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
@@ -154,8 +185,7 @@ def up(
     if llm.api_base or llm.provider.value == "openai":
         typer.echo(f"LLM: {llm.model} at {llm.api_base or 'https://api.openai.com/v1'}"
                    + (f" (key from ${llm.api_key_env})" if llm.api_key_env else ""))
-    if host == "0.0.0.0":
-        typer.echo("Warning: there's no authentication yet, so anyone who can reach this machine can use it.")
+    typer.echo(f"Auth: {auth_state}")
     browser_host = "localhost" if host == "0.0.0.0" else host
     typer.echo(f"Loading models. Once it says 'Models ready', open http://{browser_host}:{port} in a browser "
                f"and click Talk\n  (or run `{talk_hint}` in another terminal).\n")
@@ -173,7 +203,11 @@ def up(
     os.environ["FUSION_LOG_CONTENT"] = "1" if log_content else "0"
     import uvicorn
 
+    from fusion_runtime.security.limits import Limits
+
+    # Refuse an oversized frame in the library, before it is buffered for us.
     uvicorn.run("fusion_runtime.server:app", host=host, port=port, workers=1,
+                ws_max_size=Limits.from_environment().max_message_bytes,
                 reload=reload, reload_includes=[agent_file.name] if reload and agent_file else None,
                 reload_dirs=[str(agent_file.parent)] if reload and agent_file else None,
                 log_level="warning" if log_format is LogFormat.json else "info")

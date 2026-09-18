@@ -57,7 +57,7 @@ def wait_for(predicate, timeout=3.0):
 
 def test_disconnect_ends_the_session(events):
     """Waiting only on the sender left sessions running forever after the client left."""
-    with TestClient(server.app) as client:
+    with TestClient(server.app, client=("127.0.0.1", 50000)) as client:
         with client.websocket_connect("/v1/voice/ws") as ws:
             config = ws.receive_json()
             ws.send_bytes(b"\x00\x00" * 320)
@@ -72,7 +72,7 @@ def test_disconnect_ends_the_session(events):
 
 def test_pipeline_error_reaches_client_with_code_and_fix(events):
     FakeOrchestrator.fail_with = AuthFailed("401 bad key sk-abcdefghijklmnop1234")
-    with TestClient(server.app) as client:
+    with TestClient(server.app, client=("127.0.0.1", 50000)) as client:
         with client.websocket_connect("/v1/voice/ws") as ws:
             ws.receive_json()
             ws.send_bytes(b"\x00\x00" * 320)
@@ -89,7 +89,7 @@ def test_pipeline_error_reaches_client_with_code_and_fix(events):
 
 def test_runtime_errors_are_no_longer_swallowed_as_disconnects(events):
     FakeOrchestrator.fail_with = RuntimeError("decode failed: CUDA error")
-    with TestClient(server.app) as client:
+    with TestClient(server.app, client=("127.0.0.1", 50000)) as client:
         with client.websocket_connect("/v1/voice/ws") as ws:
             ws.receive_json()
             ws.send_bytes(b"\x00\x00" * 320)
@@ -100,7 +100,7 @@ def test_runtime_errors_are_no_longer_swallowed_as_disconnects(events):
 
 
 def test_session_start_and_server_lifecycle_events(events):
-    with TestClient(server.app) as client:
+    with TestClient(server.app, client=("127.0.0.1", 50000)) as client:
         with client.websocket_connect("/v1/voice/ws") as ws:
             ws.receive_json()
         assert wait_for(lambda: events.named("session.end"))
@@ -110,7 +110,7 @@ def test_session_start_and_server_lifecycle_events(events):
 
 
 def test_metrics_endpoint_is_prometheus_text(events):
-    with TestClient(server.app) as client:
+    with TestClient(server.app, client=("127.0.0.1", 50000)) as client:
         response = client.get("/metrics")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
@@ -120,7 +120,7 @@ def test_metrics_endpoint_is_prometheus_text(events):
 
 
 def test_health_reports_version_uptime_and_sessions(events):
-    with TestClient(server.app) as client:
+    with TestClient(server.app, client=("127.0.0.1", 50000)) as client:
         body = client.get("/health").json()
     assert body["status"] == "healthy"
     assert body["version"] and body["uptime_s"] >= 0 and body["active_sessions"] == 0
@@ -147,7 +147,7 @@ def test_chat_returns_what_was_said_with_each_turn_s_metrics(monkeypatch):
     # the app's startup builds the orchestrator, so replace the class it builds
     monkeypatch.setattr(server, "PipelineOrchestrator", TalkingOrchestrator)
     monkeypatch.setenv("FUSION_LOG_FORMAT", "off")
-    with TestClient(server.app) as client:
+    with TestClient(server.app, client=("127.0.0.1", 50000)) as client:
         response = client.post("/v1/voice/chat", json={"audio_base64": base64.b64encode(b"\x00\x00" * 8000).decode()})
     assert response.status_code == 200
     body = response.json()

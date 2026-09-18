@@ -118,16 +118,28 @@ def format_error(msg: dict) -> str:
 
 
 class VoiceChatClient:
-    def __init__(self, uri: str = DEFAULT_URL, echo_cancellation: bool = True, verbose: bool = False):
+    def __init__(self, uri: str = DEFAULT_URL, echo_cancellation: bool = True, verbose: bool = False,
+                 key: Optional[str] = None):
         self.uri = uri
         self.verbose = verbose
+        self.key = key
         self.audio = DuplexAudio(echo_cancellation=echo_cancellation)
         self.replies = ReplyGate()
         self.reporter = PlaybackReporter()
         self._last_meter = 0.0
 
     async def run(self):
-        async with websockets.connect(self.uri, max_size=2**22) as ws:
+        # Unlike a browser, this client can set a header and can hold a key, so it
+        # sends the key itself — no session token round trip.
+        options = {"max_size": 2**22}
+        if self.key:
+            # websockets renamed this in 14.0; we support both.
+            import inspect
+
+            parameters = inspect.signature(websockets.connect).parameters
+            name = "additional_headers" if "additional_headers" in parameters else "extra_headers"
+            options[name] = {"Authorization": f"Bearer {self.key}"}
+        async with websockets.connect(self.uri, **options) as ws:
             config = json.loads(await ws.recv())
             print(f"Connected: {config}")
             if self.audio.echo_cancellation:
@@ -169,7 +181,9 @@ class VoiceChatClient:
                 self._handle_server_message(json.loads(data))
 
     def _show_meter(self, chunk: MicChunk):
-        """A mic level bar ~4x/sec, so you can see the mic is alive."""
+        """A mic level bar ~4x/sec, so you can see the mic is alive.
+
+"""
         now = time.monotonic()
         if now - self._last_meter < 0.25:
             return

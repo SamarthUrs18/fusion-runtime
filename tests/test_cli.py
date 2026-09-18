@@ -198,6 +198,7 @@ def test_up_starts_server_with_chosen_profile(monkeypatch):
     assert result.exit_code == 0, result.output
     assert calls == [("fusion_runtime.server:app",
                       {"host": "127.0.0.1", "port": port, "workers": 1, "log_level": "info",
+                       "ws_max_size": 1024 * 1024,  # oversized frames refused before buffering
                        "reload": False, "reload_includes": None, "reload_dirs": None})]
     assert os.environ["FUSION_CONFIG"] == "production"
     assert f"frun talk --url ws://localhost:{port}/v1/voice/ws" in result.output
@@ -274,13 +275,55 @@ def test_up_refuses_busy_port(monkeypatch):
     assert calls == []
 
 
-def test_up_warns_when_exposed_to_network(monkeypatch):
+def test_up_refuses_to_expose_an_unprotected_server(monkeypatch):
+    """Reachable from other machines with no keys is somebody else's GPU, so this
+    is a refusal rather than a warning."""
     _all_models_installed(monkeypatch)
     _record_uvicorn(monkeypatch)
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
     monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    monkeypatch.setenv("FUSION_ACCEPTED_KEYS", "")  # empty, not absent: a .env would fill it in
     result = runner.invoke(app, ["up", "--host", "0.0.0.0"])
-    assert "no authentication" in result.output
+    assert result.exit_code == 1
+    assert "frun key new" in result.output
+
+
+def test_up_starts_on_a_public_address_once_a_key_is_set(monkeypatch):
+    from fusion_runtime.security import new_key
+
+    _all_models_installed(monkeypatch)
+    _record_uvicorn(monkeypatch)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    monkeypatch.setenv("FUSION_ACCEPTED_KEYS", new_key())
+    result = runner.invoke(app, ["up", "--host", "0.0.0.0"])
+    assert result.exit_code == 0, result.output
+    assert "Auth: on (1 key)" in result.output
+
+
+def test_up_names_the_variable_mixup_when_only_the_client_key_is_set(monkeypatch):
+    """The two do different jobs, and only one of them protects a server."""
+    from fusion_runtime.security import new_key
+
+    _all_models_installed(monkeypatch)
+    _record_uvicorn(monkeypatch)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    monkeypatch.setenv("FUSION_ACCEPTED_KEYS", "")
+    monkeypatch.setenv("FUSION_API_KEY", new_key())
+    result = runner.invoke(app, ["up", "--host", "0.0.0.0"])
+    assert result.exit_code == 1
+    assert "FUSION_API_KEY is set, but that is the key a client sends" in result.output
+
+
+def test_up_says_when_it_is_answering_localhost_only(monkeypatch):
+    _all_models_installed(monkeypatch)
+    _record_uvicorn(monkeypatch)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    monkeypatch.setenv("FUSION_ACCEPTED_KEYS", "")  # empty, not absent: a .env would fill it in
+    result = runner.invoke(app, ["up"])
+    assert "localhost only" in result.output
 
 
 # ---- frun talk ---------------------------------------------------------------
@@ -294,8 +337,8 @@ class _FakeClient:
     instances = []
     raise_on_run = None
 
-    def __init__(self, uri, echo_cancellation, verbose=False):
-        self.uri, self.echo_cancellation, self.verbose = uri, echo_cancellation, verbose
+    def __init__(self, uri, echo_cancellation, verbose=False, key=None):
+        self.uri, self.echo_cancellation, self.verbose, self.key = uri, echo_cancellation, verbose, key
         _FakeClient.instances.append(self)
 
     async def run(self):
@@ -416,3 +459,21 @@ def test_models_pull_suggests_the_hf_prefix_for_a_repo_name():
     result = runner.invoke(app, ["models", "pull", "Qwen/Qwen2.5-0.5B-Instruct-GGUF"])
     assert result.exit_code == 1
     assert "frun models pull hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF" in result.output
+
+
+def test_key_new_prints_both_sides_of_the_setup():
+    """On one machine you are usually both: the server accepts keys, `frun talk`
+    and `frun token` present one. Printing only the server's half sends people
+    straight into "no key given"."""
+    result = runner.invoke(app, ["key", "new", "web"])
+    assert result.exit_code == 0, result.output
+    assert "FUSION_ACCEPTED_KEYS=web:frun_" in result.output
+    assert "FUSION_API_KEY=frun_" in result.output  # no label: that belongs to the server's list
+    assert "Fingerprint:" in result.output
+
+
+def test_token_without_a_key_says_how_to_get_one(monkeypatch):
+    monkeypatch.setenv("FUSION_API_KEY", "")  # empty, not absent: a .env would fill it in
+    result = runner.invoke(app, ["token"])
+    assert result.exit_code == 1
+    assert "frun key new" in result.output

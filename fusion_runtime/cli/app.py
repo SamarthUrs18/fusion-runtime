@@ -2,6 +2,7 @@
 import typer
 
 from fusion_runtime.cli.doctor import doctor
+from fusion_runtime.cli.keys import key_app, keys_app, token
 from fusion_runtime.cli.models import models_app
 from fusion_runtime.cli.talk import talk
 from fusion_runtime.cli.up import up
@@ -28,6 +29,9 @@ def _root() -> None:
 
 app.command()(up)
 app.command()(talk)
+app.add_typer(key_app, name="key")
+app.add_typer(keys_app, name="keys")
+app.command()(token)
 app.add_typer(models_app, name="models")
 app.command()(doctor)
 app.command()(version)
