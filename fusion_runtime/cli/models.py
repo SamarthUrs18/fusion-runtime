@@ -41,7 +41,8 @@ def list_models() -> None:
 @models_app.command("pull")
 def pull(
     ids: Optional[List[str]] = typer.Argument(
-        None, help="Catalog model IDs (see `frun models list`). Default: everything the profile needs."
+        None, help="Catalog model IDs (see `frun models list`), or hf:owner/repo for any Hugging Face model. "
+                   "Default: everything the profile needs.",
     ),
     config: Profile = typer.Option(Profile.development, "--config", "-c", help="Profile whose models to pull."),
     whisper: bool = typer.Option(False, "--whisper", help="Only the profile's speech-to-text model."),
@@ -63,11 +64,19 @@ def pull(
     from fusion_runtime.catalog.download import pull as pull_entry
     from fusion_runtime.config import model_dir
 
+    from fusion_runtime.catalog import ChooseAModel, ModelAccessDenied, hf_reference, is_hf_downloaded, pull_hf
+
     catalog = load_catalog()
+    ids = list(ids or [])
+    hf_refs = [i for i in ids if i.startswith("hf:")]
     try:
-        chosen = get_entries(ids or [], catalog)
+        chosen = get_entries([i for i in ids if i not in hf_refs], catalog)
     except UnknownModelError as e:
         typer.echo(f"Error: {e}", err=True)
+        for given in ids:
+            if "/" in given and not given.startswith("hf:"):  # a Hugging Face repo, written without the prefix
+                typer.echo(f"\nFor a Hugging Face model, write: frun models pull hf:{given}", err=True)
+                break
         raise typer.Exit(1)
 
     stages = {s for s, on in (("stt", whisper), ("llm", llm), ("tts", kokoro), ("vad", vad)) if on}
@@ -81,6 +90,25 @@ def pull(
     root = model_dir()
     todo = [e for e in chosen if force or not is_installed(e, root)]
     typer.echo(f"Model directory: {short_path(root)}")
+
+    for ref in hf_refs:  # any Hugging Face model, not just the catalog
+        try:
+            repo, revision, _ = hf_reference(ref)
+            if is_hf_downloaded(root, repo, revision) and not force:
+                typer.echo(f"✓ {ref} already downloaded")
+                continue
+            typer.echo(f"↓ {ref}")
+            pull_hf(ref, root, log=typer.echo, force=force)
+        except (ModelAccessDenied, ChooseAModel) as e:
+            typer.echo(f"✗ {e}", err=True)  # nothing to retry: the answer is in the message
+            raise typer.Exit(1)
+        except DownloadError as e:
+            typer.echo(f"✗ {e}", err=True)
+            typer.echo("Check your internet connection and run the same command again.", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"✓ {ref} ready")
+    if hf_refs and not chosen:
+        return
     for entry in chosen:
         if entry not in todo:
             typer.echo(f"✓ {entry.id} already installed")

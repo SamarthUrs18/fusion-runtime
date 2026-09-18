@@ -352,3 +352,21 @@ def test_transcription_delay_is_never_negative(hub):
     time.sleep(0.01)
     turn.mark("speech_end")  # ...before VAD marked speech as ended
     assert trace.summarize(turn, "completed")["transcription_delay_ms"] == 0
+
+
+def test_downloads_read_as_sentences_not_attributes():
+    """A download is the one thing that keeps someone waiting: say it plainly, twice."""
+    from fusion_runtime.telemetry.events import Event
+    from fusion_runtime.telemetry.sinks import ConsoleSink
+
+    starting = ConsoleSink.format(Event(name="model.downloading", stage="stt",
+                                        attrs={"model": "hf:org/model", "size": "486 MB"}))
+    finished = ConsoleSink.format(Event(name="model.downloaded", stage="stt", duration_ms=131_000,
+                                        attrs={"model": "hf:org/model", "size": "486 MB"}))
+    assert "Downloading the speech-to-text model hf:org/model (486 MB)" in starting
+    assert "first time only" in starting and "Please wait" in starting
+    assert "Downloaded the speech-to-text model hf:org/model in 2m 11s" in finished
+    assert "starts straight away" in finished
+    # a download whose size the hub didn't report still says what it is doing
+    assert "Downloading the speech-to-text model hf:org/model." in ConsoleSink.format(
+        Event(name="model.downloading", stage="stt", attrs={"model": "hf:org/model"}))

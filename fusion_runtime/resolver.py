@@ -188,13 +188,29 @@ def _from_catalog(entry: ModelEntry, root: Path, runtime, family, options) -> Re
 
 
 def _resolve_hf(stage, ref, runtime, family, options, catalog, root) -> ResolvedModel:
-    repo, _, revision = ref[3:].partition("@")
-    if repo.count("/") != 1 or not all(repo.split("/")):
-        raise InvalidRequest(f"expected hf:owner/repo or hf:owner/repo@revision, got {ref!r}")
-    for entry in catalog.values():
-        if entry.repo == repo and (not revision or entry.revision == revision) and entry.stage == stage:
-            return _from_catalog(entry, root, runtime, family, options)
+    from fusion_runtime.catalog import hf_reference
+
     try:
+        repo, revision, filename = hf_reference(ref)
+    except Exception as e:
+        raise InvalidRequest(str(e)) from e
+    revision = revision or ""
+    for entry in catalog.values():
+        if entry.repo != repo or entry.stage != stage or (revision and entry.revision != revision):
+            continue
+        if filename and Path(entry.path).name != Path(filename).name:
+            continue  # same repo, different file: the catalog copy isn't what was asked for
+        return _from_catalog(entry, root, runtime, family, options)
+    from fusion_runtime.catalog import hf_local_dir, is_hf_downloaded
+
+    if is_hf_downloaded(root, repo, revision or None):
+        folder = hf_local_dir(root, repo, revision or None)
+        if filename and not (folder / filename).exists():
+            raise ModelNotFound(f"{ref} is downloaded, but {filename} isn't in {folder}. "
+                                f"Run: frun models pull {ref} --force")
+        return _from_path(stage, folder / filename if filename else folder, runtime, family, options,
+                          source="huggingface")
+    try:  # a model the user downloaded themselves, in the shared Hugging Face cache
         from huggingface_hub import snapshot_download
         from huggingface_hub.errors import LocalEntryNotFoundError
     except ImportError as e:  # pragma: no cover - installed with faster-whisper
@@ -202,12 +218,8 @@ def _resolve_hf(stage, ref, runtime, family, options, catalog, root) -> Resolved
     try:
         local = snapshot_download(repo, revision=revision or None, local_files_only=True)
     except LocalEntryNotFoundError:
-        raise ModelNotFound(
-            f"{repo} isn't in the local Hugging Face cache. Download it first "
-            f"(huggingface-cli download {repo}); downloading any repo from frun comes later"
-        ) from None
-    resolved = _from_path(stage, Path(local), runtime, family, options, source="huggingface")
-    return resolved
+        raise ModelNotFound(f"{repo} isn't downloaded yet. Run: frun models pull {ref}") from None
+    return _from_path(stage, Path(local), runtime, family, options, source="huggingface")
 
 
 def _local_path(ref: str, root: Path) -> Optional[Path]:
@@ -321,7 +333,15 @@ def _check_runtime_stage(runtime: str, stage: str, ref: str) -> None:
         raise UnsupportedModel(f"{ref} runs on {runtime}, which serves {'/'.join(stages)}, not {stage}")
 
 
+_LOOKS_LIKE_A_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+$")
+
+
 def _not_found_message(stage: str, ref: str, root: Path, catalog: Dict[str, ModelEntry]) -> str:
+    if _LOOKS_LIKE_A_REPO.match(ref):  # "owner/repo" written without the prefix
+        message = f"{ref!r} looks like a Hugging Face model. Write it as hf:{ref}"
+        if ref.count("/") == 1:  # just the repo: a file may still be needed inside it
+            message += f", and name a file inside it if it holds several versions: hf:{ref}/model-q4_k_m.gguf"
+        return message
     ids = [e.id for e in catalog.values() if e.stage == stage]
     close = difflib.get_close_matches(ref, ids, n=1)
     hint = f" Did you mean {close[0]!r}?" if close else (f" Known {stage} models: {', '.join(ids)}." if ids else "")

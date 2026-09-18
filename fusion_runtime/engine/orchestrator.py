@@ -89,6 +89,7 @@ class PipelineOrchestrator:
         labels = {"model": getattr(stage_config, "model", None)}
         t0 = time.perf_counter()
         try:
+            await self._ensure_downloaded(stage, stage_config)
             # reads file headers (a GGUF vocabulary takes tens of ms): keep it off the event loop
             resolved = await asyncio.get_running_loop().run_in_executor(None, resolve_stage_config, stage, stage_config)
             self.resolved_models[stage] = resolved
@@ -123,6 +124,45 @@ class PipelineOrchestrator:
         self.turn_detector = detector
         telemetry.emit("model.loaded", stage="turn", duration_ms=(time.perf_counter() - t0) * 1000,
                        uses_audio=detector.uses_audio, uses_history=detector.uses_history, **labels)
+
+    async def _ensure_downloaded(self, stage: str, stage_config) -> None:
+        """Fetch an hf: model the config asks for but the machine doesn't have.
+
+        Deployments start from an empty disk, so the server downloads what the
+        agent names instead of expecting someone to run `frun models pull`
+        first. Set FUSION_AUTO_DOWNLOAD=0 to require it to be there already.
+        """
+        import os
+
+        from fusion_runtime.catalog import hf_expected_bytes, hf_reference, is_hf_downloaded, pull_hf
+        from fusion_runtime.config import model_dir
+
+        ref = getattr(stage_config, "model", "") or ""
+        if not ref.startswith("hf:") or os.getenv("FUSION_AUTO_DOWNLOAD", "1") in ("0", "false", "False"):
+            return
+        root = model_dir()
+        repo, revision, filename = hf_reference(ref)
+        if is_hf_downloaded(root, repo, revision):
+            return
+        from fusion_runtime.contract import ModelNotFound
+        from fusion_runtime.resolver import resolve_stage_config
+
+        try:  # already here under another name (a catalog model is the same file), so nothing to fetch
+            await asyncio.get_running_loop().run_in_executor(None, resolve_stage_config, stage, stage_config)
+            return
+        except ModelNotFound:
+            pass
+        total = await asyncio.get_running_loop().run_in_executor(
+            None, hf_expected_bytes, repo, revision, os.getenv("HF_TOKEN"), filename)
+        size = f"{total / 1e9:.1f} GB" if total and total >= 1e9 else (f"{total / 1e6:.0f} MB" if total else "unknown size")
+        telemetry.emit("model.downloading", stage=stage, model=ref, size=size, destination=str(root / "hf"),
+                       hint="first run with this model — this can take a few minutes; later starts reuse it")
+        started = time.perf_counter()
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: pull_hf(ref, root, log=lambda line: telemetry.emit(
+                "model.download_detail", level="debug", stage=stage, detail=line.strip())))
+        telemetry.emit("model.downloaded", stage=stage, model=ref, size=size,
+                       duration_ms=(time.perf_counter() - started) * 1000)
 
     async def initialize(self):
         """Resolve, load and warm up all models, reporting each one's load time."""

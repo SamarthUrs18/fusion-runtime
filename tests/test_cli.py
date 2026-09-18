@@ -410,3 +410,9 @@ def test_talk_formats_turn_summary_timeline_and_errors():
     error = _talk_client.format_error({"type": "error", "code": "auth_failed", "stage": "llm",
                                        "message": "401", "fix": "Check the API key", "retryable": False})
     assert error == "❌ [llm] auth_failed: 401\n   → Check the API key"
+
+
+def test_models_pull_suggests_the_hf_prefix_for_a_repo_name():
+    result = runner.invoke(app, ["models", "pull", "Qwen/Qwen2.5-0.5B-Instruct-GGUF"])
+    assert result.exit_code == 1
+    assert "frun models pull hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF" in result.output

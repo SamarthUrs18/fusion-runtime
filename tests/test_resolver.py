@@ -216,3 +216,121 @@ def test_development_profile_resolves_when_models_are_present(tmp_path):
             continue
         assert resolved.source == "catalog"
         assert resolved.spec.runtime == {"stt": "ctranslate2", "llm": "llama_cpp", "tts": "onnx"}[stage]
+
+
+# ---- downloading any Hugging Face model -------------------------------------------------------
+
+def test_hf_reference_parsing_and_folder_names(tmp_path):
+    from fusion_runtime.catalog import hf_local_dir, hf_reference
+
+    assert hf_reference("hf:Systran/faster-whisper-small") == ("Systran/faster-whisper-small", None, None)
+    assert hf_reference("hf:org/repo@abc123") == ("org/repo", "abc123", None)
+    assert hf_reference("hf:org/repo/model-q4_k_m.gguf") == ("org/repo", None, "model-q4_k_m.gguf")
+    assert hf_reference("hf:org/repo@abc/onnx/model.onnx") == ("org/repo", "abc", "onnx/model.onnx")
+    assert hf_reference("qwen2.5-0.5b-q4") is None
+    assert hf_local_dir(tmp_path, "org/repo").name == "org--repo"
+    assert hf_local_dir(tmp_path, "org/repo", "abc").name == "org--repo@abc"
+
+
+def test_a_downloaded_hf_model_resolves_from_the_model_directory(tmp_path):
+    from fusion_runtime.catalog import hf_local_dir
+
+    folder = hf_local_dir(tmp_path, "Systran/faster-whisper-tiny")
+    write_whisper(folder, 51865)
+    resolved = resolve("stt", "hf:Systran/faster-whisper-tiny", catalog=empty_catalog(), root=tmp_path)
+    assert (resolved.source, resolved.spec.runtime) == ("huggingface", "ctranslate2")
+    assert resolved.spec.model == str(folder)
+
+
+def test_an_undownloaded_hf_model_says_how_to_get_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")  # don't reach the network from a test
+    with pytest.raises(ModelNotFound, match=r"frun models pull hf:org/not-downloaded"):
+        resolve("llm", "hf:org/not-downloaded", catalog=empty_catalog(), root=tmp_path)
+
+
+async def test_the_server_downloads_a_model_the_agent_asks_for(tmp_path, monkeypatch):
+    """A deployment starts from an empty disk: the server fetches what the agent names."""
+    from fusion_runtime.agent import Agent, STT
+    from fusion_runtime.catalog import hf_local_dir
+    from fusion_runtime.engine import PipelineOrchestrator
+
+    monkeypatch.setenv("FUSION_MODEL_DIR", str(tmp_path))
+    pulled = []
+
+    def fake_pull(ref, root, log=print, force=False, allow_patterns=None):
+        pulled.append(ref)
+        write_whisper(hf_local_dir(root, "Systran/faster-whisper-tiny"), 51865)
+
+    monkeypatch.setattr("fusion_runtime.catalog.pull_hf", fake_pull)
+    agent = Agent(prompt="hi", stt=STT("hf:Systran/faster-whisper-tiny"))
+    orch = PipelineOrchestrator(agent.config({}))
+    await orch._ensure_downloaded("stt", orch.config.stt)
+    assert pulled == ["hf:Systran/faster-whisper-tiny"]
+    await orch._ensure_downloaded("stt", orch.config.stt)  # already there: no second download
+    assert pulled == ["hf:Systran/faster-whisper-tiny"]
+
+
+async def test_auto_download_can_be_switched_off(tmp_path, monkeypatch):
+    from fusion_runtime.agent import Agent, STT
+    from fusion_runtime.engine import PipelineOrchestrator
+
+    monkeypatch.setenv("FUSION_MODEL_DIR", str(tmp_path))
+    monkeypatch.setenv("FUSION_AUTO_DOWNLOAD", "0")
+    monkeypatch.setattr("fusion_runtime.catalog.pull_hf",
+                        lambda *a, **k: pytest.fail("must not download when switched off"))
+    orch = PipelineOrchestrator(Agent(prompt="hi", stt=STT("hf:org/repo")).config({}))
+    await orch._ensure_downloaded("stt", orch.config.stt)
+
+
+def test_a_repo_with_several_copies_of_a_model_asks_which_one(monkeypatch):
+    """A GGUF repo holds the same model 9 times over; downloading them all is gigabytes."""
+    from fusion_runtime.catalog import DownloadError
+    from fusion_runtime.catalog import download
+
+    monkeypatch.setattr(download, "hf_files", lambda repo, revision=None, token=None: [
+        ("config.json", 2_000),
+        ("model-q4_k_m.gguf", 491_000_000),
+        ("model-q8_0.gguf", 675_000_000),
+    ])
+    with pytest.raises(DownloadError, match=r"(?s)holds 2 versions.*hf:org/repo/model-q4_k_m.gguf"):
+        download._files_to_fetch("org/repo", None, None, None)
+
+    # naming one takes that file, plus the small files every copy needs
+    chosen = [name for name, _ in download._files_to_fetch("org/repo", None, "model-q4_k_m.gguf", None)]
+    assert chosen == ["model-q4_k_m.gguf", "config.json"]
+
+    with pytest.raises(DownloadError, match="has no file 'nope.gguf'"):
+        download._files_to_fetch("org/repo", None, "nope.gguf", None)
+
+
+def test_a_repo_with_one_model_needs_no_file_name(monkeypatch):
+    from fusion_runtime.catalog import download
+
+    monkeypatch.setattr(download, "hf_files", lambda repo, revision=None, token=None: [
+        ("config.json", 2_000), ("model.bin", 145_000_000), ("vocabulary.txt", 460_000),
+    ])
+    chosen = [name for name, _ in download._files_to_fetch("Systran/faster-whisper-base", None, None, None)]
+    assert chosen == ["config.json", "model.bin", "vocabulary.txt"]
+
+
+def test_a_named_file_resolves_from_the_downloaded_folder(tmp_path):
+    from fusion_runtime.catalog import hf_local_dir
+
+    folder = hf_local_dir(tmp_path, "org/gguf-repo")
+    write_gguf(folder / "model-q4_k_m.gguf", LLAMA_META)
+    resolved = resolve("llm", "hf:org/gguf-repo/model-q4_k_m.gguf", catalog=empty_catalog(), root=tmp_path)
+    assert resolved.spec.model.endswith("model-q4_k_m.gguf") and resolved.format == "gguf"
+
+    with pytest.raises(ModelNotFound, match="isn't in"):
+        resolve("llm", "hf:org/gguf-repo/other.gguf", catalog=empty_catalog(), root=tmp_path)
+
+
+def test_a_repo_written_without_the_hf_prefix_says_so(tmp_path):
+    with pytest.raises(ModelNotFound, match=r"Write it as hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF, and name a file"):
+        resolve("llm", "Qwen/Qwen2.5-0.5B-Instruct-GGUF", catalog=empty_catalog(), root=tmp_path)
+    # one that already names a file shouldn't be told to add another
+    with pytest.raises(ModelNotFound, match=r"Write it as hf:org/repo/onnx/model.onnx$"):
+        resolve("tts", "org/repo/onnx/model.onnx", catalog=empty_catalog(), root=tmp_path)
+    # a plain typo still gets the catalog suggestion
+    with pytest.raises(ModelNotFound, match="Did you mean"):
+        resolve("llm", "qwen2.5-0.5b", catalog=load_catalog(), root=tmp_path)

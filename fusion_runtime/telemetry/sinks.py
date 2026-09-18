@@ -11,6 +11,23 @@ from fusion_runtime.telemetry.hub import Sink
 _LEADING_ATTRS = ("runtime", "model", "reason", "outcome", "ttfa_ms", "response_ms")
 
 
+def _human_time(ms: float) -> str:
+    seconds = round(ms / 1000)
+    return f"{seconds // 60}m {seconds % 60}s" if seconds >= 60 else f"{seconds}s"
+
+
+def _download_line(event: Event) -> str:
+    """Downloads are the one thing that keeps someone waiting, so they read as plain sentences."""
+    kind = {"stt": "speech-to-text", "llm": "language", "tts": "voice"}.get(event.stage or "", "")
+    what = f"{kind} model {event.attrs.get('model', '')}".strip()
+    size = event.attrs.get("size")
+    if event.name == "model.downloading":
+        return (f"⬇  Downloading the {what}{f' ({size})' if size else ''}. "
+                "This happens the first time only. Please wait.")
+    took = f" in {_human_time(event.duration_ms)}" if event.duration_ms else ""
+    return f"✓  Downloaded the {what}{took}. Next time it starts straight away."
+
+
 def _fmt_value(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:.0f}" if abs(value) >= 10 else f"{value:.2f}"
@@ -40,6 +57,8 @@ class ConsoleSink(Sink):
 
         if event.name == "turn.summary":
             return f"{clock}  {session:<8} {turn:<4} {_summary_line(event)}"
+        if event.name in ("model.downloading", "model.downloaded"):
+            return f"{clock}  {_download_line(event)}"
 
         parts = []
         if event.level in ("warning", "error"):
