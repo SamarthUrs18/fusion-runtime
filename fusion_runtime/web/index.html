@@ -4,6 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>fusion-runtime</title>
+<!--
+  The mark, inline: a browser that is told where the icon is stops asking for
+  /favicon.ico, which the runtime doesn't serve — so a deployment's logs aren't
+  a stream of 404s. Inline also means no second request and no extra file to
+  package. (On localhost you may still see an icon a different app left in the
+  browser's cache for that port; this overrides it.)
+-->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='22' width='8' height='20' rx='4' fill='%233E5C8A'/><rect x='14' y='16' width='8' height='32' rx='4' fill='%233E5C8A'/><rect x='26' y='8' width='12' height='48' rx='6' fill='%23D9612F'/><rect x='42' y='16' width='8' height='32' rx='4' fill='%233E5C8A'/><rect x='54' y='22' width='8' height='20' rx='4' fill='%233E5C8A'/></svg>">
 <style>
   :root {
     --bg: #ffffff; --panel: #f6f7f9; --line: #e3e5e9; --text: #16181d; --muted: #6b7280;

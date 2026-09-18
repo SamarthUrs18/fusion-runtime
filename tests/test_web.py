@@ -44,6 +44,13 @@ def test_console_is_served_at_the_root(client):
     assert web.CLIENT_ROUTE in response.text
 
 
+def test_the_console_declares_its_own_icon(client):
+    """Otherwise every browser asks for /favicon.ico, which nothing serves, and each
+    deployment's logs collect 404s for it."""
+    page = client.get("/").text
+    assert 'rel="icon"' in page and "data:image/svg+xml" in page
+
+
 def test_client_script_can_be_embedded_from_another_site(client):
     response = client.get(web.CLIENT_ROUTE)
     assert response.status_code == 200
