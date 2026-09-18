@@ -63,6 +63,17 @@ A model is named as a catalog id (`frun models list`), a file path, `hf:owner/re
 optionally with the runtime in front (`vllm:hf:org/model`). Settings the config knows
 (`max_tokens`, `voice`, `n_ctx`, ...) are applied; anything else is passed to that runtime.
 
+**Any Hugging Face model works**, not just the catalog:
+
+```bash
+frun models pull hf:Systran/faster-whisper-small     # into the model directory
+export HF_TOKEN=hf_...                               # only for gated or private models
+```
+
+A server also downloads what its agent names, so a fresh machine needs no separate step
+(`FUSION_AUTO_DOWNLOAD=0` turns that off). Downloads are checked against free disk space first,
+and only the files needed to run the model are fetched.
+
 **Settings can come from three places, and the later one wins:** the agent file, then
 environment variables (`FUSION_TURN_WAIT_MS`, `FUSION_LLM_URL`, ...), then CLI flags. So a
 deployment can change behaviour without editing the agent, and a flag is for a quick experiment.
@@ -206,6 +217,22 @@ Whisper models like `tiny.en` refuse other languages at startup). Kokoro speaks 
 or `TTSConfig(language=...)`. Reply text is split into sentences for speech in any script (`.` `।` `。`
 `؟` …), and decimals like "3.5" aren't cut. The catalog currently has English models only.
 
+### Settings in a `.env` file
+
+Rather than exporting variables by hand, put them in `.env` next to your project (git ignores it,
+and `.env.example` lists what it can hold):
+
+```
+HF_TOKEN=hf_...
+FUSION_TURN_WAIT_MS=800
+FUSION_LLM_URL=http://localhost:8080/v1
+FUSION_LLM_MODEL=my-model
+```
+
+`frun` reads it from the directory you run in, and from the directory your agent file lives in.
+Anything already exported in your shell wins, so a deployment's real environment is never
+overwritten. Values are never logged — only the names of what was loaded.
+
 Also read: `FUSION_CONFIG`, `FUSION_MODEL_DIR`, `FUSION_LOG_FORMAT`, `FUSION_LOG_LEVEL`, `FUSION_LOG_CONTENT` (set by `frun up`'s log flags) and `FUSION_AEC` (`FUSION_AEC=0` is the same as `frun talk --no-aec`). The other variables in `.env.example` aren't wired up yet.
 
 ## Server API
@@ -213,7 +240,7 @@ Also read: `FUSION_CONFIG`, `FUSION_MODEL_DIR`, `FUSION_LOG_FORMAT`, `FUSION_LOG
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /health` | Status and loaded models |
-| `POST /v1/voice/chat` | One turn: base64 audio in, base64 audio out |
+| `POST /v1/voice/chat` | base64 audio in; audio out plus every turn's text and metrics (`transcript`, `response_text`, `turns[].user/.agent/.outcome/.metrics`) |
 | `POST /v1/voice/stream` | One turn, streamed PCM response |
 | `WS /v1/voice/ws` | Real-time conversation: raw 16 kHz PCM in, 24 kHz PCM and JSON events out |
 | `GET /metrics` | Prometheus metrics (see [Observability](#observability)) |

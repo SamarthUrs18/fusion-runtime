@@ -19,9 +19,11 @@ app = typer.Typer(
 
 @app.callback()
 def _root() -> None:
-    # Having a callback keeps `frun <command>` as a command group even while
-    # there's only one command (Typer otherwise runs a lone command as `frun`).
-    pass
+    # Settings and tokens can live in a .env file next to the project, so they
+    # don't have to be exported by hand. The real environment still wins.
+    from fusion_runtime.env import load_env_file
+
+    load_env_file()
 
 
 app.command()(up)

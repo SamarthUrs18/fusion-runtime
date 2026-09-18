@@ -14,10 +14,12 @@ import os
 import platform
 import time
 import uuid
+from pathlib import Path
 
 from fusion_runtime import __version__
 from fusion_runtime.agent import DEFAULT_PROMPT, Agent, load_agent
 from fusion_runtime.config import load_profile
+from fusion_runtime.env import load_env_file
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator
 from fusion_runtime.telemetry import LoopMonitor, SessionTrace, describe_error, session_scope, telemetry
 
@@ -36,10 +38,16 @@ _loop_monitor: Optional[LoopMonitor] = None
 async def startup():
     global orchestrator, agent, _loop_monitor, _started_at
     _started_at = time.monotonic()
+    agent_path = os.getenv("FUSION_AGENT")
+    directories = [Path.cwd()] + ([Path(agent_path).expanduser().parent] if agent_path else [])
+    loaded_env = load_env_file(directories)  # names only are logged; values are secrets
     telemetry.configure_from_env()
     # An agent file describes everything; without one, a profile of defaults.
     # production requires explicit FUSION_CONFIG=production
     config_name = os.getenv("FUSION_CONFIG", "development")
+    if loaded_env:
+        telemetry.emit("env.loaded", stage="server", variables=sorted(loaded_env),
+                       hint="from a .env file; values are never logged")
     agent_path = os.getenv("FUSION_AGENT")
     if agent_path:
         agent = load_agent(agent_path)
@@ -83,11 +91,21 @@ class VoiceChatRequest(BaseModel):
     voice: Optional[str] = None
 
 
+class Turn(BaseModel):
+    """One exchange: what the caller said, what the agent answered, and how long each part took."""
+
+    user: str
+    agent: str
+    outcome: str  # completed | interrupted | echo_discarded
+    metrics: dict  # the same numbers as the per-turn telemetry summary (TTFA, stt, llm, tts, ...)
+
+
 class VoiceChatResponse(BaseModel):
     audio_base64: str
-    transcript: str
-    response_text: str
+    transcript: str  # everything the caller said, turns joined
+    response_text: str  # everything the agent answered
     latency_ms: float
+    turns: list[Turn] = []
 
 
 class HealthResponse(BaseModel):
@@ -139,26 +157,65 @@ async def voice_chat(request: VoiceChatRequest):
         if not orchestrator.config.allow_cloud_fallback:
             raise HTTPException(400, "Cloud provider override requires allow_cloud_fallback=true")
 
-    # Run pipeline
-    from fusion_runtime.engine import run_single_turn
+    # Run the pipeline, keeping each turn's text and numbers (see _collect_turns)
+    turns: list = []
+    trace = SessionTrace(session_id=request_id)  # run_pipeline sends its turn traces to on_event
+    collect = _collect_turns(turns)
+
+    async def audio_chunks():
+        yield audio
+
+    output = bytearray()
     with session_scope(request_id):
         try:
-            output_audio = await run_single_turn(
-                orchestrator,
-                audio,
-                request.system_prompt or (agent.prompt if agent is not None else DEFAULT_PROMPT)
+            pipeline = orchestrator.run_pipeline(
+                audio_chunks(),
+                request.system_prompt or (agent.prompt if agent is not None else DEFAULT_PROMPT),
+                on_event=collect,
+                trace=trace,
             )
+            try:
+                async for chunk in pipeline:
+                    output.extend(chunk)
+            finally:
+                await pipeline.aclose()
         except Exception as e:
             return _error_response(e, request_id)
 
     latency = (time.perf_counter() - start) * 1000
-
     return VoiceChatResponse(
-        audio_base64=base64.b64encode(output_audio).decode(),
-        transcript="",  # Would need to capture from pipeline
-        response_text="",  # Would need to capture from pipeline
+        audio_base64=base64.b64encode(bytes(output)).decode(),
+        transcript=" ".join(turn.user for turn in turns if turn.user),
+        response_text=" ".join(turn.agent for turn in turns if turn.agent),
         latency_ms=latency,
+        turns=turns,
     )
+
+
+def _collect_turns(turns: list):
+    """Gather each turn's text and metrics from the pipeline's events.
+
+    The pipeline reports a turn's words as they are recognized and its numbers
+    when the turn ends, so they're stitched together here.
+    """
+    said: dict = {"user": "", "agent": ""}
+
+    def on_event(event: dict) -> None:
+        kind = event.get("type")
+        if kind == "transcript" and event.get("is_final"):
+            said["user"] = event.get("text", "")
+        elif kind == "response" and event.get("is_final"):
+            said["agent"] = event.get("text", "")
+        elif kind == "echo_discarded":
+            said["user"] = said["agent"] = ""
+        elif kind == "turn.trace":
+            summary = event.get("summary", {})
+            outcome = summary.get("outcome", "completed")
+            if outcome != "echo_discarded":
+                turns.append(Turn(user=said["user"], agent=said["agent"], outcome=outcome, metrics=summary))
+            said["user"] = said["agent"] = ""
+
+    return on_event
 
 
 @app.post("/v1/voice/stream")

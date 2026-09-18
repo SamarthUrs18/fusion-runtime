@@ -20,6 +20,8 @@ dependencies = [
     "websockets>=12.0",
     "python-multipart>=0.0.9",
     "httpx>=0.27.0",
+    # .env files (already required by pydantic-settings; named here because we use it directly)
+    "python-dotenv>=1.0",
     "faster-whisper>=1.1.0",
     "llama-cpp-python>=0.2.80",
     "onnxruntime>=1.18.0",

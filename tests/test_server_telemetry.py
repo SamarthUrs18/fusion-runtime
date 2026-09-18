@@ -124,3 +124,50 @@ def test_health_reports_version_uptime_and_sessions(events):
         body = client.get("/health").json()
     assert body["status"] == "healthy"
     assert body["version"] and body["uptime_s"] >= 0 and body["active_sessions"] == 0
+
+
+class TalkingOrchestrator(FakeOrchestrator):
+    """A pipeline that reports one finished turn, the way the real one does."""
+
+    async def run_pipeline(self, audio_stream, system_prompt, on_event=None, barge_in=None, trace=None):
+        if trace.on_turn_trace is None:  # the real pipeline wires traces to on_event this way
+            trace.on_turn_trace = lambda turn_trace: on_event({"type": "turn.trace", **turn_trace})
+        async for chunk in audio_stream:
+            trace.audio_received(len(chunk))
+        turn = trace.start_responding()
+        on_event({"type": "transcript", "text": "I want to check my order.", "is_final": True})
+        on_event({"type": "response", "text": "Sure, what is the order number?", "is_final": True})
+        yield b"\x00\x00" * 160
+        trace.end_turn(turn, "completed")  # sends the turn trace through on_event
+
+
+def test_chat_returns_what_was_said_with_each_turn_s_metrics(monkeypatch):
+    import base64
+
+    # the app's startup builds the orchestrator, so replace the class it builds
+    monkeypatch.setattr(server, "PipelineOrchestrator", TalkingOrchestrator)
+    monkeypatch.setenv("FUSION_LOG_FORMAT", "off")
+    with TestClient(server.app) as client:
+        response = client.post("/v1/voice/chat", json={"audio_base64": base64.b64encode(b"\x00\x00" * 8000).decode()})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["transcript"] == "I want to check my order."
+    assert body["response_text"] == "Sure, what is the order number?"
+    assert base64.b64decode(body["audio_base64"])
+    assert len(body["turns"]) == 1
+    turn = body["turns"][0]
+    assert turn["user"] == "I want to check my order." and turn["agent"] == "Sure, what is the order number?"
+    assert turn["outcome"] == "completed" and turn["metrics"]["outcome"] == "completed"
+
+
+def test_a_turn_discarded_as_the_agents_own_echo_is_not_reported_as_an_exchange():
+    turns = []
+    collect = server._collect_turns(turns)
+    collect({"type": "transcript", "text": "the agent's own words", "is_final": True})
+    collect({"type": "echo_discarded", "text": "the agent's own words"})
+    collect({"type": "turn.trace", "summary": {"outcome": "echo_discarded"}})
+    collect({"type": "transcript", "text": "a real question", "is_final": True})
+    collect({"type": "response", "text": "a real answer", "is_final": True})
+    collect({"type": "turn.trace", "summary": {"outcome": "completed", "ttfa_ms": 900}})
+    assert [(t.user, t.agent) for t in turns] == [("a real question", "a real answer")]
+    assert turns[0].metrics["ttfa_ms"] == 900
