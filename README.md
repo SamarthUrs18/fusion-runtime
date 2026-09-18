@@ -342,7 +342,8 @@ pytest tests/
 `uv.lock` pins every version, which is why it is committed: the torch and
 torchaudio releases have to match exactly, and drifting apart once broke voice
 detection silently for days. Run `uv lock` after changing a dependency.
-`.python-version` keeps everyone on 3.11, the version this is tested against.
+`.python-version` puts new checkouts on 3.11, the oldest version supported; CI runs the
+suite on 3.11, 3.12, 3.13 and 3.14.
 
 First install takes a while whichever tool you use: `llama-cpp-python` is
 published as source only, so it compiles (a few minutes, and it needs a C++

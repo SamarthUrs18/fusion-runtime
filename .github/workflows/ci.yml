@@ -13,12 +13,21 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      # pyproject says >=3.11, so every version that allows is tested. Most
+      # breakage here isn't our code: it's a compiled wheel (ctranslate2,
+      # llama-cpp-python, onnxruntime, torch) not published yet for a new
+      # Python, which a user hits as a compiler error on install.
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    name: tests (python ${{ matrix.python-version }})
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install
