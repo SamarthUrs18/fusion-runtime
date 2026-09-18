@@ -156,7 +156,9 @@ def up(
                    + (f" (key from ${llm.api_key_env})" if llm.api_key_env else ""))
     if host == "0.0.0.0":
         typer.echo("Warning: there's no authentication yet, so anyone who can reach this machine can use it.")
-    typer.echo(f"Loading models. Once it says 'Models ready', run `{talk_hint}` in another terminal.\n")
+    browser_host = "localhost" if host == "0.0.0.0" else host
+    typer.echo(f"Loading models. Once it says 'Models ready', open http://{browser_host}:{port} in a browser "
+               f"and click Talk\n  (or run `{talk_hint}` in another terminal).\n")
 
     if log_content:
         typer.echo("Note: --log-content writes what users say, and the bot's replies, into the logs.")

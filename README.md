@@ -17,17 +17,21 @@ frun models pull          # ~0.9 GB: Whisper tiny, Qwen2.5 0.5B, Kokoro, Silero 
 frun doctor               # checks libraries, GPU, models and audio, and says how to fix problems
 ```
 
-Start the server, then talk to it from a second terminal:
+Start the server:
 
 ```bash
 frun up
 ```
 
+Then open **http://localhost:8000** and click Talk. That page is served by the runtime itself — no build step, nothing to install. You can talk over the agent to interrupt it.
+
+Or talk from a second terminal instead:
+
 ```bash
 frun talk
 ```
 
-On macOS, allow microphone access for your terminal app (System Settings → Privacy & Security → Microphone). You can talk over the bot to interrupt it. With headphones, `frun talk --no-aec` turns echo cancellation off.
+On macOS, allow microphone access for your browser (or, for `frun talk`, your terminal app) under System Settings → Privacy & Security → Microphone. With headphones, `frun talk --no-aec` turns echo cancellation off.
 
 ## Build an agent
 
@@ -81,6 +85,43 @@ Secrets are never in the agent file: those are environment variables (`api_key_e
 
 Working example: [examples/agent.py](examples/agent.py). Tool calling isn't built yet, so
 `tools=` raises a clear error.
+
+## Put it on a website
+
+The runtime serves the browser client it uses itself, so a page needs two lines and no build step:
+
+```html
+<script src="https://your-server/fusion-runtime.js"></script>
+<button id="talk"></button>
+<script>FusionRuntime.attach({ button: "#talk" });</script>
+```
+
+With no `url`, it connects back to the server the script came from. Everything else is optional:
+
+```js
+const session = FusionRuntime.attach({ button: "#talk", token: sessionToken });
+
+session.on("transcript", msg => { if (msg.is_final) show("You: " + msg.text); });
+session.on("response",   msg => { if (msg.is_final) show(msg.text); });
+session.on("trace",      msg => console.log(msg.summary));   // TTFA, tokens/sec, per-stage times
+session.on("error",      e   => show(e.message));
+```
+
+`FusionRuntime.connect(options)` returns the same session without binding a button, for a page
+that has its own controls (`session.start()`, `session.stop()`, `session.interrupt()`).
+
+The client uses the browser's own echo canceller, resamples the microphone in an AudioWorklet so a
+busy page can't stutter the audio, and schedules replies slightly ahead of real time so network
+jitter doesn't leave gaps. Interruptions are decided on the server, which hears clean audio: when
+it says the caller interrupted, queued audio is dropped immediately, including the tail of a
+sentence already synthesized.
+
+**Two things to know before deploying it.** Browsers only hand over a microphone on `https://`
+(or `localhost`), so the page and the WebSocket both need TLS — `https://` and `wss://`. And there
+is no authentication yet: anything reachable can use the server. The client already takes a
+`token` (never an API key, which doesn't belong in a page) for when that lands.
+
+Working example: [examples/website.html](examples/website.html).
 
 ## The `frun` CLI
 
@@ -239,10 +280,12 @@ Also read: `FUSION_CONFIG`, `FUSION_MODEL_DIR`, `FUSION_LOG_FORMAT`, `FUSION_LOG
 
 | Endpoint | Purpose |
 |----------|---------|
+| `GET /` | The console: open it in a browser and talk to the agent |
+| `GET /fusion-runtime.js` | The browser client, for your own pages (see [Put it on a website](#put-it-on-a-website)) |
 | `GET /health` | Status and loaded models |
 | `POST /v1/voice/chat` | base64 audio in; audio out plus every turn's text and metrics (`transcript`, `response_text`, `turns[].user/.agent/.outcome/.metrics`) |
 | `POST /v1/voice/stream` | One turn, streamed PCM response |
-| `WS /v1/voice/ws` | Real-time conversation: raw 16 kHz PCM in, 24 kHz PCM and JSON events out |
+| `WS /v1/voice/ws` | Real-time conversation: raw 16 kHz PCM in, 24 kHz PCM and JSON events out. The first message gives both rates |
 | `GET /metrics` | Prometheus metrics (see [Observability](#observability)) |
 | `GET /v1/metrics/summary` | P50/P99 of recent single-shot runs, as JSON |
 

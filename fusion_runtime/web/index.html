@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fusion-runtime</title>
+<style>
+  :root {
+    --bg: #ffffff; --panel: #f6f7f9; --line: #e3e5e9; --text: #16181d; --muted: #6b7280;
+    --accent: #2f6df6; --agent: #0d7a5f; --warn: #b45309; --error: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --panel: #1b1e24; --line: #2a2e36; --text: #e8eaed; --muted: #9aa1ac;
+      --accent: #6c9bff; --agent: #5bd0ac; --warn: #e0a95f; --error: #ff8a7a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 ui-sans-serif, -apple-system,
+    "Segoe UI", Roboto, sans-serif; display: flex; justify-content: center; padding: 24px 16px 64px;
+  }
+  main { width: 100%; max-width: 720px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  .sub, .muted { color: var(--muted); font-size: 13px; }
+  .row { display: flex; align-items: center; gap: 14px; margin: 20px 0 8px; }
+  button#talk {
+    font: inherit; font-weight: 600; padding: 12px 26px; border-radius: 999px; border: 0; cursor: pointer;
+    background: var(--accent); color: #fff; min-width: 148px;
+  }
+  button#talk[data-fusion-state="live"] { background: var(--error); }
+  button#talk:disabled { opacity: 0.6; cursor: default; }
+  #meter { flex: 1; height: 8px; border-radius: 999px; background: var(--panel); overflow: hidden; }
+  #meter div { height: 100%; width: 0; background: var(--accent); transition: width 90ms linear; }
+  #hint { min-height: 20px; }
+  #conversation { margin-top: 18px; display: flex; flex-direction: column; gap: 14px; }
+  .turn { border-left: 3px solid var(--line); padding-left: 12px; }
+  .turn .who { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .turn.you { border-color: var(--accent); }
+  .turn.agent { border-color: var(--agent); }
+  .turn.partial { opacity: 0.55; }
+  .metrics { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); margin-top: 4px; }
+  .note { color: var(--warn); }
+  .note.bad { color: var(--error); }
+  details { margin-top: 36px; border-top: 1px solid var(--line); padding-top: 16px; }
+  summary { cursor: pointer; color: var(--muted); }
+  pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+    overflow-x: auto; font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>fusion-runtime</h1>
+    <span class="sub" id="server">checking the server…</span>
+  </header>
+  <p class="sub">Click <b>Talk</b> and speak. You can talk over the agent — it stops.</p>
+
+  <div class="row">
+    <button id="talk" type="button">Talk</button>
+    <div id="meter"><div></div></div>
+  </div>
+  <div id="hint" class="muted"></div>
+
+  <div id="conversation"></div>
+
+  <details>
+    <summary>Put this on your own site</summary>
+    <p class="sub">Two lines. The script connects back to the server it came from.</p>
+    <pre id="snippet"></pre>
+    <p class="sub">Browsers only allow the microphone on <code>https://</code>, so the page and the
+      WebSocket both need TLS in production (<code>wss://</code>).</p>
+  </details>
+</main>
+
+<script src="/fusion-runtime.js"></script>
+<script>
+(function () {
+  var hint = document.getElementById("hint");
+  var meter = document.querySelector("#meter div");
+  var conversation = document.getElementById("conversation");
+  var partial = null;      // the live "you" line, before the turn ends
+  var replyLine = null;    // the agent line for the turn being spoken
+
+  // A token may be handed to the page (?token=...); the page never holds an API key.
+  var token = new URLSearchParams(location.search).get("token");
+  var session = FusionRuntime.attach({ button: "#talk", token: token });
+
+  document.getElementById("snippet").textContent =
+    '<script src="' + location.origin + '/fusion-runtime.js"><\/script>\n' +
+    '<button id="talk"></button>\n' +
+    '<script>FusionRuntime.attach({ button: "#talk" });<\/script>';
+
+  function line(cls, who, text) {
+    var el = document.createElement("div");
+    el.className = "turn " + cls;
+    el.innerHTML = '<div class="who"></div><div class="text"></div>';
+    el.querySelector(".who").textContent = who;
+    el.querySelector(".text").textContent = text;
+    conversation.appendChild(el);
+    el.scrollIntoView({ block: "nearest" });
+    return el;
+  }
+
+  function say(text, bad) {
+    hint.textContent = text;
+    hint.className = text ? ("note" + (bad ? " bad" : "")) : "muted";
+  }
+
+  function ms(value) { return value === null || value === undefined ? "–" : Math.round(value) + " ms"; }
+
+  session.on("state", function (event) {
+    if (event.state === "live") say("Listening. Speak whenever you like.");
+    else if (event.state === "connecting") say("Connecting…");
+    else if (event.state === "closed") say("The server closed the connection" +
+      (event.detail ? " (" + event.detail + ")" : "") + ".", true);
+    else if (event.state === "idle") { say(""); meter.style.width = "0"; }
+  });
+
+  session.on("level", function (level) {
+    meter.style.width = Math.min(100, level * 260) + "%";
+  });
+
+  session.on("transcript", function (msg) {
+    if (msg.is_final) {
+      if (partial) { partial.remove(); partial = null; }
+      line("you", "You", msg.text);
+      replyLine = null;
+    } else if (msg.text) {
+      if (!partial) partial = line("you partial", "You", msg.text);
+      else partial.querySelector(".text").textContent = msg.text;
+    }
+  });
+
+  session.on("response", function (msg) {
+    // One message per token: keep updating the same line instead of adding one each time.
+    if (!replyLine) replyLine = line("agent", "Agent", "");
+    replyLine.querySelector(".text").textContent =
+      msg.text + (msg.is_final && msg.interrupted ? " — (cut off, you interrupted)" : "");
+  });
+
+  session.on("interrupted", function () { say("You interrupted — the agent stopped."); });
+  session.on("turn_resumed", function () { say("You kept talking, so both parts are answered together."); });
+  session.on("echo_discarded", function () { say("That was the agent's own voice coming back, so it was ignored."); });
+
+  session.on("trace", function (msg) {
+    var s = msg.summary || {};
+    var parts = [];
+    if (s.ttfa_ms != null) parts.push("first audio " + ms(s.ttfa_ms));
+    if (s.stt_transcribe_ms != null) parts.push("speech→text " + ms(s.stt_transcribe_ms));
+    if (s.llm_first_token_ms != null) {
+      parts.push("llm " + ms(s.llm_first_token_ms) +
+        (s.llm_tokens_per_second ? " · " + Math.round(s.llm_tokens_per_second) + " tok/s" : ""));
+    }
+    if (s.tts_first_chunk_ms != null) parts.push("voice " + ms(s.tts_first_chunk_ms));
+    if (!parts.length) return;
+    var el = document.createElement("div");
+    el.className = "metrics";
+    el.textContent = parts.join("   ");
+    (replyLine || conversation).appendChild(el);
+  });
+
+  session.on("error", function (event) {
+    say(event.message + (event.server && event.server.fix ? " → " + event.server.fix : ""), true);
+  });
+
+  fetch("/health").then(function (r) { return r.json(); }).then(function (health) {
+    var models = health.config || {};
+    document.getElementById("server").textContent =
+      "v" + health.version + " · " + [models.stt, models.llm, models.tts].filter(Boolean).join(" → ") +
+      (health.models_loaded ? "" : " · still loading models");
+    if (!health.models_loaded) {
+      say("The models are still loading. The first run downloads them, which can take a few minutes.");
+    }
+  }).catch(function () {
+    document.getElementById("server").textContent = "server not reachable";
+  });
+
+  if (!window.isSecureContext) {
+    say("This page isn't on https:// or localhost, so the browser won't allow the microphone.", true);
+  }
+})();
+</script>
+</body>
+</html>

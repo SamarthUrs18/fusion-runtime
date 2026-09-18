@@ -1,0 +1,41 @@
+<!doctype html>
+<!--
+  A voice agent on an ordinary page. Serve this file however you like and open
+  it next to a running `frun up`:
+
+      python3 -m http.server 3000 --directory examples    # then open localhost:3000/website.html
+
+  The script is loaded from the runtime, so it already knows where to connect.
+  Change the address below to wherever your server is.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ShopKart — order status</title>
+  <style>
+    body { font: 16px/1.6 system-ui, sans-serif; max-width: 520px; margin: 60px auto; padding: 0 20px; }
+    #talk { font: inherit; padding: 10px 22px; border-radius: 999px; border: 0; background: #2f6df6; color: #fff; }
+    #said { color: #555; min-height: 3em; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <h1>ShopKart</h1>
+  <p>Order #4417 — two items, arriving Friday.</p>
+
+  <button id="talk"></button>
+  <p id="said"></p>
+
+  <script src="http://localhost:8000/fusion-runtime.js"></script>
+  <script>
+    var session = FusionRuntime.attach({ button: "#talk" });
+
+    // Everything below is optional: the button alone already works.
+    session.on("transcript", function (msg) {
+      if (msg.is_final) document.getElementById("said").textContent = "You said: " + msg.text;
+    });
+    session.on("response", function (msg) {
+      if (msg.is_final) document.getElementById("said").textContent = msg.text;
+    });
+  </script>
+</body>
+</html>

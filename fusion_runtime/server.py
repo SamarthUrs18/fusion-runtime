@@ -2,7 +2,7 @@
 FastAPI Server - HTTP/WebSocket API for fusion-runtime
 """
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.websockets import WebSocketState
 from typing import Optional
@@ -22,6 +22,7 @@ from fusion_runtime.config import load_profile
 from fusion_runtime.env import load_env_file
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator
 from fusion_runtime.telemetry import LoopMonitor, SessionTrace, describe_error, session_scope, telemetry
+from fusion_runtime import web
 
 
 app = FastAPI(title="fusion-runtime", version=__version__)
@@ -120,6 +121,29 @@ class HealthResponse(BaseModel):
 def _error_response(e: Exception, request_id: str) -> JSONResponse:
     info = describe_error(e)
     return JSONResponse(status_code=500, content={"error": {**info.for_client(), "request_id": request_id}})
+
+
+# ============ Browser Client ============
+
+@app.get("/", include_in_schema=False)
+async def console():
+    """The console: open the server in a browser and talk to the agent."""
+    return HTMLResponse(web.console_html())
+
+
+@app.get(web.CLIENT_ROUTE, include_in_schema=False)
+async def client_script():
+    """The client the console runs on, for any page that wants to embed it.
+
+    Served to every origin on purpose: a customer's site loads this from the
+    server it talks to. It contains no secrets — a page authenticates with a
+    short-lived token, never an API key.
+    """
+    return Response(
+        web.client_js(),
+        media_type="application/javascript",
+        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+    )
 
 
 # ============ REST Endpoints ============
@@ -283,7 +307,8 @@ async def voice_websocket(websocket: WebSocket):
             # Send config
             await websocket.send_json({
                 "type": "config",
-                "sample_rate": orchestrator.config.sample_rate,
+                "sample_rate": orchestrator.config.sample_rate,  # what we want from the client
+                "output_sample_rate": orchestrator.config.tts.sample_rate,  # what replies arrive in
                 "channels": orchestrator.config.channels,
                 "session_id": session_id,
             })
