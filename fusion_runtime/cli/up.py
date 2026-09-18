@@ -4,6 +4,8 @@ from enum import Enum
 
 import typer
 
+from pathlib import Path
+
 from fusion_runtime.cli._common import Profile, short_path
 
 
@@ -20,6 +22,10 @@ class LogLevel(str, Enum):
 
 
 def up(
+    agent: str = typer.Argument(
+        None, metavar="[AGENT.PY]",
+        help="An agent file: its prompt, models and turn settings. Without one, a profile of defaults is used.",
+    ),
     host: str = typer.Option(
         "127.0.0.1", help="Address to listen on. 0.0.0.0 accepts connections from other machines."
     ),
@@ -56,13 +62,16 @@ def up(
              "and echo; shorter stops sooner. Default 300. Also: FUSION_INTERRUPT_AFTER_MS.",
     ),
     llm_model: str = typer.Option(None, "--llm-model", help="The model's name on that endpoint. Also: FUSION_LLM_MODEL."),
+    reload: bool = typer.Option(
+        False, "--reload", help="Restart when the agent file changes. For development, not production.",
+    ),
     llm_api_key_env: str = typer.Option(
         None, "--llm-api-key-env", help="Name of the environment variable holding the endpoint's API key "
                                         "(never the key itself). Also: FUSION_LLM_API_KEY_ENV.",
     ),
 ) -> None:
     """Start the voice server. Talk to it from another terminal with `frun talk`."""
-    from fusion_runtime.cli._checks import missing_models, port_in_use
+    from fusion_runtime.cli._checks import missing_models, port_answers_over_ipv6, port_in_use
     from fusion_runtime.config import (
         INTERRUPT_AFTER_ENV, LLM_KEY_ENV_ENV, LLM_MODEL_ENV, LLM_URL_ENV, TURN_DETECTOR_ENV, TURN_WAIT_ENV, model_dir,
     )
@@ -73,12 +82,20 @@ def up(
                             (INTERRUPT_AFTER_ENV, str(interrupt_after_ms) if interrupt_after_ms is not None else None)):
         if value:
             os.environ[variable] = value  # the server reads these at startup
+    agent_file = None
     try:
-        from fusion_runtime.cli._common import profile_config
+        if agent:
+            from fusion_runtime.agent import load_agent
 
-        profile = profile_config(config)
+            agent_file = Path(agent).expanduser().resolve()
+            loaded = load_agent(agent_file)  # fail here, with a clear message, not inside the server
+            profile = loaded.config()
+        else:
+            from fusion_runtime.cli._common import profile_config
+
+            profile = profile_config(config)
         llm = profile.llm
-    except ValueError as e:
+    except ValueError as e:  # AgentError is a ValueError
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
     if llm.api_key_env and not os.getenv(llm.api_key_env):
@@ -89,7 +106,11 @@ def up(
         )
         raise typer.Exit(1)
 
-    missing = missing_models(config)
+    if agent_file is None:
+        missing = missing_models(config)
+    else:
+        from fusion_runtime.catalog import entries_for_profile, is_installed
+        missing = [e.id for e in entries_for_profile(profile) if not is_installed(e, model_dir())]
     if missing:
         flag = "" if config is Profile.development else f" --config {config.value}"
         typer.echo(
@@ -113,11 +134,19 @@ def up(
         )
         raise typer.Exit(1)
 
+    if host in ("127.0.0.1", "localhost") and port_answers_over_ipv6(port):
+        typer.echo(
+            f"Warning: another program is listening on port {port} over IPv6. This server uses IPv4, but\n"
+            f"  clients that use the name \"localhost\" may reach that program instead. Find it with:\n"
+            f"  lsof -nP -iTCP:{port} -sTCP:LISTEN     (or use: frun up --port {port + 1})"
+        )
+
     talk_hint = "frun talk"
     if (host, port) not in (("127.0.0.1", 8000), ("localhost", 8000), ("0.0.0.0", 8000)):
         talk_host = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
         talk_hint = f"frun talk --url ws://{talk_host}:{port}/v1/voice/ws"
-    typer.echo(f"Starting fusion-runtime ({config.value} profile) on http://{host}:{port}")
+    where = f"agent {short_path(agent_file)}" if agent_file else f"{config.value} profile"
+    typer.echo(f"Starting fusion-runtime ({where}) on http://{host}:{port}")
     turns = profile.turn_detection
     typer.echo(f"Turn detection: {turns.runtime or 'silence'}, agent answers after {turns.min_silence_ms} ms of silence"
                + (" (shorter or longer when the detector is sure)" if turns.runtime else "")
@@ -133,10 +162,16 @@ def up(
         typer.echo("Note: --log-content writes what users say, and the bot's replies, into the logs.")
     # read by the server at startup
     os.environ["FUSION_CONFIG"] = config.value
+    if agent_file:
+        os.environ["FUSION_AGENT"] = str(agent_file)
+    else:
+        os.environ.pop("FUSION_AGENT", None)
     os.environ["FUSION_LOG_FORMAT"] = log_format.value
     os.environ["FUSION_LOG_LEVEL"] = log_level.value
     os.environ["FUSION_LOG_CONTENT"] = "1" if log_content else "0"
     import uvicorn
 
     uvicorn.run("fusion_runtime.server:app", host=host, port=port, workers=1,
+                reload=reload, reload_includes=[agent_file.name] if reload and agent_file else None,
+                reload_dirs=[str(agent_file.parent)] if reload and agent_file else None,
                 log_level="warning" if log_format is LogFormat.json else "info")

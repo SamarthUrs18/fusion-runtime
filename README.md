@@ -29,11 +29,53 @@ frun talk
 
 On macOS, allow microphone access for your terminal app (System Settings → Privacy & Security → Microphone). You can talk over the bot to interrupt it. With headphones, `frun talk --no-aec` turns echo cancellation off.
 
+## Build an agent
+
+An agent is one Python file: what it says, which models it uses, how it takes turns.
+
+```python
+# agent.py
+from fusion_runtime import Agent, LLM, STT, TTS, Turns, VAD
+
+agent = Agent(
+    name="shopkart-orders",
+    prompt="You are the order line for ShopKart. Keep answers to one short sentence.",
+    stt=STT("whisper-tiny.en"),
+    llm=LLM("qwen2.5-0.5b-q4", max_tokens=200),
+    tts=TTS("kokoro-v1.0", voice="af_heart"),
+    turns=Turns(wait_ms=500, interrupt_after_ms=300),   # answer after 500 ms of silence
+    vad=VAD(threshold=0.5),                             # what counts as speech
+)
+```
+
+```bash
+frun up agent.py --reload     # --reload restarts when you edit the file
+frun talk                     # in another terminal
+```
+
+| Part | What it sets |
+|---|---|
+| `STT` / `LLM` / `TTS` | The model for that stage, plus its settings. A plain name works when there's nothing to configure: `llm="qwen2.5-0.5b-q4"` |
+| `Turns` | When the agent answers (`wait_ms`), when it stops for the caller (`interrupt_after_ms`), and how soon speaking again continues the same turn (`resume_window_ms`). A turn detector model goes first: `Turns("my_pkg.turns:MyDetector", wait_ms=400)` |
+| `VAD` | Which audio counts as speech (`threshold`), feeding both of the above |
+
+A model is named as a catalog id (`frun models list`), a file path, `hf:owner/repo`, or a URL,
+optionally with the runtime in front (`vllm:hf:org/model`). Settings the config knows
+(`max_tokens`, `voice`, `n_ctx`, ...) are applied; anything else is passed to that runtime.
+
+**Settings can come from three places, and the later one wins:** the agent file, then
+environment variables (`FUSION_TURN_WAIT_MS`, `FUSION_LLM_URL`, ...), then CLI flags. So a
+deployment can change behaviour without editing the agent, and a flag is for a quick experiment.
+Secrets are never in the agent file: those are environment variables (`api_key_env`, `HF_TOKEN`).
+
+Working example: [examples/agent.py](examples/agent.py). Tool calling isn't built yet, so
+`tools=` raises a clear error.
+
 ## The `frun` CLI
 
 | Command | What it does |
 |---------|--------------|
-| `frun up` | Starts the server on `127.0.0.1:8000`. Checks models are installed and the port is free first |
+| `frun up [agent.py]` | Starts the server on `127.0.0.1:8000`. Checks models are installed and the port is free first |
 | `frun up --config production --host 0.0.0.0 --port 8080` | Production models, reachable from other machines |
 | `frun up --log-format json` | One JSON log line per event, for deployments and log collectors (see [Observability](#observability)) |
 | `frun talk` | Talks to the server with your mic and speakers, with a one-line latency summary per turn |

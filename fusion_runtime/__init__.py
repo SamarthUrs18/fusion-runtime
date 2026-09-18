@@ -24,6 +24,13 @@ _EXPORTS = {
     "DEVELOPMENT_CONFIG": "fusion_runtime.config",
     "PRODUCTION_CONFIG": "fusion_runtime.config",
     "HYBRID_CONFIG": "fusion_runtime.config",
+    "Agent": "fusion_runtime.agent",
+    "STT": "fusion_runtime.agent",
+    "LLM": "fusion_runtime.agent",
+    "TTS": "fusion_runtime.agent",
+    "Turns": "fusion_runtime.agent",
+    "VAD": "fusion_runtime.agent",
+    "load_agent": "fusion_runtime.agent",
     "PipelineOrchestrator": "fusion_runtime.engine",
     "run_single_turn": "fusion_runtime.engine",
 }
@@ -42,6 +49,7 @@ if TYPE_CHECKING:  # let editors and type checkers see the real names
         TurnDetectionConfig,
         VADConfig,
     )
+    from fusion_runtime.agent import LLM, STT, TTS, Agent, Turns, VAD, load_agent
     from fusion_runtime.engine import PipelineOrchestrator, run_single_turn
 
 

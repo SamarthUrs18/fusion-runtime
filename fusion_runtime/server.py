@@ -16,6 +16,7 @@ import time
 import uuid
 
 from fusion_runtime import __version__
+from fusion_runtime.agent import DEFAULT_PROMPT, Agent, load_agent
 from fusion_runtime.config import load_profile
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator
 from fusion_runtime.telemetry import LoopMonitor, SessionTrace, describe_error, session_scope, telemetry
@@ -25,6 +26,7 @@ app = FastAPI(title="fusion-runtime", version=__version__)
 
 # Global orchestrator (single worker)
 orchestrator: Optional[PipelineOrchestrator] = None
+agent: Optional["Agent"] = None  # set when the server was started with an agent file
 _started_at = time.monotonic()
 _active_sessions: set = set()
 _loop_monitor: Optional[LoopMonitor] = None
@@ -32,13 +34,20 @@ _loop_monitor: Optional[LoopMonitor] = None
 
 @app.on_event("startup")
 async def startup():
-    global orchestrator, _loop_monitor, _started_at
+    global orchestrator, agent, _loop_monitor, _started_at
     _started_at = time.monotonic()
     telemetry.configure_from_env()
-    # Use development config by default (CPU-friendly small models),
+    # An agent file describes everything; without one, a profile of defaults.
     # production requires explicit FUSION_CONFIG=production
     config_name = os.getenv("FUSION_CONFIG", "development")
-    config = load_profile(config_name)  # plus FUSION_LLM_URL / _MODEL / _API_KEY_ENV overrides
+    agent_path = os.getenv("FUSION_AGENT")
+    if agent_path:
+        agent = load_agent(agent_path)
+        config = agent.config()  # plus FUSION_LLM_URL / _MODEL / _TURN_* overrides
+        telemetry.emit("agent.loaded", stage="server", **agent.describe())
+    else:
+        agent = None
+        config = load_profile(config_name)
     telemetry.emit(
         "server.start", stage="server", version=__version__, profile=config_name, pid=os.getpid(),
         python=platform.python_version(), platform=f"{platform.system()} {platform.machine()}",
@@ -137,7 +146,7 @@ async def voice_chat(request: VoiceChatRequest):
             output_audio = await run_single_turn(
                 orchestrator,
                 audio,
-                request.system_prompt or "You are a helpful voice assistant."
+                request.system_prompt or (agent.prompt if agent is not None else DEFAULT_PROMPT)
             )
         except Exception as e:
             return _error_response(e, request_id)
@@ -168,7 +177,7 @@ async def voice_stream(request: VoiceChatRequest):
         with session_scope(request_id):
             async for chunk in orchestrator.run_pipeline(
                 audio_iterator(),
-                request.system_prompt or "You are a helpful voice assistant."
+                request.system_prompt or (agent.prompt if agent is not None else DEFAULT_PROMPT)
             ):
                 yield chunk
 
@@ -298,7 +307,7 @@ async def voice_websocket(websocket: WebSocket):
             async def send_audio():
                 pipeline = orchestrator.run_pipeline(
                     audio_stream(),
-                    "You are a helpful voice assistant. Answer briefly.",
+                    agent.prompt if agent is not None else DEFAULT_PROMPT,
                     on_event=lambda event: _dispatch_event(websocket, event),
                     barge_in=barge_in,
                     trace=trace,
