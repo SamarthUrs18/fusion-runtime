@@ -334,3 +334,10 @@ def test_a_repo_written_without_the_hf_prefix_says_so(tmp_path):
     # a plain typo still gets the catalog suggestion
     with pytest.raises(ModelNotFound, match="Did you mean"):
         resolve("llm", "qwen2.5-0.5b", catalog=load_catalog(), root=tmp_path)
+
+
+def test_vllm_says_it_is_not_managed_yet_and_how_to_use_it(tmp_path):
+    with pytest.raises(UnsupportedModel, match=r"(?s)doesn't start vLLM for you yet.*http://localhost:8000/v1"):
+        resolve("llm", "hf:org/model", runtime="vllm", catalog=empty_catalog(), root=tmp_path)
+    with pytest.raises(UnsupportedModel, match="llama-server"):
+        resolve("llm", "./model.gguf", runtime="llama_server", catalog=empty_catalog(), root=tmp_path)

@@ -47,6 +47,13 @@ RUNTIME_STAGES: Dict[str, Tuple[str, ...]] = {
     "openai_http": ("llm",),  # STT/TTS over HTTP when a customer needs it
 }
 
+# Runtimes the agent file accepts but that nothing starts yet. Pointing at a server
+# you run yourself works today and is the same protocol, so say that.
+PLANNED_RUNTIMES = {
+    "vllm": "vLLM",
+    "llama_server": "llama-server",
+}
+
 _SPLIT_PART = re.compile(r"^(?P<stem>.+)-(?P<part>\d{5})-of-(?P<total>\d{5})\.gguf$")
 _WHISPER_ENGLISH_ONLY_VOCAB = 51864  # multilingual Whisper vocabularies are 51865 (v1/v2) or 51866 (v3)
 
@@ -101,6 +108,13 @@ def resolve(
         root = model_dir()
     catalog = load_catalog() if catalog is None else catalog
 
+    if runtime in PLANNED_RUNTIMES:
+        name = PLANNED_RUNTIMES[runtime]
+        raise UnsupportedModel(
+            f"fusion-runtime doesn't start {name} for you yet. Start it yourself and point the agent at it:\n"
+            f'    llm=LLM("http://localhost:8000/v1", model_name="{ref}")\n'
+            f"It speaks the OpenAI API, which is what the openai_http runtime uses."
+        )
     if ref.startswith(("http://", "https://")):
         chosen = runtime or "openai_http"
         _check_runtime_stage(chosen, stage, ref)
