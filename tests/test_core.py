@@ -91,7 +91,15 @@ class TestTurnDetectors:
 class TestPipelineIntegration:
     @pytest.fixture(scope="class")
     def orchestrator(self):
+        from fusion_runtime.contract import ModelNotFound
         from fusion_runtime.engine import PipelineOrchestrator
+        from fusion_runtime.resolver import resolve_stage_config
+
+        for stage in ("stt", "llm", "tts"):
+            try:
+                resolve_stage_config(stage, getattr(DEVELOPMENT_CONFIG, stage))
+            except ModelNotFound as e:
+                pytest.skip(f"models not downloaded ({e}); run: frun models pull")
         orch = PipelineOrchestrator(DEVELOPMENT_CONFIG)
         asyncio.run(orch.initialize())
         yield orch

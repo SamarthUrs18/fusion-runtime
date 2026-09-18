@@ -93,6 +93,10 @@ fusion_runtime = ["catalog/*.toml"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    # Needs the models downloaded (`frun models pull`); skipped where they aren't, e.g. CI
+    "integration: runs the real models end to end",
+]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 
