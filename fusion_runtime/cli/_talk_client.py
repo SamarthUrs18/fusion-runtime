@@ -24,6 +24,7 @@ Imported only when `frun talk` runs: it loads numpy, websockets and the audio st
 """
 import asyncio
 import json
+import sys
 import time
 from typing import Optional
 
@@ -127,6 +128,9 @@ class VoiceChatClient:
         self.replies = ReplyGate()
         self.reporter = PlaybackReporter()
         self._last_meter = 0.0
+        self._last_state = None
+        # A live bar needs a terminal; anywhere else it would print one line per redraw.
+        self.redraws = sys.stdout.isatty()
 
     async def run(self):
         # Unlike a browser, this client can set a header and can hold a key, so it
@@ -183,7 +187,11 @@ class VoiceChatClient:
     def _show_meter(self, chunk: MicChunk):
         """A mic level bar ~4x/sec, so you can see the mic is alive.
 
-"""
+        The bar redraws itself with a carriage return, which needs a terminal.
+        Somewhere that only captures lines — a pipe, a log file, an editor's
+        output pane — every redraw would land as another line, and one turn fills
+        the screen with meters. There, only a change of state is worth saying.
+        """
         now = time.monotonic()
         if now - self._last_meter < 0.25:
             return
@@ -192,14 +200,18 @@ class VoiceChatClient:
         rms = float(np.sqrt(np.mean(samples**2)))
         bar = "#" * min(int(rms / 32768 * 80), 40)
         if not chunk.safe_to_send:
-            tag = "🔇"  # held back: echo possible and not cancelled yet
+            tag, state = "🔇", "mic held back while the canceller learns the room"
         elif self.audio.bot_audible:
-            tag = "🔊"  # bot talking, mic open with its echo removed
+            tag, state = "🔊", "bot talking, mic open with its echo removed"
         else:
-            tag = "  "
+            tag, state = "  ", "listening"
         stats = self.audio.echo_stats
         echo = f"echo -{stats.erle_db:.0f}dB" if stats and stats.far_end_active else ""
-        print(f"\r  mic {tag}|{bar:<40}| {echo:<12}", end="", flush=True)
+        if self.redraws:
+            print(f"\r  mic {tag}|{bar:<40}| {echo:<12}", end="", flush=True)
+        elif state != self._last_state:
+            self._last_state = state
+            print(f"  mic: {state}" + (f" ({echo})" if echo else ""), flush=True)
 
     def _handle_server_message(self, msg: dict):
         mtype = msg.get("type")

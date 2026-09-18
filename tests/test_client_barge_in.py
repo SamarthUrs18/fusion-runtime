@@ -42,3 +42,49 @@ class TestPlaybackReporter:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestMicMeter:
+    """The level bar redraws itself with a carriage return, which needs a terminal.
+
+    Where output is captured line by line — a pipe, a log, an editor's output pane —
+    each redraw arrives as another line, and a single turn fills the screen with
+    meters. There we say only what changed.
+    """
+
+    def _client(self, redraws: bool, bot_audible: bool = False):
+        from fusion_runtime.cli._talk_client import VoiceChatClient
+
+        class FakeAudio:
+            echo_stats = None
+
+        client = VoiceChatClient.__new__(VoiceChatClient)
+        client._last_meter, client._last_state, client.redraws = 0.0, None, redraws
+        client.audio = FakeAudio()
+        client.audio.bot_audible = bot_audible
+        return client
+
+    def _chunk(self):
+        from fusion_runtime.audio.duplex_audio import MicChunk
+
+        return MicChunk(pcm16=b"\x00\x00" * 800, echo_possible=False, echo_cancelled=True)
+
+    def test_a_terminal_gets_the_live_bar(self, capsys):
+        client = self._client(redraws=True)
+        for _ in range(3):
+            client._last_meter = 0
+            client._show_meter(self._chunk())
+        printed = capsys.readouterr().out
+        assert printed.count("\r") == 3 and "mic" in printed
+
+    def test_captured_output_gets_one_line_per_change_instead(self, capsys):
+        client = self._client(redraws=False)
+        for _ in range(6):
+            client._last_meter = 0
+            client._show_meter(self._chunk())
+        client.audio.bot_audible = True
+        client._last_meter = 0
+        client._show_meter(self._chunk())
+        lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+        assert len(lines) == 2  # "listening", then "bot talking"
+        assert "\r" not in "".join(lines)
