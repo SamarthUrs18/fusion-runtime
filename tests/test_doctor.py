@@ -47,6 +47,34 @@ def test_low_disk(monkeypatch, tmp_path):
     assert result.status == WARN and "production model" in result.fix
 
 
+def test_a_port_is_in_use_when_something_answers(monkeypatch):
+    """Asked by connecting, not by binding: a program on the wildcard address still lets
+    us bind 127.0.0.1 on macOS, so a bind test would call a taken port free."""
+    import socket
+
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        port = server.getsockname()[1]
+        assert _checks.port_in_use("127.0.0.1", port)
+    assert not _checks.port_in_use("127.0.0.1", port)
+
+
+def test_ipv6_squatter_is_noticed(monkeypatch):
+    import socket
+
+    try:
+        server = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    except OSError:  # pragma: no cover - machine without IPv6
+        pytest.skip("no IPv6 on this machine")
+    with server:
+        server.bind(("::1", 0))
+        server.listen()
+        port = server.getsockname()[1]
+        assert _checks.port_answers_over_ipv6(port)
+        assert not _checks.port_in_use("127.0.0.1", port), "IPv4 is still free; only clients using 'localhost' hit it"
+
+
 def test_busy_port_is_a_warning(monkeypatch):
     monkeypatch.setattr(_checks, "port_in_use", lambda host, port: True)
     assert _checks.check_port().status == WARN

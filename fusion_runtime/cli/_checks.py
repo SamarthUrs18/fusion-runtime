@@ -5,7 +5,6 @@ inside the checks, so importing this module stays cheap. A check that crashes
 is reported as a failure; doctor itself must never crash.
 """
 import contextlib
-import errno
 import os
 import platform
 import shutil
@@ -33,15 +32,31 @@ Check = Callable[[], Union[CheckResult, List[CheckResult]]]
 # ---- helpers shared with `frun up` ---------------------------------------------
 
 def port_in_use(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # same as uvicorn, so TIME_WAIT isn't "in use"
-        try:
-            s.bind((host, port))
-        except OSError as e:
-            if e.errno == errno.EADDRINUSE:
-                return True
-            raise
-    return False
+    """Would another program answer on this address?
+
+    Asked by connecting, not by binding: on macOS a program listening on the
+    wildcard address (a plain `python -m http.server`, say) still lets us bind
+    127.0.0.1, so a bind test says "free" while that program answers our
+    clients. Connecting asks the question that matters.
+    """
+    return _answers(host, port)
+
+
+def port_answers_over_ipv6(port: int) -> bool:
+    """Something answers on IPv6 (::1).
+
+    The server listens on IPv4. On macOS the name "localhost" resolves to IPv6
+    first, so another program there takes the calls meant for us.
+    """
+    return _answers("::1", port)
+
+
+def _answers(host: str, port: int, timeout: float = 0.3) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def missing_models(profile, apply_env: bool = True) -> List[str]:

@@ -4,7 +4,9 @@ import sys
 
 import typer
 
-DEFAULT_URL = "ws://localhost:8000/v1/voice/ws"
+# 127.0.0.1, not localhost: on macOS "localhost" resolves to IPv6 (::1) first, so a
+# stray IPv6 server on the same port answers instead of `frun up` (which binds IPv4).
+DEFAULT_URL = "ws://127.0.0.1:8000/v1/voice/ws"
 
 
 def _audio_available() -> bool:
@@ -59,6 +61,14 @@ def talk(
         raise typer.Exit(1)
     except websockets.exceptions.InvalidURI:
         typer.echo(f"Error: {url} isn't a valid WebSocket URL (expected ws://host:port/v1/voice/ws).", err=True)
+        raise typer.Exit(1)
+    except websockets.exceptions.InvalidMessage as e:
+        typer.echo(
+            f"\nError: something is answering on {url}, but it isn't fusion-runtime ({e}).\n"
+            "Another program is probably using that port. Check with: lsof -nP -iTCP:8000 -sTCP:LISTEN\n"
+            "Then stop it, or start the server on another port: frun up --port 8001",
+            err=True,
+        )
         raise typer.Exit(1)
     except websockets.exceptions.InvalidStatus as e:
         typer.echo(

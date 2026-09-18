@@ -33,7 +33,7 @@ import websockets
 from fusion_runtime.audio.duplex_audio import DuplexAudio, MicChunk
 
 TTS_SAMPLE_RATE = 24000
-DEFAULT_URL = "ws://localhost:8000/v1/voice/ws"
+DEFAULT_URL = "ws://127.0.0.1:8000/v1/voice/ws"  # see fusion_runtime.cli.talk for why not "localhost"
 
 
 class ReplyGate:

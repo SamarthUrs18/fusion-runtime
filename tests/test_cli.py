@@ -197,7 +197,8 @@ def test_up_starts_server_with_chosen_profile(monkeypatch):
     result = runner.invoke(app, ["up", "--port", str(port), "--config", "production"])
     assert result.exit_code == 0, result.output
     assert calls == [("fusion_runtime.server:app",
-                      {"host": "127.0.0.1", "port": port, "workers": 1, "log_level": "info"})]
+                      {"host": "127.0.0.1", "port": port, "workers": 1, "log_level": "info",
+                       "reload": False, "reload_includes": None, "reload_dirs": None})]
     assert os.environ["FUSION_CONFIG"] == "production"
     assert f"frun talk --url ws://localhost:{port}/v1/voice/ws" in result.output
 
@@ -219,6 +220,45 @@ def test_up_refuses_when_models_missing(tmp_path, monkeypatch):
     assert "qwen2.5-7b-q4" in result.output
     assert "Run: frun models pull --config production" in result.output
     assert calls == []
+
+
+def test_up_warns_when_something_else_holds_the_port_over_ipv6(monkeypatch):
+    _all_models_installed(monkeypatch)
+    _record_uvicorn(monkeypatch)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_answers_over_ipv6", lambda port: True)
+    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    result = runner.invoke(app, ["up"])
+    assert result.exit_code == 0
+    assert "IPv6" in result.output and "lsof" in result.output
+
+
+def test_talk_says_when_another_program_answers(monkeypatch):
+    import websockets
+
+    from fusion_runtime.cli import _talk_client
+
+    class Boom:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            raise websockets.exceptions.InvalidMessage("did not receive a valid HTTP response")
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(_talk_client.websockets, "connect", Boom)
+    monkeypatch.setattr("fusion_runtime.cli.talk._audio_available", lambda: True)
+    result = runner.invoke(app, ["talk"])
+    assert result.exit_code == 1
+    assert "isn't fusion-runtime" in result.output and "lsof" in result.output
+
+
+def test_talk_defaults_to_ipv4(monkeypatch):
+    from fusion_runtime.cli import talk as talk_module
+
+    assert talk_module.DEFAULT_URL.startswith("ws://127.0.0.1:")  # not "localhost": that is IPv6 first on macOS
 
 
 def test_up_refuses_busy_port(monkeypatch):
