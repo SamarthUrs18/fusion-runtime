@@ -41,6 +41,13 @@ class FakeOrchestrator:
     def get_metrics_summary(self):
         return {"count": 0}
 
+    async def run_pipeline(self, audio_stream, system_prompt, on_event=None, barge_in=None, trace=None):
+        # Waits on audio that these tests never send, which is the point: without
+        # it the session ended the moment it began, handed its slot straight back,
+        # and "the server is full" tests passed or failed on timing.
+        async for _chunk in audio_stream:
+            yield b"\x00\x00" * 160
+
 
 @pytest.fixture
 def client(monkeypatch):
