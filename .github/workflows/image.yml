@@ -1,0 +1,68 @@
+name: Image
+
+# Not on every push: this builds a multi-gigabyte CUDA image, so it runs when
+# asked and when a release is tagged. The tests workflow is the one that guards
+# every commit.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository }}
+
+jobs:
+  gpu-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # A CUDA base, torch and llama.cpp together are larger than a runner's free
+      # disk. The pre-installed toolchains here are worth about 20 GB and nothing
+      # in this build uses them.
+      - name: Make room
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          tags: |
+            type=ref,event=tag
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # linux/amd64 only: the GPU builds of torch and llama-cpp-python are
+      # published for that platform, and RunPod's GPUs are x86 anyway.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The runner has no GPU, so this checks only that the image starts and the
+      # package is installed — the part that was broken in the old Dockerfile.
+      - name: Check the image runs
+        run: |
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE }}:sha-${{ github.sha }} version
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE }}:sha-${{ github.sha }} doctor || true
