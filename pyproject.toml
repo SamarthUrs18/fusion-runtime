@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Low-latency voice AI inference runtime (STT→LLM→TTS <500ms)"
 readme = "README.md"
 license = {text = "AGPL-3.0-or-later"}
-requires-python = ">=3.11"
+# kokoro-onnx caps at <3.14, so that is where we cap too: a user on 3.14 gets
+# "requires a different Python" instead of a resolver error deep in an install.
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",

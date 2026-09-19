@@ -20,7 +20,7 @@ jobs:
       # llama-cpp-python, onnxruntime, torch) not published yet for a new
       # Python, which a user hits as a compiler error on install.
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13"]
     name: tests (python ${{ matrix.python-version }})
     steps:
       - uses: actions/checkout@v4
@@ -30,8 +30,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      # Torch on PyPI bundles CUDA on Linux — several gigabytes of nvidia-* wheels
+      # that filled the runner's disk and that CPU tests never touch.
       - name: Install
-        run: pip install -e ".[dev]"
+        run: |
+          pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
 
       # Tests that need downloaded models are marked "integration" and skip
       # themselves here; everything else runs against fakes and fixtures.

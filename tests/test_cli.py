@@ -477,3 +477,22 @@ def test_token_without_a_key_says_how_to_get_one(monkeypatch):
     result = runner.invoke(app, ["token"])
     assert result.exit_code == 1
     assert "frun key new" in result.output
+
+
+def test_up_takes_the_agent_from_the_environment(monkeypatch, tmp_path):
+    """A container has no command line to put an agent path on, so the
+    environment has to be able to name one."""
+    agent = tmp_path / "agent.py"
+    agent.write_text("from fusion_runtime import Agent\nagent = Agent(name='env-agent', prompt='hi')\n")
+    _all_models_installed(monkeypatch)
+    calls = _record_uvicorn(monkeypatch)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    monkeypatch.setenv("FUSION_AGENT", str(agent))
+
+    result = runner.invoke(app, ["up"])
+
+    assert result.exit_code == 0, result.output
+    assert "agent" in result.output and "env-agent" not in result.output  # it prints the path
+    assert os.environ["FUSION_AGENT"] == str(agent.resolve())  # and doesn't unset it for the server
+    assert calls, "uvicorn should have been started"

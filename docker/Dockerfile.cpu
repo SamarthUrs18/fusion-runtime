@@ -1,32 +1,39 @@
-# fusion-runtime CPU-only Dockerfile (for development)
+# syntax=docker/dockerfile:1
+#
+# fusion-runtime without a GPU: development, and the image that can be built on
+# an arm64 laptop. Everything here except CUDA is the same as docker/Dockerfile,
+# so it is the fast way to check that the package installs, `frun` exists and the
+# server starts before spending CI time on the GPU build.
+#
+#   docker build -f docker/Dockerfile.cpu -t fusion-runtime:cpu .
+#   docker run -p 8000:8000 -v "$PWD/models:/models" fusion-runtime:cpu
+#
+# llama-cpp-python is published to PyPI as source only, so this compiles it. That
+# is a few minutes the first time and cached afterwards.
+
 FROM python:3.11-slim AS runtime
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV PIP_NO_CACHE_DIR=1
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    FUSION_MODEL_DIR=/models \
+    FUSION_LOG_FORMAT=json
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsndfile1 \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+        build-essential cmake libsndfile1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 fusion \
+    && mkdir -p /models && chown fusion:fusion /models
 
 WORKDIR /app
-
-# Install Python dependencies
-COPY requirements.cpu.txt .
-RUN pip install --no-cache-dir -r requirements.cpu.txt
-
-# Copy application code
+COPY pyproject.toml README.md ./
 COPY fusion_runtime/ ./fusion_runtime/
-COPY scripts/ ./scripts/
+RUN pip install --upgrade pip && pip install .
 
-# Create model cache directory
-RUN mkdir -p /models
-ENV FUSION_MODEL_DIR=/models
-
-# Expose port
+USER fusion
 EXPOSE 8000
 
-# Run server
-CMD ["python", "-m", "fusion_runtime.server"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
+
+ENTRYPOINT ["frun"]
+CMD ["up", "--host", "0.0.0.0", "--port", "8000"]

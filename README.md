@@ -428,7 +428,8 @@ pytest tests/
 torchaudio releases have to match exactly, and drifting apart once broke voice
 detection silently for days. Run `uv lock` after changing a dependency.
 `.python-version` puts new checkouts on 3.11, the oldest version supported; CI runs the
-suite on 3.11, 3.12, 3.13 and 3.14.
+suite on 3.11, 3.12 and 3.13. 3.14 is not supported: `kokoro-onnx` doesn't publish for it,
+so `pyproject.toml` caps there rather than letting the install fail halfway.
 
 First install takes a while whichever tool you use: `llama-cpp-python` is
 published as source only, so it compiles (a few minutes, and it needs a C++

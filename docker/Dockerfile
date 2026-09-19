@@ -1,96 +1,80 @@
-# fusion-runtime Dockerfile
-# Multi-stage build for minimal production image
+# syntax=docker/dockerfile:1
+#
+# fusion-runtime on an NVIDIA GPU.
+#
+#   docker build -f docker/Dockerfile -t fusion-runtime .
+#   docker run --gpus all -p 8000:8000 -v /models:/models \
+#     -e FUSION_ACCEPTED_KEYS=... -e FUSION_TRUSTED_PROXY=... fusion-runtime
+#
+# Two things this deliberately does not do: it installs no models (they live on a
+# volume, so a rebuild doesn't re-download several gigabytes and two pods can
+# share one copy), and it installs dependencies from pyproject.toml rather than a
+# hand-written list, which is how the previous version of this file silently fell
+# behind the package.
+#
+# Built for linux/amd64: GPU builds of torch and llama.cpp are published for that
+# platform only. On an arm64 machine use Dockerfile.cpu, or let CI build this one.
 
-# ============ Build Stage ============
-FROM nvidia/cuda:12.4-devel-ubuntu22.04 AS builder
+ARG CUDA_VERSION=12.4.1
+ARG PYTHON_VERSION=3.11
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV PIP_NO_CACHE_DIR=1
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS builder
+ARG PYTHON_VERSION
 
-# Install system dependencies
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-dev \
-    python3.11-venv \
-    git \
-    build-essential \
-    cmake \
-    libsndfile1 \
-    ffmpeg \
+        python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+        build-essential cmake git \
     && rm -rf /var/lib/apt/lists/*
 
-# Create virtual environment
-RUN python3.11 -m venv /opt/venv
+RUN python${PYTHON_VERSION} -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-
-# Upgrade pip and install build dependencies
 RUN pip install --upgrade pip setuptools wheel
 
-# Install PyTorch with CUDA 12.4
-RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-
-# Install llama.cpp with CUDA support
+# The GPU builds come first, from NVIDIA's and llama-cpp-python's own indexes:
+# PyPI has CPU builds under the same names, and pip would happily install those.
+# Installed before the package itself so its dependency resolution finds them
+# already satisfied.
+RUN pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu124
 RUN pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
-
-# Install ONNX Runtime with CUDA
 RUN pip install onnxruntime-gpu
 
-# Install faster-whisper
-RUN pip install faster-whisper
+# Only what the install needs, so editing source doesn't invalidate the layers above.
+COPY pyproject.toml README.md ./
+COPY fusion_runtime/ ./fusion_runtime/
+RUN pip install .
 
-# Install other dependencies
-RUN pip install \
-    fastapi \
-    uvicorn[standard] \
-    pydantic \
-    pydantic-settings \
-    numpy \
-    scipy \
-    soundfile \
-    websockets \
-    aiohttp \
-    python-multipart
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04 AS runtime
+ARG PYTHON_VERSION
 
-# ============ Runtime Stage ============
-FROM nvidia/cuda:12.4-runtime-ubuntu22.04 AS runtime
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    FUSION_MODEL_DIR=/models \
+    FUSION_CONFIG=production \
+    FUSION_LOG_FORMAT=json
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV PATH="/opt/venv/bin:$PATH"
-ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
-
-# Install runtime dependencies only
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    libsndfile1 \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+        python${PYTHON_VERSION} libsndfile1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 fusion \
+    && mkdir -p /models && chown fusion:fusion /models
 
-# Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
-
-# Create app user
-RUN useradd -m -u 1000 appuser
 WORKDIR /app
+USER fusion
 
-# Copy application code
-COPY --chown=appuser:appuser fusion_runtime/ ./fusion_runtime/
-COPY --chown=appuser:appuser scripts/ ./scripts/
-
-# Create model cache directory
-RUN mkdir -p /models && chown appuser:appuser /models
-ENV FUSION_MODEL_DIR=/models
-
-# Switch to app user
-USER appuser
-
-# Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python3 -c "import httpx; httpx.get('http://localhost:8000/health', timeout=5).raise_for_status()"
+# /health is the one endpoint that needs no key, precisely so this works.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
 
-# Run server
-CMD ["python", "-m", "fusion_runtime.server"]
+# An agent file is named by FUSION_AGENT (mount it, or bake it in); without one
+# the production profile is used. 0.0.0.0 is refused unless keys are configured,
+# which is the point.
+ENTRYPOINT ["frun"]
+CMD ["up", "--host", "0.0.0.0", "--port", "8000"]

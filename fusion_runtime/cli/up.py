@@ -73,7 +73,7 @@ def up(
     """Start the voice server. Talk to it from another terminal with `frun talk`."""
     from fusion_runtime.cli._checks import missing_models, port_answers_over_ipv6, port_in_use
     from fusion_runtime.config import (
-        ACCEPTED_KEYS_ENV, API_KEY_ENV, INTERRUPT_AFTER_ENV, LLM_KEY_ENV_ENV, LLM_MODEL_ENV, LLM_URL_ENV, TURN_DETECTOR_ENV,
+        ACCEPTED_KEYS_ENV, AGENT_ENV, API_KEY_ENV, INTERRUPT_AFTER_ENV, LLM_KEY_ENV_ENV, LLM_MODEL_ENV, LLM_URL_ENV, TURN_DETECTOR_ENV,
         TURN_WAIT_ENV, model_dir,
     )
 
@@ -83,6 +83,10 @@ def up(
                             (INTERRUPT_AFTER_ENV, str(interrupt_after_ms) if interrupt_after_ms is not None else None)):
         if value:
             os.environ[variable] = value  # the server reads these at startup
+    # A container has no command line to put an agent path on, so the environment
+    # has to be able to name one. Without this, FUSION_AGENT was not only ignored
+    # here, it was actively unset below.
+    agent = agent or os.getenv(AGENT_ENV) or None
     agent_file = None
     try:
         if agent:
