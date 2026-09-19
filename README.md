@@ -437,14 +437,20 @@ toolchain — on macOS, Xcode command line tools).
 
 ### On an NVIDIA GPU
 
-GPU builds of torch and llama.cpp aren't on PyPI, so they come from NVIDIA's
-own indexes:
+torch on Linux already carries CUDA — its PyPI wheels bundle the NVIDIA
+libraries — so a normal install is the GPU one. Two packages do need help:
+`onnxruntime` has a separate GPU name, and `llama-cpp-python` ships source only
+and builds without CUDA unless told otherwise.
 
 ```bash
 pip install -e ".[cuda]"                                                        # onnxruntime-gpu
-pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu124
 pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+# or, to compile it yourself (needs the CUDA toolkit):
+# CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
 ```
+
+The `cu124` index is an older CUDA line that stops at torch 2.6, not a GPU
+variant of the current one — installing our pinned 2.9.1 from it fails.
 
 ```
 fusion_runtime/

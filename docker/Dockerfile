@@ -34,12 +34,17 @@ RUN python${PYTHON_VERSION} -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --upgrade pip setuptools wheel
 
-# The GPU builds come first, from NVIDIA's and llama-cpp-python's own indexes:
-# PyPI has CPU builds under the same names, and pip would happily install those.
-# Installed before the package itself so its dependency resolution finds them
-# already satisfied.
-RUN pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu124
-RUN pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+# torch comes from PyPI: its Linux wheels already carry CUDA and bundle the
+# nvidia-* libraries. The cu124 index is not a "GPU version" of them — it is an
+# older CUDA line that stops at torch 2.6, which is why pinning 2.9.1 against it
+# failed. onnxruntime is the one that genuinely needs a different package name.
+#
+# llama-cpp-python is the opposite case: PyPI ships source only, and a plain
+# install builds it without CUDA. Prebuilt CUDA wheels are tried first, and
+# failing that it is compiled here, where nvcc exists.
+RUN pip install torch==2.9.1 torchaudio==2.9.1
+RUN pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 \
+    || CMAKE_ARGS="-DGGML_CUDA=on" pip install --no-cache-dir llama-cpp-python
 RUN pip install onnxruntime-gpu
 
 # Only what the install needs, so editing source doesn't invalidate the layers above.
