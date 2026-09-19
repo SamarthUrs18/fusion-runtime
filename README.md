@@ -2,7 +2,7 @@
 
 **A self-hosted voice agent runtime.** Speech-to-text, the LLM and text-to-speech run together on one machine and stream into each other, so a reply starts playing while it's still being generated.
 
-> **Status: early development.** The full voice pipeline works on a laptop CPU, including interruptions and echo cancellation. It hasn't been measured on a GPU yet, and it serves one conversation at a time. See [Roadmap](#roadmap).
+> **Status: early development.** The full voice pipeline works on a laptop CPU, including interruptions and echo cancellation. It hasn't been measured on a GPU yet. Conversations are fully isolated; for several at once, point the LLM at vLLM or `llama-server` — the runtime already speaks to both — since the in-process model decodes one reply at a time. Shared-model scaling for speech-to-text is the next piece of work. See [Roadmap](#roadmap).
 
 ## Quickstart
 
@@ -243,7 +243,9 @@ Every download is pinned to an exact Hugging Face commit and checked by file siz
 2. a `models/` folder next to the source code (source checkouts)
 3. `~/.cache/fusion-runtime/models`
 
-Silero VAD is the exception: it's cached by PyTorch in `~/.cache/torch/hub`.
+The voice detector goes in `torch-hub/` inside the same directory, so one directory — and on a
+deployment one volume — holds everything a server needs. A copy already in PyTorch's own cache
+is adopted rather than downloaded again; `TORCH_HOME` overrides the location.
 
 ## How it works
 
@@ -462,7 +464,21 @@ fusion_runtime/
 └── audio/        echo_canceller.py, duplex_audio.py
 ```
 
-`docker/` and `modal_deploy.py` exist but haven't been verified yet.
+### Deploying
+
+Any machine with an NVIDIA GPU runs this — there's nothing provider-specific in the runtime.
+**RunPod is what the docs are written against**, because it was the cheapest of those checked, a
+pod has no request timeout, and its proxy gives you `https://` and `wss://` without you handling a
+certificate. Browsers refuse a microphone without those, so for a voice agent on a website it
+saves the most work.
+
+The shape of it: build the image, push it to a registry, start a pod from it with a volume
+mounted at `FUSION_MODEL_DIR`, and set three variables — `FUSION_ACCEPTED_KEYS`,
+`FUSION_ALLOWED_ORIGINS` and `FUSION_TRUSTED_PROXY` (see [Authentication](#authentication)).
+
+`docker/` holds a Dockerfile that predates most of this runtime and has never been built. It is
+being rewritten, and until then there is no verified deployment path. No latency number is
+published for a GPU either, for the same reason: nobody has run one.
 
 
 ## License

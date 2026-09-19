@@ -1,6 +1,6 @@
 # fusion-runtime Makefile
 
-.PHONY: help install install-dev download-models run run-cpu test lint format clean deploy-modal setup-modal
+.PHONY: help install install-dev download-models run run-cpu test lint format clean
 
 help:
 	@echo "fusion-runtime - Low-latency voice AI inference runtime"
@@ -15,8 +15,6 @@ help:
 	@echo "  lint            Run ruff + mypy"
 	@echo "  format          Format with ruff"
 	@echo "  clean           Clean build artifacts"
-	@echo "  deploy-modal    Deploy to Modal"
-	@echo "  setup-modal     Download models to Modal volume"
 
 install:
 	pip install -e .
@@ -54,12 +52,6 @@ clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	rm -rf .pytest_cache .mypy_cache .ruff_cache dist build *.egg-info
-
-deploy-modal:
-	modal deploy modal_deploy.py
-
-setup-modal:
-	modal run modal_deploy.py::setup_models
 
 # Development shortcuts
 dev: install-dev download-models run-cpu
