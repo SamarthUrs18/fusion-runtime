@@ -190,14 +190,29 @@ def test_up_reports_a_broken_agent_file_and_does_not_start(tmp_path, monkeypatch
     assert calls == {}
 
 
-def test_up_without_an_agent_clears_a_stale_one(monkeypatch):
+def test_up_without_an_agent_uses_the_one_the_environment_names(monkeypatch, tmp_path):
+    """A container has no command line to put a path on, so FUSION_AGENT has to
+    work. This used to do the opposite: the variable was unset here, so a
+    deployment that set it got the default profile and no warning."""
     import os
 
-    monkeypatch.setenv("FUSION_AGENT", "/old/agent.py")
+    agent = tmp_path / "agent.py"
+    agent.write_text("from fusion_runtime import Agent\nagent = Agent(name='env-agent', prompt='hi')\n")
+    monkeypatch.setenv("FUSION_AGENT", str(agent))
     _no_server(monkeypatch)
     result = cli.invoke(app, ["up"])
     assert result.exit_code == 0, result.output
-    assert "FUSION_AGENT" not in os.environ
+    assert os.environ["FUSION_AGENT"] == str(agent.resolve())
+
+
+def test_up_with_neither_falls_back_to_the_profile(monkeypatch):
+    import os
+
+    monkeypatch.delenv("FUSION_AGENT", raising=False)
+    _no_server(monkeypatch)
+    result = cli.invoke(app, ["up"])
+    assert result.exit_code == 0, result.output
+    assert "FUSION_AGENT" not in os.environ  # nothing stale left for the server to pick up
 
 
 # ---- the server ------------------------------------------------------------------------------
