@@ -43,15 +43,18 @@ RUN pip install --upgrade pip setuptools wheel
 # install builds it without CUDA. Prebuilt CUDA wheels are tried first, and
 # failing that it is compiled here, where nvcc exists.
 RUN pip install torch==2.9.1 torchaudio==2.9.1
-# CUDA_ARCHITECTURES is not optional here: left alone, nvcc builds kernels for
-# every architecture it knows and the compile takes over an hour. These four
-# cover the cards this actually runs on — 80 A100, 86 A10/A4000/3090,
-# 89 L4/L40S/4090, 90 H100. A card outside the list still works through PTX
-# just-in-time compilation, only slower to start.
-ARG CUDA_ARCHITECTURES="80;86;89;90"
-RUN pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 \
-    || CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}" \
-       pip install --no-cache-dir --verbose llama-cpp-python
+# llama-cpp-python has to be compiled with CUDA here: PyPI ships source only, and
+# the prebuilt CUDA wheels everyone links to stopped at 0.2.66 — we use 0.3.x.
+#
+# What that compile costs is decided entirely by this list. Every real
+# architecture is a full set of kernels, and on a two-core runner four of them
+# ran past 45 minutes. One real plus one virtual is the cheap combination:
+# 89-real is native code for L4, L40S and 4090, the cards this is rented on,
+# and 80-virtual leaves PTX that the driver compiles at load time for anything
+# newer — an A100, an A10, an H100. Slower first load there, but it runs.
+ARG CUDA_ARCHITECTURES="80-virtual;89-real"
+RUN CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}" \
+    pip install --no-cache-dir llama-cpp-python
 RUN pip install onnxruntime-gpu
 
 # Only what the install needs, so editing source doesn't invalidate the layers above.
