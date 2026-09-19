@@ -15,7 +15,7 @@
 # Built for linux/amd64: GPU builds of torch and llama.cpp are published for that
 # platform only. On an arm64 machine use Dockerfile.cpu, or let CI build this one.
 
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.11
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS builder
@@ -55,7 +55,10 @@ RUN pip install torch==2.9.1 torchaudio==2.9.1
 ARG CUDA_ARCHITECTURES="80-virtual;89-real"
 RUN CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}" \
     pip install --no-cache-dir llama-cpp-python
-RUN pip install onnxruntime-gpu
+# From the CUDA 12 feed: PyPI's current onnxruntime-gpu is built for CUDA 13 and
+# cannot load beside torch's 12.8, so it quietly runs on the CPU instead.
+RUN pip install onnxruntime-gpu \
+    --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 
 # Only what the install needs, so editing source doesn't invalidate the layers above.
 COPY pyproject.toml README.md ./
@@ -65,9 +68,15 @@ RUN pip install .
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04 AS runtime
 ARG PYTHON_VERSION
 
+# torch ships its own CUDA libraries and expects them first. With the image's
+# toolkit ahead of them, whichever library loads first wins: Whisper pulls in the
+# container's older libcudart, torch then imports against it and dies on a
+# missing symbol — taking voice detection down with it, so turns end on a timer
+# and interruptions stop working. Found on the first GPU deployment.
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
+    LD_LIBRARY_PATH="/opt/venv/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/venv/lib/python3.11/site-packages/nvidia/nccl/lib:${LD_LIBRARY_PATH}" \
     FUSION_MODEL_DIR=/models \
     FUSION_CONFIG=production \
     FUSION_LOG_FORMAT=json

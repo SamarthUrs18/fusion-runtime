@@ -58,7 +58,13 @@ fusion-runtime = "fusion_runtime.cli:main"
 # rest. ("torch[cuda]" and "llama-cpp-python[cuda]" were listed here and quietly
 # installed CPU builds, since those extras don't exist.)
 cuda = [
-    "onnxruntime-gpu>=1.18.0",
+    # Capped below 1.30: from there onnxruntime-gpu is built against CUDA 13,
+    # while torch pins CUDA 12.8. Installed together, the CUDA provider fails to
+    # load ("libcublas.so.13: cannot open shared object file") and onnxruntime
+    # falls back to the CPU *silently* — text-to-speech then takes seconds
+    # instead of milliseconds on a machine with a GPU sitting idle.
+    # Newer CUDA 12 builds exist on Microsoft's own feed, see the README.
+    "onnxruntime-gpu>=1.18.0,<1.30",
 ]
 dev = [
     "pytest>=8.0.0",

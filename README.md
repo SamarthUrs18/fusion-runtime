@@ -444,9 +444,32 @@ and builds without CUDA unless told otherwise.
 
 ```bash
 pip install -e ".[cuda]"                                                        # onnxruntime-gpu
-pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
-# or, to compile it yourself (needs the CUDA toolkit):
-# CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
+CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" pip install llama-cpp-python
+```
+
+`llama-cpp-python` is published as source only and builds without CUDA unless told
+otherwise; the prebuilt CUDA wheels people link to stopped at 0.2.66. Set
+`CMAKE_CUDA_ARCHITECTURES` to your card — 86 for a 3090 or A10, 89 for an L4 or 4090, 80 for an
+A100 — or the build compiles kernels for every architecture and takes about an hour.
+
+Two things that otherwise fail quietly on a GPU machine:
+
+**Text-to-speech running on the CPU.** onnxruntime-gpu from 1.30 is built for CUDA 13, while
+torch pins 12.8. Installed together the GPU provider can't load and onnxruntime falls back to the
+CPU without stopping — synthesis then takes seconds instead of milliseconds. The `[cuda]` extra
+caps below 1.30 for that reason; newer CUDA 12 builds live on Microsoft's own feed:
+
+```bash
+pip install onnxruntime-gpu --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+```
+
+**Voice detection failing to load.** If the machine has its own CUDA toolkit (most GPU images do)
+it may come ahead of torch's bundled libraries. Whisper loads the older `libcudart` first, torch
+then imports against it and dies on a missing symbol — which takes the voice detector with it, so
+turns end on a timer and interruptions stop working. Put torch's own libraries first:
+
+```bash
+export LD_LIBRARY_PATH="$(python -c "import site,glob,os; p=site.getsitepackages()[0]; print(':'.join(sorted(glob.glob(os.path.join(p,'nvidia','*','lib')))))"):$LD_LIBRARY_PATH"
 ```
 
 The `cu124` index is an older CUDA line that stops at torch 2.6, not a GPU
