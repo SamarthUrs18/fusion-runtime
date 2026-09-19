@@ -152,3 +152,55 @@ def test_disk_space_check(tmp_path, monkeypatch):
     download.check_disk_space(100_000_000, tmp_path / "not" / "created" / "yet")
     with pytest.raises(download.NotEnoughDiskSpace, match="FUSION_MODEL_DIR"):
         download.check_disk_space(4_700_000_000, tmp_path)
+
+
+# ---- where the voice detector lives ----------------------------------------------
+
+def test_the_detector_sits_with_the_other_models(tmp_path, monkeypatch):
+    """One directory holds everything a server needs, so a deployment is one volume."""
+    from fusion_runtime.catalog.entries import torch_hub_dir
+
+    monkeypatch.delenv("TORCH_HOME", raising=False)
+    monkeypatch.setenv("FUSION_MODEL_DIR", str(tmp_path / "models"))
+    assert torch_hub_dir() == tmp_path / "models" / "torch-hub"
+
+
+def test_torch_home_still_wins(tmp_path, monkeypatch):
+    from fusion_runtime.catalog.entries import torch_hub_dir
+
+    monkeypatch.setenv("TORCH_HOME", str(tmp_path / "elsewhere"))
+    assert torch_hub_dir() == tmp_path / "elsewhere" / "hub"
+
+
+def test_a_checkout_already_on_the_machine_is_adopted_not_refetched(tmp_path, monkeypatch):
+    """A machine that can reach the internet but not GitHub's download host would
+    otherwise lose a detector it already had."""
+    from fusion_runtime.catalog import entries
+
+    legacy = tmp_path / "cache" / "torch" / "hub"
+    (legacy / "snakers4_silero-vad_master").mkdir(parents=True)
+    (legacy / "snakers4_silero-vad_master" / "hubconf.py").write_text("# the checkout\n")
+    (legacy / "trusted_list").write_text("snakers4\n")
+    monkeypatch.setattr(entries, "legacy_torch_hub_dir", lambda: legacy)
+
+    destination = tmp_path / "models" / "torch-hub"
+    entries._adopt_existing_checkout("snakers4/silero-vad", destination)
+
+    assert (destination / "snakers4_silero-vad_master" / "hubconf.py").is_file()
+    assert (destination / "trusted_list").is_file()
+
+
+def test_adoption_never_overwrites_what_is_there(tmp_path, monkeypatch):
+    from fusion_runtime.catalog import entries
+
+    legacy = tmp_path / "cache" / "torch" / "hub"
+    (legacy / "snakers4_silero-vad_master").mkdir(parents=True)
+    (legacy / "snakers4_silero-vad_master" / "hubconf.py").write_text("# old\n")
+    monkeypatch.setattr(entries, "legacy_torch_hub_dir", lambda: legacy)
+
+    destination = tmp_path / "models" / "torch-hub"
+    (destination / "snakers4_silero-vad_master").mkdir(parents=True)
+    (destination / "snakers4_silero-vad_master" / "hubconf.py").write_text("# current\n")
+    entries._adopt_existing_checkout("snakers4/silero-vad", destination)
+
+    assert (destination / "snakers4_silero-vad_master" / "hubconf.py").read_text() == "# current\n"

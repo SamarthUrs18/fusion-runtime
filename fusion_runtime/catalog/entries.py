@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from importlib.resources import files as package_files
 from pathlib import Path
 from typing import Optional
+from typing import Optional
 
 STAGES = ("stt", "llm", "tts", "vad")
 
@@ -95,11 +96,64 @@ def entries_for_profile(config, catalog: Optional[dict[str, ModelEntry]] = None)
 
 
 def torch_hub_dir() -> Path:
-    """Same location torch.hub.get_dir() uses, without importing torch."""
+    """Where the voice detector's checkout lives.
+
+    Inside the model directory, not PyTorch's own cache in the home directory,
+    so that one directory holds everything a server needs. On a deployment that
+    means one volume: mount it, and a fresh container downloads nothing. With
+    the detector somewhere else, a pod that looked fully provisioned would still
+    reach out to GitHub on every cold start — a network call at exactly the
+    moment there is nothing to fall back on.
+
+    TORCH_HOME still wins, for anyone who already points PyTorch somewhere.
+    """
     if os.getenv("TORCH_HOME"):
         return Path(os.environ["TORCH_HOME"]).expanduser() / "hub"
+    from fusion_runtime.config import model_dir
+
+    return model_dir() / "torch-hub"
+
+
+def legacy_torch_hub_dir() -> Path:
+    """Where PyTorch keeps its own cache, and where this used to live."""
     cache = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser()
     return cache / "torch" / "hub"
+
+
+def use_model_dir_for_torch_hub(repo: Optional[str] = None) -> Path:
+    """Point torch.hub at that directory. Called before any hub load, so the
+    place we download to and the place we check are never different.
+
+    With `repo`, a copy already sitting in PyTorch's cache is adopted rather
+    than fetched again. That matters beyond saving a few megabytes: a machine
+    that can reach the rest of the internet but not GitHub's download host would
+    otherwise lose a detector it already had.
+    """
+    import torch
+
+    path = torch_hub_dir()
+    torch.hub.set_dir(str(path))
+    if repo:
+        _adopt_existing_checkout(repo, path)
+    return path
+
+
+def _adopt_existing_checkout(repo: str, path: Path) -> None:
+    import shutil
+
+    legacy = legacy_torch_hub_dir()
+    if legacy == path:
+        return
+    owner, _, name = repo.partition("/")
+    checkout = f"{owner}_{name}_master"
+    source, target = legacy / checkout, path / checkout
+    if target.exists() or not source.is_dir():
+        return
+    path.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, target)  # a couple of megabytes, once
+    trusted = legacy / "trusted_list"
+    if trusted.is_file() and not (path / "trusted_list").exists():
+        shutil.copy2(trusted, path / "trusted_list")
 
 
 def missing_files(entry: ModelEntry, root: Path) -> list[str]:

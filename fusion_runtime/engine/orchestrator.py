@@ -439,6 +439,10 @@ class PipelineOrchestrator:
     async def _load_vad_template(self):
         def load():
             import torch
+
+            from fusion_runtime.catalog.entries import use_model_dir_for_torch_hub
+
+            use_model_dir_for_torch_hub('snakers4/silero-vad')  # keep it beside the other models
             model, _ = torch.hub.load(
                 repo_or_dir='snakers4/silero-vad',
                 model='silero_vad',

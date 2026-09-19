@@ -238,4 +238,7 @@ def hf_expected_bytes(repo: str, revision: Optional[str] = None, token: Optional
 def _pull_torch_hub(entry: ModelEntry, force: bool) -> None:
     import torch
 
+    from fusion_runtime.catalog.entries import use_model_dir_for_torch_hub
+
+    use_model_dir_for_torch_hub(entry.repo)
     torch.hub.load(entry.repo, "silero_vad", force_reload=force, trust_repo=True, verbose=False)
