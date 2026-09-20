@@ -5,6 +5,12 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://github.com/SamarthUrs18/fusion-runtime"><img alt="GitHub stars" src="https://img.shields.io/github/stars/SamarthUrs18/fusion-runtime?style=social"></a>
+  <a href="https://fusion-runtime.dev/docs"><img alt="Docs" src="https://img.shields.io/badge/docs-fusion--runtime.dev-d9612f"></a>
+  <img alt="Python 3.11 to 3.13" src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue">
+</p>
+
 **A self-hosted voice agent runtime.** Speech-to-text, the LLM and text-to-speech run together on
 one machine and stream into each other, so a reply starts playing while it's still being generated.
 
@@ -16,10 +22,13 @@ tokens/sec, interruptions honoured mid-sentence.
 Requires Python 3.11–3.13.
 
 ```bash
-pip install -e ".[talk]"
+pip install "fusion-runtime[talk]"
 frun models pull          # ~0.9 GB: Whisper tiny, Qwen2.5 0.5B, Kokoro, Silero VAD
 frun up
 ```
+
+Not on PyPI until the first release. Until then, from a clone:
+`pip install -e ".[talk]"`.
 
 Then open **http://localhost:8000** and click Talk. That page is served by the runtime itself —
 no build step, nothing to install. You can talk over the agent to interrupt it.
@@ -54,6 +63,42 @@ applied; anything else is passed through to that runtime.
 
 Secrets never go in the agent file — it names the *variable* holding a key
 (`api_key_env="GROQ_API_KEY"`), so `agent.py` is safe to commit.
+
+## From your own Python
+
+`frun up` is a thin wrapper. The same pipeline runs inside your process, so you can put a voice
+turn behind a queue worker, a test, or a batch job with no server involved:
+
+```python
+import asyncio, wave
+from fusion_runtime import Agent, LLM, STT, TTS, PipelineOrchestrator, run_single_turn
+
+agent = Agent(
+    prompt="You are the order line for ShopKart. Answer in one short sentence.",
+    stt=STT("whisper-tiny.en"),
+    llm=LLM("qwen2.5-0.5b-q4", max_tokens=60),
+    tts=TTS("kokoro-v1.0", voice="af_heart"),
+)
+
+async def main():
+    orchestrator = PipelineOrchestrator(agent.config())
+    await orchestrator.initialize()          # loads the models once; reuse it across turns
+    with wave.open("caller.wav", "rb") as w:
+        audio = w.readframes(w.getnframes())
+    reply = await run_single_turn(orchestrator, audio, system_prompt=agent.prompt)
+    print(f"{len(reply) / 2 / 24000:.2f}s of speech")   # 24 kHz mono 16-bit PCM
+    await orchestrator.shutdown()
+
+asyncio.run(main())
+```
+
+`agent.config()` is the agent resolved against its profile and the environment — the same
+`PipelineConfig` the server builds. `load_agent("agent.py")` returns the `Agent` from a file, so a
+script and `frun up` can share one definition.
+
+`run_single_turn` waits for the whole reply. For audio as it is produced — which is what makes
+barge-in possible — use `orchestrator.run_pipeline(audio_chunks, prompt)`, an async iterator of
+PCM chunks. `initialize()` is the expensive call; hold the orchestrator and reuse it.
 
 ## On your own site
 
@@ -136,20 +181,8 @@ uv sync --extra dev --extra talk     # or: pip install -e ".[dev,talk]"
 pytest
 ```
 
-`uv.lock` is committed: torch and torchaudio have to match exactly, and when they drifted apart
-it broke voice detection silently for days. CI runs the suite on Python 3.11, 3.12 and 3.13.
-
-```
-fusion_runtime/
-├── cli/          frun commands, one file per command
-├── catalog/      model catalog, install checks, downloads
-├── contract/     the interface every model runtime implements
-├── runtimes/     one adapter per engine, not per model
-├── engine/       orchestrator, scheduler, streaming, barge-in
-├── security/     keys, session tokens, limits, origins
-├── web/          the console and the browser client
-├── vad/  turns/  telemetry/  audio/  testing/
-```
+CI runs the suite on Python 3.11, 3.12 and 3.13. [CONTRIBUTING.md](CONTRIBUTING.md) has the
+layout, the design rules a review will hold you to, and how to add a runtime.
 
 ## License
 
