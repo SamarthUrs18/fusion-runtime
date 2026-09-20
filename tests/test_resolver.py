@@ -341,3 +341,16 @@ def test_vllm_says_it_is_not_managed_yet_and_how_to_use_it(tmp_path):
         resolve("llm", "hf:org/model", runtime="vllm", catalog=empty_catalog(), root=tmp_path)
     with pytest.raises(UnsupportedModel, match="llama-server"):
         resolve("llm", "./model.gguf", runtime="llama_server", catalog=empty_catalog(), root=tmp_path)
+
+
+def test_sglang_says_how_to_use_it_rather_than_model_not_found():
+    """Any server speaking the OpenAI API works today; what we don't do is start
+    one. Without this the reference is read as a model name and the error talks
+    about a missing download."""
+    from fusion_runtime.agent import LLM
+    from fusion_runtime.contract import UnsupportedModel
+
+    runtime, ref = LLM("sglang:hf:org/model").split()
+    assert runtime == "sglang"
+    with pytest.raises(UnsupportedModel, match="doesn't start SGLang for you yet"):
+        resolve("llm", ref, runtime=runtime)

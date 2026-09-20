@@ -2,7 +2,7 @@
 FastAPI Server - HTTP/WebSocket API for fusion-runtime
 """
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 from starlette.websockets import WebSocketState
 from typing import Optional
@@ -452,37 +452,6 @@ def _collect_turns(turns: list):
     return on_event
 
 
-@app.post("/v1/voice/stream")
-async def voice_stream(request: VoiceChatRequest, principal: Principal = Depends(require_key)):
-    """Streaming voice chat - returns audio chunks as they're generated."""
-    if not orchestrator:
-        raise HTTPException(503, "Orchestrator not initialized")
-
-    audio = base64.b64decode(request.audio_base64)
-    request_id = f"req-{uuid.uuid4().hex[:12]}"
-
-    async def audio_iterator():
-        yield audio
-
-    async def generate():
-        with session_scope(request_id):
-            async for chunk in orchestrator.run_pipeline(
-                audio_iterator(),
-                request.system_prompt or (agent.prompt if agent is not None else DEFAULT_PROMPT)
-            ):
-                yield chunk
-
-    return StreamingResponse(
-        generate(),
-        media_type="audio/pcm",
-        headers={
-            "X-Sample-Rate": str(orchestrator.config.sample_rate),
-            "X-Channels": str(orchestrator.config.channels),
-            "X-Request-Id": request_id,
-        }
-    )
-
-
 # ============ WebSocket Endpoint ============
 
 def _client_gone(websocket: WebSocket, exc: Optional[BaseException] = None) -> bool:
@@ -742,14 +711,6 @@ async def voice_websocket(websocket: WebSocket):
 async def metrics(principal: Principal = Depends(require_key)):
     """Prometheus metrics: latency histograms, turns, errors, sessions, event-loop lag, memory, CPU."""
     return Response(telemetry.metrics.render(), media_type=telemetry.metrics.content_type)
-
-
-@app.get("/v1/metrics/summary")
-async def metrics_summary(principal: Principal = Depends(require_key)):
-    """P50/P99 of recent single-shot pipeline runs (REST and library use)."""
-    if not orchestrator:
-        raise HTTPException(503, "Orchestrator not initialized")
-    return orchestrator.get_metrics_summary()
 
 
 # ============ Main ============

@@ -44,7 +44,7 @@ DEFAULT_PROMPT = "You are a helpful voice assistant. Answer briefly."
 
 # Runtimes that can appear in front of a model reference ("vllm:hf:org/repo").
 # "module:Class" works too, for plugins.
-KNOWN_RUNTIMES = ("llama_cpp", "ctranslate2", "onnx", "openai_http", "vllm", "llama_server")
+KNOWN_RUNTIMES = ("llama_cpp", "ctranslate2", "onnx", "openai_http", "vllm", "sglang", "llama_server")
 
 
 class AgentError(ValueError):

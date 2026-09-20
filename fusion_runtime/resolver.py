@@ -51,6 +51,7 @@ RUNTIME_STAGES: Dict[str, Tuple[str, ...]] = {
 # you run yourself works today and is the same protocol, so say that.
 PLANNED_RUNTIMES = {
     "vllm": "vLLM",
+    "sglang": "SGLang",
     "llama_server": "llama-server",
 }
 
