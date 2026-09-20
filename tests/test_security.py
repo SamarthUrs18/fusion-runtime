@@ -5,6 +5,7 @@ with no keys is somebody else's GPU — so it's tested from both ends: the comma
 refuses to start, and the server refuses to answer.
 """
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -530,3 +531,31 @@ def test_it_never_sends_your_server_s_key_to_someone_else_s():
     assert client_key("wss://pod.example/v1/voice/ws", environ) is None
     # ...unless a key was set for that server, which is a different key
     assert client_key("wss://pod.example", {**environ, "FUSION_API_KEY": OTHER}) == OTHER
+
+
+def test_a_page_can_reconnect_without_asking_its_backend_again(client):
+    """A token is spent by the connection that used it, so the server hands over
+    the next one. Without this, clicking "talk" a second time fails."""
+    first = client.post("/v1/sessions", headers={"Authorization": f"Bearer {KEY}"}).json()["token"]
+    with client.websocket_connect(f"/v1/voice/ws?token={first}") as ws:
+        config = ws.receive_json()
+    assert config["type"] == "config"
+    second = config["next_token"]
+    assert second and second != first
+
+    with client.websocket_connect(f"/v1/voice/ws?token={second}") as ws:
+        again = ws.receive_json()
+    assert again["type"] == "config" and again["next_token"] not in (first, second)
+
+
+def test_no_token_is_offered_when_there_is_nothing_to_authenticate(open_client):
+    with open_client.websocket_connect("/v1/voice/ws") as ws:
+        config = ws.receive_json()
+    assert config["type"] == "config" and "next_token" not in config
+
+
+def test_the_client_keeps_the_next_token():
+    """The browser side of the same thing, checked in the shipped script."""
+    source = (Path(__file__).resolve().parents[1] / "fusion_runtime/web/fusion-runtime.js").read_text()
+    assert "if (msg.next_token) this.token = msg.next_token;" in source
+    assert "socketUrl(self.options, self.token)" in source

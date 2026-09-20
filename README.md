@@ -1,8 +1,13 @@
-# fusion-runtime
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-dark.png">
+  <img alt="fusion-runtime" src="docs/brand/logo-light.png" width="420">
+</picture>
 
 **A self-hosted voice agent runtime.** Speech-to-text, the LLM and text-to-speech run together on one machine and stream into each other, so a reply starts playing while it's still being generated.
 
-> **Status: early development.** The full voice pipeline works on a laptop CPU, including interruptions and echo cancellation. It hasn't been measured on a GPU yet. Conversations are fully isolated; for several at once, point the LLM at vLLM or `llama-server` — the runtime already speaks to both — since the in-process model decodes one reply at a time. Shared-model scaling for speech-to-text is the next piece of work. See [Roadmap](#roadmap).
+**On an RTX 3090 with a 7B model: 472 ms from the caller finishing to audio coming back**, 105 tokens/sec, interruptions honoured mid-sentence. [How that was measured](#performance).
+
+> **Status: early development.** The pipeline runs on a laptop CPU and on a GPU, including interruptions and echo cancellation. Conversations are fully isolated; for several at once, point the LLM at vLLM or `llama-server` — the runtime already speaks to both — since the in-process model decodes one reply at a time. Shared-model scaling for speech-to-text is the next piece of work. See [Roadmap](#roadmap).
 
 ## Quickstart
 
@@ -160,6 +165,10 @@ The token works once and expires in about a minute, so a leaked URL, screenshot 
 worthless by the time anyone reads it. For your own machine, `frun token` prints a console URL
 with one in it.
 
+A connected page is handed its **next** token on the socket it already has, so reconnecting — the
+visitor clicking again after a pause — costs no round trip and every token still works exactly
+once. A page left idle past the expiry asks its backend again, as it did on first load.
+
 **Rotating and revoking.** `FUSION_ACCEPTED_KEYS` takes a list, so a rotation is: add the new key,
 move clients across, drop the old one. Point `FUSION_ACCEPTED_KEYS_FILE` at a file instead and
 `kill -HUP` re-reads it without restarting — which matters on a GPU, where a restart reloads the
@@ -216,6 +225,7 @@ The forwarded address is used for counting only, never to decide who may in.
 | `frun talk --verbose` | Also prints each turn's full timeline |
 | `frun talk --url ws://host:8080/v1/voice/ws` | Talks to a server elsewhere |
 | `frun models list` | Shows every model, its size, whether it's installed, and which profile uses it |
+| `frun models pull agent.py` | Downloads exactly what that agent names |
 | `frun models pull` | Downloads what the development profile needs |
 | `frun models pull --config production` | Downloads what the production profile needs |
 | `frun models pull --llm` | Only one stage; also `--whisper`, `--kokoro`, `--vad` |
@@ -401,12 +411,32 @@ Every stage emits structured events with a timestamp, session id, turn id, stage
 
 Measured numbers only.
 
-| Machine | Profile | Time to first audio | Speech-to-text |
-|---------|---------|---------------------|----------------|
-| 8 GB MacBook Air, CPU only | development | ~1.6 s | ~0.5–0.7 s |
-| NVIDIA GPU | production | not measured yet | not measured yet |
+**RTX 3090, Qwen 7B q4 + Whisper tiny.en + Kokoro**, nine-turn conversation through the browser
+client (19 September 2026):
 
-Measured on the `tests/fixtures/hello.wav` clip.
+| | Median | Range |
+|---|---|---|
+| **Response** — caller stops speaking to audio coming back | **472 ms** | 169–706 |
+| Time to first audio, including the 500 ms end-of-turn wait | 969 ms | 695–1266 |
+| Speech-to-text | 109 ms | 37–477 |
+| LLM first token | 28 ms | 20–199 |
+| LLM tokens/sec | ~105 | 92–122 |
+| Text-to-speech, first chunk | 442 ms | 147–619 |
+| Text-to-speech real-time factor | 0.14 | 0.04–0.25 |
+| Cold start, all models loaded | 17 s | LLM 15 s of it |
+
+Barge-in fired on six of six attempts, and correctly did not fire on 192 ms of speech over the
+agent (the threshold is 300 ms).
+
+The number worth noting isn't that a GPU beats a laptop. It's that **a 7B model answers as
+quickly as a 0.5B did on an 8 GB MacBook Air** (~1.6 s to first audio there), because the
+end-of-turn wait and the first sentence of speech dominate, not the model.
+
+Not yet measured: several callers at once, calls longer than a few minutes.
+
+Every number above comes from the runtime's own per-turn telemetry — `frun talk --verbose`, or
+the `turn.trace` event — so you can reproduce them on your own hardware rather than taking
+ours. The laptop figure is from the `tests/fixtures/hello.wav` clip.
 
 ## Development
 

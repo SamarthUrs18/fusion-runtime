@@ -562,12 +562,20 @@ async def voice_websocket(websocket: WebSocket):
         receive_task = send_task = clock_task = None
         try:
             # Send config
+            # A token is spent by the connection that used it, so without this a
+            # page could never reconnect — clicking "talk" a second time would
+            # fail. Handing over the next one on the socket we already trust
+            # costs nothing and keeps every token single use. A page that sits
+            # idle past the expiry still has to ask its backend, as it does on
+            # first load.
+            next_token = auth.tokens.mint(principal).token if auth.enabled else None
             await websocket.send_json({
                 "type": "config",
                 "sample_rate": orchestrator.config.sample_rate,  # what we want from the client
                 "output_sample_rate": orchestrator.config.tts.sample_rate,  # what replies arrive in
                 "channels": orchestrator.config.channels,
                 "session_id": session_id,
+                **({"next_token": next_token} if next_token else {}),
             })
 
             # Audio buffer for incoming stream

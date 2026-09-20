@@ -496,3 +496,24 @@ def test_up_takes_the_agent_from_the_environment(monkeypatch, tmp_path):
     assert "agent" in result.output and "env-agent" not in result.output  # it prints the path
     assert os.environ["FUSION_AGENT"] == str(agent.resolve())  # and doesn't unset it for the server
     assert calls, "uvicorn should have been started"
+
+
+def test_models_pull_takes_an_agent_file(monkeypatch, tmp_path):
+    """An agent file already says which models it wants; asking for a profile too
+    is the same question twice, and the answers can differ."""
+    agent = tmp_path / "agent.py"
+    agent.write_text(
+        "from fusion_runtime import Agent, LLM, STT, TTS\n"
+        "agent = Agent(prompt='hi', stt=STT('whisper-tiny.en'), llm=LLM('qwen2.5-7b-q4'),\n"
+        "              tts=TTS('kokoro-v1.0'))\n")
+    pulled = []
+    monkeypatch.setattr("fusion_runtime.catalog.download.pull", lambda entry, root, log=None, force=False:
+                        pulled.append(entry.id))
+    monkeypatch.setattr("fusion_runtime.catalog.is_installed", lambda entry, root: False)
+    monkeypatch.setattr("fusion_runtime.catalog.download.check_disk_space", lambda needed, root: None)
+
+    result = runner.invoke(app, ["models", "pull", str(agent)])
+
+    assert result.exit_code == 0, result.output
+    assert "qwen2.5-7b-q4" in pulled  # the agent's 7B, not the development profile's 0.5B
+    assert "qwen2.5-0.5b-q4" not in pulled

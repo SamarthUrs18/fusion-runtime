@@ -1,4 +1,6 @@
 """`frun models list` and `frun models pull`."""
+import os
+from pathlib import Path
 from typing import List, Optional
 
 import typer
@@ -41,8 +43,9 @@ def list_models() -> None:
 @models_app.command("pull")
 def pull(
     ids: Optional[List[str]] = typer.Argument(
-        None, help="Catalog model IDs (see `frun models list`), or hf:owner/repo for any Hugging Face model. "
-                   "Default: everything the profile needs.",
+        None, help="An agent file, catalog model IDs (see `frun models list`), or hf:owner/repo for any "
+                   "Hugging Face model. Default: the agent named by FUSION_AGENT, else everything the "
+                   "profile needs.",
     ),
     config: Profile = typer.Option(Profile.development, "--config", "-c", help="Profile whose models to pull."),
     whisper: bool = typer.Option(False, "--whisper", help="Only the profile's speech-to-text model."),
@@ -68,7 +71,31 @@ def pull(
 
     catalog = load_catalog()
     ids = list(ids or [])
+
+    # An agent file already says which models it wants, so `frun models pull
+    # agent.py` should pull exactly those — asking for a profile as well is
+    # asking the same question twice, and the two answers can differ.
+    from fusion_runtime.config import AGENT_ENV
+
+    agent_files = [i for i in ids if i.endswith(".py")]
+    ids = [i for i in ids if i not in agent_files]
+    if not agent_files and not ids and os.getenv(AGENT_ENV):
+        agent_files = [os.environ[AGENT_ENV]]
+    wanted = None
+    if agent_files:
+        from fusion_runtime.agent import load_agent
+
+        try:
+            wanted = load_agent(agent_files[0]).config()
+        except ValueError as e:  # AgentError is a ValueError
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"From {short_path(Path(agent_files[0]))}")
+
     hf_refs = [i for i in ids if i.startswith("hf:")]
+    if wanted is not None:  # an agent can name Hugging Face models directly
+        hf_refs += [m for m in (getattr(getattr(wanted, stage, None), "model", "")
+                                for stage in ("stt", "llm", "tts")) if m.startswith("hf:")]
     try:
         chosen = get_entries([i for i in ids if i not in hf_refs], catalog)
     except UnknownModelError as e:
@@ -81,10 +108,11 @@ def pull(
 
     stages = {s for s, on in (("stt", whisper), ("llm", llm), ("tts", kokoro), ("vad", vad)) if on}
     if stages or not ids:
-        profile_entries = entries_for_profile(profile_config(config), catalog)
+        profile_entries = entries_for_profile(wanted or profile_config(config), catalog)
         chosen += [e for e in profile_entries if not stages or e.stage in stages]
         for stage in sorted(stages - {e.stage for e in profile_entries}):
-            typer.echo(f"The {config.value} profile has no local {stage} model to pull.", err=True)
+            where = "agent" if wanted is not None else f"{config.value} profile"
+            typer.echo(f"The {where} has no local {stage} model to pull.", err=True)
     chosen = list({e.id: e for e in chosen}.values())  # de-duplicate, keep order
 
     root = model_dir()

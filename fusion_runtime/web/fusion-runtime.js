@@ -126,14 +126,14 @@
     }
   };
 
-  function socketUrl(options) {
+  function socketUrl(options, token) {
     var url = options.url;
     if (!url) {
       url = (SCRIPT_ORIGIN || global.location.origin) + WS_PATH;
     }
     url = url.replace(/^http/, "ws");
-    if (options.token) {
-      url += (url.indexOf("?") === -1 ? "?" : "&") + "token=" + encodeURIComponent(options.token);
+    if (token) {
+      url += (url.indexOf("?") === -1 ? "?" : "&") + "token=" + encodeURIComponent(token);
     }
     return url;
   }
@@ -152,6 +152,9 @@
   function Session(options) {
     Emitter.call(this);
     this.options = options || {};
+    // Spent when it is used, so the server sends a replacement on connect;
+    // otherwise a second "talk" would be refused.
+    this.token = this.options.token || null;
     this.state = "idle";
     this.inputRate = 16000;   // the server tells us for sure in its first message
     this.outputRate = 24000;
@@ -243,12 +246,12 @@
   Session.prototype._openSocket = function () {
     var self = this;
     return new Promise(function (resolve, reject) {
-      var ws = new WebSocket(socketUrl(self.options));
+      var ws = new WebSocket(socketUrl(self.options, self.token));
       ws.binaryType = "arraybuffer";
       self._ws = ws;
       ws.onopen = function () { resolve(); };
       ws.onerror = function () {
-        reject(new Error("couldn't reach " + socketUrl(self.options)));
+        reject(new Error("couldn't reach " + socketUrl(self.options, null)));
       };
       ws.onclose = function (event) {
         if (self.state === "live") {
@@ -281,6 +284,7 @@
       case "config":
         this.sessionId = msg.session_id;
         if (msg.output_sample_rate) this.outputRate = msg.output_sample_rate;
+        if (msg.next_token) this.token = msg.next_token;  // for the next connection
         break;
       case "transcript":
         if (msg.is_final) this._discarding = false;  // a new turn: play the agent again
