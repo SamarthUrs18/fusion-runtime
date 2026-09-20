@@ -1,11 +1,6 @@
 """
 FastAPI Server - HTTP/WebSocket API for fusion-runtime
 """
-from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, Response
-from pydantic import BaseModel
-from starlette.websockets import WebSocketState
-from typing import Optional
 import asyncio
 import base64
 import contextlib
@@ -15,20 +10,44 @@ import platform
 import time
 import uuid
 from pathlib import Path
+from typing import Optional
 
-from fusion_runtime import __version__
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from pydantic import BaseModel
+from starlette.websockets import WebSocketState
+
+from fusion_runtime import __version__, web
 from fusion_runtime.agent import DEFAULT_PROMPT, Agent, load_agent
 from fusion_runtime.config import load_profile
-from fusion_runtime.env import load_env_file
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator
-from fusion_runtime.telemetry import LoopMonitor, SessionTrace, describe_error, session_scope, telemetry
-from fusion_runtime import web
+from fusion_runtime.env import load_env_file
 from fusion_runtime.security import (
-    Authenticator, ConfigurationError, KeySet, Principal, TokenStore, Unauthorized, scrub_access_logs,
+    ALLOWED_ORIGINS_ENV,
+    Authenticator,
+    ConfigurationError,
+    KeySet,
+    OriginRule,
+    Principal,
+    ProxyTrust,
+    TokenStore,
+    Unauthorized,
+    scrub_access_logs,
 )
-from fusion_runtime.security import ALLOWED_ORIGINS_ENV, OriginRule, ProxyTrust
-from fusion_runtime.security.limits import AudioBudget, ConnectionRate, Limits, OverLimit, SessionSlots
-
+from fusion_runtime.security.limits import (
+    AudioBudget,
+    ConnectionRate,
+    Limits,
+    OverLimit,
+    SessionSlots,
+)
+from fusion_runtime.telemetry import (
+    LoopMonitor,
+    SessionTrace,
+    describe_error,
+    session_scope,
+    telemetry,
+)
 
 app = FastAPI(title="fusion-runtime", version=__version__)
 

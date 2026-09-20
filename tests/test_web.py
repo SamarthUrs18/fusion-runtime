@@ -5,10 +5,9 @@ import subprocess
 import tomllib
 from pathlib import Path
 
+import fusion_runtime.server as server
 import pytest
 from fastapi.testclient import TestClient
-
-import fusion_runtime.server as server
 from fusion_runtime import web
 
 ROOT = Path(__file__).resolve().parents[1]

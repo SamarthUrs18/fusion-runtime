@@ -4,13 +4,11 @@ The rule that matters most is the last one — a runtime reachable from elsewher
 with no keys is somebody else's GPU — so it's tested from both ends: the command
 refuses to start, and the server refuses to answer.
 """
-import time
 from pathlib import Path
 
+import fusion_runtime.server as server
 import pytest
 from fastapi.testclient import TestClient
-
-import fusion_runtime.server as server
 from fusion_runtime.security import (
     Authenticator,
     ConfigurationError,
@@ -267,7 +265,13 @@ def test_tokens_are_scrubbed_from_the_access_log():
 
 # ---- limits ----------------------------------------------------------------------
 
-from fusion_runtime.security.limits import AudioBudget, ConnectionRate, Limits, OverLimit, SessionSlots
+from fusion_runtime.security.limits import (
+    AudioBudget,
+    ConnectionRate,
+    Limits,
+    OverLimit,
+    SessionSlots,
+)
 
 
 def test_a_per_key_limit_defaults_to_the_server_limit():

@@ -1,9 +1,18 @@
 """An agent file describes the whole agent: prompt, models, settings — and the server uses it."""
 import pytest
-from typer.testing import CliRunner
-
-from fusion_runtime.agent import DEFAULT_PROMPT, LLM, STT, TTS, Agent, AgentError, Stage, Turns, VAD, load_agent
+from fusion_runtime.agent import (
+    DEFAULT_PROMPT,
+    LLM,
+    TTS,
+    VAD,
+    Agent,
+    AgentError,
+    Stage,
+    Turns,
+    load_agent,
+)
 from fusion_runtime.cli.app import app
+from typer.testing import CliRunner
 
 cli = CliRunner()
 

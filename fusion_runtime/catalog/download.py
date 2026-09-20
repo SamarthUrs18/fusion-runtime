@@ -5,6 +5,8 @@ import shutil
 from pathlib import Path
 from typing import Callable, Optional
 
+from fusion_runtime.catalog.entries import ModelEntry, format_size, is_installed, missing_files
+
 HF_PREFIX = "hf:"
 HF_TOKEN_ENV = "HF_TOKEN"  # for gated or private models; never stored in config
 # Weights and the files needed to use them. Keeps big extras (other quantizations,
@@ -15,8 +17,6 @@ HF_UNWANTED = ["*.msgpack", "*.h5", "*.tflite", "*.ot", "original/**", "*.pth"]
 # variants). Files this big are one of those; smaller ones are the pieces every
 # copy needs (configs, tokenizers, voice vectors) and always come along.
 BIG_FILE_BYTES = 50_000_000
-
-from fusion_runtime.catalog.entries import ModelEntry, format_size, is_installed, missing_files
 
 # Keep this much free after a download so the machine doesn't end up at 0 bytes.
 DISK_HEADROOM_BYTES = 500_000_000

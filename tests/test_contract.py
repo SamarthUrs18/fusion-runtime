@@ -4,7 +4,6 @@ import threading
 import time
 
 import pytest
-
 from fusion_runtime.contract import (
     Cancelled,
     CancelToken,
@@ -14,7 +13,6 @@ from fusion_runtime.contract import (
     TTSRequest,
 )
 from fusion_runtime.testing.fakes import FakeTTSRuntime, fake_spec
-
 
 # ---- CancelToken ---------------------------------------------------------------------
 

@@ -4,11 +4,10 @@ import sys
 import types
 
 import pytest
-from typer.testing import CliRunner
-
 from fusion_runtime.cli import _checks
 from fusion_runtime.cli._checks import FAIL, INFO, OK, WARN, CheckResult
 from fusion_runtime.cli.app import app
+from typer.testing import CliRunner
 
 runner = CliRunner()
 

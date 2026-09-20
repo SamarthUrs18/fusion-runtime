@@ -8,7 +8,13 @@ Conversation text stays out of logs unless `log_content` is enabled
 """
 from fusion_runtime.telemetry.errors import describe_error, tag_stage
 from fusion_runtime.telemetry.events import ErrorInfo, Event
-from fusion_runtime.telemetry.hub import Sink, Telemetry, current_session_id, session_scope, telemetry
+from fusion_runtime.telemetry.hub import (
+    Sink,
+    Telemetry,
+    current_session_id,
+    session_scope,
+    telemetry,
+)
 from fusion_runtime.telemetry.loop_monitor import LoopMonitor
 from fusion_runtime.telemetry.sinks import ConsoleSink, JsonSink, ListSink
 from fusion_runtime.telemetry.trace import SessionTrace, TurnTrace

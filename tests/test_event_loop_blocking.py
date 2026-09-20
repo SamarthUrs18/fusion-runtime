@@ -7,8 +7,6 @@ import asyncio
 import threading
 
 import numpy as np
-import pytest
-
 from fusion_runtime.config import PipelineConfig
 from fusion_runtime.contract import ModelSpec, STTRequest, Transcript
 from fusion_runtime.engine import PipelineOrchestrator

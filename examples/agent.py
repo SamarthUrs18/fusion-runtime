@@ -7,7 +7,7 @@
 Everything the agent is lives here: what it says, which models it uses, and how
 it takes turns. Secrets don't: those come from environment variables.
 """
-from fusion_runtime import Agent, LLM, STT, TTS, Turns, VAD
+from fusion_runtime import LLM, STT, TTS, VAD, Agent, Turns
 
 agent = Agent(
     name="shopkart-orders",

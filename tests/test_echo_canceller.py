@@ -16,7 +16,6 @@ import time
 import numpy as np
 import pytest
 import soundfile as sf
-
 from fusion_runtime.audio.echo_canceller import DelayEstimator, EchoCanceller, StreamingResampler
 
 FS = 16000

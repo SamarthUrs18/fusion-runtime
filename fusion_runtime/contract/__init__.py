@@ -24,7 +24,14 @@ from fusion_runtime.contract.common import (
     Stage,
     UnsupportedModel,
 )
-from fusion_runtime.contract.llm import LLMChunk, LLMRequest, LLMRuntime, Message, ToolCall, ToolSpec
+from fusion_runtime.contract.llm import (
+    LLMChunk,
+    LLMRequest,
+    LLMRuntime,
+    Message,
+    ToolCall,
+    ToolSpec,
+)
 from fusion_runtime.contract.stt import STTRequest, STTResult, STTRuntime, Transcript
 from fusion_runtime.contract.tts import AudioChunk, TTSRequest, TTSRuntime
 from fusion_runtime.contract.turn import TurnDetector, TurnPrediction, TurnRequest

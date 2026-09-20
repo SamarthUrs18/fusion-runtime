@@ -81,7 +81,7 @@ class ConsoleSink(Sink):
             if err.fix:
                 line += f"\n{'':>14}→ {err.fix}"
             if err.stack:
-                line += "\n" + "\n".join(f"{'':>14}| {l}" for l in err.stack.rstrip().splitlines())
+                line += "\n" + "\n".join(f"{'':>14}| {ln}" for ln in err.stack.rstrip().splitlines())
         return line
 
 

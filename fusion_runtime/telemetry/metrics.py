@@ -9,8 +9,15 @@ import sys
 import time
 from typing import Dict
 
-from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram, generate_latest
-from prometheus_client.core import GaugeMetricFamily, CounterMetricFamily
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
+from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 LATENCY_BUCKETS = (0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0)
 LONG_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600)

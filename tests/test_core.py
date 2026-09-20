@@ -1,23 +1,22 @@
 """
 Tests for fusion-runtime core components.
 """
-import pytest
 import asyncio
 import os
+
+import pytest
 from fusion_runtime.config import (
-    PipelineConfig,
-    STTConfig,
-    LLMConfig,
-    TTSConfig,
-    Provider,
     DEVELOPMENT_CONFIG,
     HYBRID_CONFIG,
+    PipelineConfig,
+    Provider,
+    STTConfig,
 )
 from fusion_runtime.contract import LLMRuntime, STTRuntime, TTSRuntime
+from fusion_runtime.engine import PipelineOrchestrator, run_single_turn
 from fusion_runtime.registry import create_runtime, runtime_class
 from fusion_runtime.resolver import resolve_stage_config
 from fusion_runtime.vad import create_vad
-from fusion_runtime.engine import PipelineOrchestrator, run_single_turn
 
 
 class TestConfig:
@@ -28,12 +27,12 @@ class TestConfig:
         assert config.tts.provider == Provider.KOKORO
         assert config.target_latency_ms == 500
         assert config.allow_cloud_fallback == False
-    
+
     def test_development_config(self):
         config = DEVELOPMENT_CONFIG
         assert config.stt.device == "cpu"
         assert config.llm.n_gpu_layers == 0
-    
+
     def test_hybrid_config(self):
         config = HYBRID_CONFIG
         assert config.allow_cloud_fallback == True
@@ -92,7 +91,6 @@ class TestPipelineIntegration:
     @pytest.fixture(scope="class")
     def orchestrator(self):
         from fusion_runtime.contract import ModelNotFound
-        from fusion_runtime.engine import PipelineOrchestrator
         from fusion_runtime.resolver import resolve_stage_config
 
         for stage in ("stt", "llm", "tts"):
@@ -104,7 +102,7 @@ class TestPipelineIntegration:
         asyncio.run(orch.initialize())
         yield orch
         asyncio.run(orch.shutdown())
-    
+
     @pytest.fixture(scope="class")
     def speech_audio(self):
         """Real speech WAV (16kHz mono int16) generated as a test fixture."""
@@ -112,26 +110,26 @@ class TestPipelineIntegration:
         path = os.path.join(os.path.dirname(__file__), "fixtures", "hello.wav")
         with wave.open(path, "rb") as wav:
             return wav.readframes(wav.getnframes())
-    
+
     async def test_single_turn(self, orchestrator, speech_audio):
         result = await run_single_turn(orchestrator, speech_audio)
         assert isinstance(result, bytes)
         assert len(result) > 0, "Pipeline produced no audio for real speech input"
-    
+
     async def test_streaming_pipeline(self, orchestrator, speech_audio):
         # Feed the speech audio in 100ms chunks
         chunk_ms = 100
         bytes_per_chunk = 16000 * 2 * chunk_ms // 1000  # 3200 bytes
-        
+
         async def audio_stream():
             for i in range(0, len(speech_audio), bytes_per_chunk):
                 yield speech_audio[i:i + bytes_per_chunk]
                 await asyncio.sleep(chunk_ms / 1000)
-        
+
         chunks = []
         async for chunk in orchestrator.run_pipeline(audio_stream()):
             chunks.append(chunk)
-        
+
         assert len(chunks) > 0, "Streaming pipeline produced no audio chunks"
         assert any(len(c) > 0 for c in chunks)
 

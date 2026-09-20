@@ -5,7 +5,8 @@ import time
 from collections import deque
 from typing import Optional
 
-from fusion_runtime.telemetry.hub import Telemetry, telemetry as default_hub
+from fusion_runtime.telemetry.hub import Telemetry
+from fusion_runtime.telemetry.hub import telemetry as default_hub
 
 
 class LoopMonitor:

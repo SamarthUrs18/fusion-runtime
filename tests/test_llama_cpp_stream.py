@@ -10,7 +10,6 @@ import asyncio
 import time
 
 import pytest
-
 from fusion_runtime.contract import Cancelled, LLMRequest, Message, ModelSpec, RuntimeFailure
 from fusion_runtime.runtimes.llama_cpp.llm import LlamaCppLLM
 

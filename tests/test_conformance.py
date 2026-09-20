@@ -2,7 +2,6 @@
 import asyncio
 
 import pytest
-
 from fusion_runtime.contract import AudioChunk, Cancelled, LLMChunk, Transcript
 from fusion_runtime.testing.conformance import assert_conforms, check_runtime
 from fusion_runtime.testing.fakes import FakeLLMRuntime, FakeSTTRuntime, FakeTTSRuntime, fake_spec

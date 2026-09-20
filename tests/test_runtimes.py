@@ -3,10 +3,12 @@ import wave
 from pathlib import Path
 
 import pytest
-
 from fusion_runtime.config import DEVELOPMENT_CONFIG, PipelineConfig
 from fusion_runtime.contract import (
-    ModelNotFound, ModelSpec, STTRequest, UnsupportedModel,
+    ModelNotFound,
+    ModelSpec,
+    STTRequest,
+    UnsupportedModel,
 )
 from fusion_runtime.engine import PipelineOrchestrator
 from fusion_runtime.engine.orchestrator import _resample_pcm16

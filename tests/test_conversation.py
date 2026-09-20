@@ -1,8 +1,8 @@
 """Per-call conversation history: sent to the LLM, trimmed to fit, honest about interruptions."""
 from fusion_runtime.config import PipelineConfig
+from fusion_runtime.contract import LLMChunk
 from fusion_runtime.engine import LatencyBudget, PipelineMetrics, PipelineOrchestrator
 from fusion_runtime.engine.conversation import Conversation
-from fusion_runtime.contract import LLMChunk
 from fusion_runtime.engine.streaming import PartialTranscript
 
 

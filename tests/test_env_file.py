@@ -49,9 +49,8 @@ def test_no_env_file_is_fine(tmp_path):
 
 
 def test_frun_reads_it(tmp_path, monkeypatch):
-    from typer.testing import CliRunner
-
     from fusion_runtime.cli.app import app
+    from typer.testing import CliRunner
 
     (tmp_path / ".env").write_text("FUSION_TEST_MARKER=on\n")
     monkeypatch.chdir(tmp_path)

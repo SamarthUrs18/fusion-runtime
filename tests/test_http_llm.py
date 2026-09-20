@@ -5,19 +5,32 @@ import os
 
 import httpx
 import pytest
-from typer.testing import CliRunner
-
 from fusion_runtime.catalog import entries_for_profile
 from fusion_runtime.cli import _checks
 from fusion_runtime.cli._checks import FAIL, INFO, OK, WARN
 from fusion_runtime.cli.app import app
-from fusion_runtime.config import HYBRID_CONFIG, DEVELOPMENT_CONFIG, LLMConfig, load_profile, with_env_overrides
+from fusion_runtime.config import (
+    DEVELOPMENT_CONFIG,
+    HYBRID_CONFIG,
+    LLMConfig,
+    load_profile,
+    with_env_overrides,
+)
 from fusion_runtime.contract import (
-    AuthFailed, InvalidRequest, LLMRequest, Message, ModelNotFound, ModelSpec, Overloaded, RateLimited, RuntimeFailure,
+    AuthFailed,
+    InvalidRequest,
+    LLMRequest,
+    Message,
+    ModelNotFound,
+    ModelSpec,
+    Overloaded,
+    RateLimited,
+    RuntimeFailure,
 )
 from fusion_runtime.resolver import resolve_stage_config
 from fusion_runtime.runtimes.openai_http.llm import OpenAIHTTPLLM, probe_endpoint
 from fusion_runtime.testing.conformance import assert_conforms, check_runtime
+from typer.testing import CliRunner
 
 URL = "http://llm.test/v1"
 LLM_ENV = ("FUSION_LLM_URL", "FUSION_LLM_MODEL", "FUSION_LLM_API_KEY_ENV")

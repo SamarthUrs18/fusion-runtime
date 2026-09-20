@@ -4,7 +4,6 @@ import threading
 import time
 
 import pytest
-
 from fusion_runtime.contract.common import Cancelled, Overloaded, Request
 from fusion_runtime.engine.scheduler import ModelScheduler
 

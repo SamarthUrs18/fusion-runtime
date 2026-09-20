@@ -1,19 +1,18 @@
 """Model catalog: pinned entries, profile mapping, installed checks and downloads.
 No network: Hugging Face and torch hub calls are replaced with fakes."""
+import huggingface_hub
 import numpy as np
 import pytest
-
-import huggingface_hub
 from fusion_runtime.catalog import (
     ModelEntry,
     UnknownModelError,
+    download,
     entries_for_profile,
     format_size,
     get_entries,
     is_installed,
     load_catalog,
 )
-from fusion_runtime.catalog import download
 from fusion_runtime.catalog.entries import STAGES
 from fusion_runtime.config import DEVELOPMENT_CONFIG, HYBRID_CONFIG, PRODUCTION_CONFIG
 

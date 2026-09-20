@@ -7,6 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/SamarthUrs18/fusion-runtime"><img alt="GitHub stars" src="https://img.shields.io/github/stars/SamarthUrs18/fusion-runtime?style=social"></a>
+  <a href="https://pypi.org/project/fusion-runtime/"><img alt="PyPI" src="https://img.shields.io/pypi/v/fusion-runtime"></a>
   <a href="https://fusion-runtime.dev/docs"><img alt="Docs" src="https://img.shields.io/badge/docs-fusion--runtime.dev-d9612f"></a>
   <img alt="Python 3.11 to 3.13" src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue">
 </p>
@@ -186,5 +187,10 @@ layout, the design rules a review will hold you to, and how to add a runtime.
 
 ## License
 
-Not decided yet. `pyproject.toml` currently declares AGPL-3.0-or-later; that is under review and
-will be settled before the first public release.
+[Apache-2.0](LICENSE). Embed it in a commercial product, rebrand it, ship it closed — keep the
+copyright notice and the `NOTICE` file in what you distribute, and don't use the project's name
+to imply it endorses you.
+
+The models it downloads by default are permissive too (Whisper MIT, Silero VAD MIT, Qwen2.5
+Apache-2.0, Kokoro Apache-2.0), so the whole default path is clear for commercial use. A model
+you point it at yourself carries its own licence — check that one before you ship it.

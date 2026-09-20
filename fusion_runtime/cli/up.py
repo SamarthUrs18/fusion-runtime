@@ -1,10 +1,9 @@
 """`frun up`: start the voice server."""
 import os
 from enum import Enum
+from pathlib import Path
 
 import typer
-
-from pathlib import Path
 
 from fusion_runtime.cli._common import Profile, short_path
 
@@ -73,8 +72,16 @@ def up(
     """Start the voice server. Talk to it from another terminal with `frun talk`."""
     from fusion_runtime.cli._checks import missing_models, port_answers_over_ipv6, port_in_use
     from fusion_runtime.config import (
-        ACCEPTED_KEYS_ENV, AGENT_ENV, API_KEY_ENV, INTERRUPT_AFTER_ENV, LLM_KEY_ENV_ENV, LLM_MODEL_ENV, LLM_URL_ENV, TURN_DETECTOR_ENV,
-        TURN_WAIT_ENV, model_dir,
+        ACCEPTED_KEYS_ENV,
+        AGENT_ENV,
+        API_KEY_ENV,
+        INTERRUPT_AFTER_ENV,
+        LLM_KEY_ENV_ENV,
+        LLM_MODEL_ENV,
+        LLM_URL_ENV,
+        TURN_DETECTOR_ENV,
+        TURN_WAIT_ENV,
+        model_dir,
     )
 
     for variable, value in ((LLM_URL_ENV, llm_url), (LLM_MODEL_ENV, llm_model), (LLM_KEY_ENV_ENV, llm_api_key_env),

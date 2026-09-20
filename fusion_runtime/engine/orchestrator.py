@@ -1,27 +1,33 @@
 """The voice conversation loop: audio → VAD → STT → turn detection → LLM → TTS → audio."""
-from concurrent.futures import ThreadPoolExecutor
-from typing import AsyncIterator, Optional, List, Callable, Awaitable
 import asyncio
 import contextlib
 import copy
 import difflib
-import re
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from typing import AsyncIterator, List, Optional
 
 from fusion_runtime.config import PipelineConfig, TurnDetectionConfig
 from fusion_runtime.contract import (
-    Cancelled, LLMRequest, LLMRuntime, STTRequest, STTRuntime, TTSRequest, TTSRuntime, TurnDetector, TurnRequest,
+    Cancelled,
+    LLMRequest,
+    LLMRuntime,
+    STTRequest,
+    STTRuntime,
+    TTSRequest,
+    TTSRuntime,
+    TurnDetector,
+    TurnRequest,
 )
-from fusion_runtime.vad import VADBase, VADResult, TurnState, create_vad
 from fusion_runtime.engine.barge_in import BargeInState
 from fusion_runtime.engine.conversation import Conversation
+from fusion_runtime.engine.metrics import LatencyBudget, PipelineMetrics
 from fusion_runtime.engine.scheduler import ModelScheduler
 from fusion_runtime.engine.streaming import PartialTranscript, TurnTranscriber, raise_if_error
 from fusion_runtime.engine.text import END_OF_REPLY, REPLY_CUT_OFF, speakable_segments, words
-from fusion_runtime.engine.metrics import LatencyBudget, PipelineMetrics, StageBudget
 from fusion_runtime.telemetry import SessionTrace, describe_error, tag_stage, telemetry
-
+from fusion_runtime.vad import TurnState, VADBase, create_vad
 
 # Silence after which the user's last words are transcribed, ahead of the turn ending
 FINALIZE_AFTER_SILENCE_MS = 150
@@ -35,7 +41,7 @@ class PipelineOrchestrator:
     - Dynamic batching
     - Graceful degradation
     """
-    
+
     def __init__(self, config: PipelineConfig):
         self.config = config
         # Model runtimes, shared by every conversation. Resolved and loaded by initialize().
@@ -45,11 +51,11 @@ class PipelineOrchestrator:
         self.ready = False
         self.vad: VADBase = create_vad(config.vad)
         self.turn_detector: Optional[TurnDetector] = None  # loaded by initialize(); None means silence only
-        
+
         # Batching
         self._batch_queue: asyncio.Queue = asyncio.Queue()
         self._batch_task: Optional[asyncio.Task] = None
-        
+
         # Metrics
         self.metrics_history: deque = deque(maxlen=1000)
 
@@ -134,7 +140,12 @@ class PipelineOrchestrator:
         """
         import os
 
-        from fusion_runtime.catalog import hf_expected_bytes, hf_reference, is_hf_downloaded, pull_hf
+        from fusion_runtime.catalog import (
+            hf_expected_bytes,
+            hf_reference,
+            is_hf_downloaded,
+            pull_hf,
+        )
         from fusion_runtime.config import model_dir
 
         ref = getattr(stage_config, "model", "") or ""
@@ -175,10 +186,10 @@ class PipelineOrchestrator:
         # Load Silero once now, so sessions only copy it (see _load_vad_frame_model).
         await self._load_vad_frame_model()
         telemetry.emit("models.ready", stage="server", duration_ms=(time.perf_counter() - started) * 1000)
-        
+
         if self.config.enable_batching:
             self._batch_task = asyncio.create_task(self._batch_worker())
-    
+
     async def shutdown(self):
         pool = self.__dict__.pop("_vad_pool", None)
         if pool is not None:
@@ -195,7 +206,7 @@ class PipelineOrchestrator:
                 await self._batch_task
             except asyncio.CancelledError:
                 pass
-    
+
     async def run_pipeline(
         self,
         audio_stream: AsyncIterator[bytes],
@@ -207,7 +218,7 @@ class PipelineOrchestrator:
         """
         Main pipeline: Audio → STT → LLM → TTS → Audio
         Yields audio chunks for playback.
-        
+
         on_event(dict) — optional callback receiving live events:
           {"type": "transcript", "text": ..., "is_final": bool}
           {"type": "response", "text": <chunk so far>}
@@ -231,7 +242,7 @@ class PipelineOrchestrator:
         trace = trace if trace is not None else SessionTrace()
         if trace.on_turn_trace is None:
             trace.on_turn_trace = lambda turn_trace: emit({"type": "turn.trace", **turn_trace})
-        
+
         # Reset state
         await self.vad.reset()
         turn_state = TurnState()
@@ -308,7 +319,7 @@ class PipelineOrchestrator:
         self.metrics_history.append(metrics)
         trace.event("pipeline.done", level="debug", stage="pipeline", duration_ms=metrics.e2e_latency_ms,
                     turns=trace.turn_count)
-    
+
     @staticmethod
     async def _tee_audio(source: AsyncIterator[bytes], queues: List[asyncio.Queue],
                          trace: Optional[SessionTrace] = None):
@@ -491,7 +502,6 @@ class PipelineOrchestrator:
         isn't guaranteed echo-free, a one-frame threshold would trigger on
         residual echo of the bot's own voice as readily as on a real user.
         """
-        import numpy as np
 
         model = await self._load_vad_frame_model()
         if model is None:
@@ -634,7 +644,7 @@ class PipelineOrchestrator:
                 raise tag_stage(e, "stt")
             note(result)
             yield result
-    
+
     async def _keep_turn_audio(self, chunks: AsyncIterator[bytes], turn_state: TurnState) -> AsyncIterator[bytes]:
         """Keep the latest seconds of this turn's speech for a turn detector that uses audio."""
         limit = int(self.config.turn_detection.detector_audio_s * 16000) * 2
@@ -660,7 +670,6 @@ class PipelineOrchestrator:
         (when provided) so turn detection can require an actual pause
         instead of trusting the STT's own per-window punctuation alone.
         """
-        import numpy as np
 
         model = await self._load_vad_frame_model()
         if model is None:
@@ -697,7 +706,7 @@ class PipelineOrchestrator:
                 continue
             probs = await self._vad_probabilities(model, frames, sample_rate)
 
-            for frame, prob in zip(frames, probs):
+            for frame, prob in zip(frames, probs, strict=True):
                 frame_start_sample = samples_seen
                 samples_seen += chunk_samples
                 if trace is not None:
@@ -739,7 +748,7 @@ class PipelineOrchestrator:
             turn.add("speech_audio_ms", (samples_seen - segment_start_sample) / sample_rate * 1000)
             trace.event("vad.speech_end", turn=turn, stage="vad", level="debug", reason="audio_ended",
                         segment_ms=round((samples_seen - segment_start_sample) / sample_rate * 1000))
-    
+
     async def _llm_stage(
         self,
         stt_stream: AsyncIterator[PartialTranscript],
@@ -1231,7 +1240,7 @@ class PipelineOrchestrator:
                 await accumulate_task
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher_task
-    
+
     async def _tts_stage(
         self,
         llm_stream: AsyncIterator[str],
@@ -1295,7 +1304,7 @@ class PipelineOrchestrator:
         metrics.tts_total_ms = (time.perf_counter() - tts_start) * 1000
 
     # ============ Batching Support ============
-    
+
     async def _batch_worker(self):
         """Background task for dynamic batching."""
         while True:
@@ -1311,26 +1320,26 @@ class PipelineOrchestrator:
                         batch.append(item)
                     except asyncio.TimeoutError:
                         break
-                
+
                 if batch:
                     await self._process_batch(batch)
-                    
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 telemetry.emit("batch_worker.error", level="error", stage="engine", error=describe_error(e))
-    
+
     async def _process_batch(self, batch: List):
         """Process a batch of requests."""
         # Group by stage
         # This is where cross-request batching happens
         pass
-    
+
     def get_metrics_summary(self) -> dict:
         """Get aggregated metrics."""
         if not self.metrics_history:
             return {}
-        
+
         m = self.metrics_history
         return {
             "count": len(m),
@@ -1368,7 +1377,7 @@ async def run_single_turn(
     """Run pipeline on complete audio, return complete audio response."""
     async def audio_chunks():
         yield audio
-    
+
     output = bytearray()
     async for chunk in orchestrator.run_pipeline(audio_chunks(), system_prompt):
         output.extend(chunk)

@@ -6,7 +6,13 @@ by the punctuation Whisper adds to partial transcripts ("Hello." after a
 greeting, mid-sentence). For shorter waits on finished sentences and longer
 ones mid-thought, plug in a turn detector model.
 """
-from fusion_runtime.contract import Capabilities, InvalidRequest, TurnDetector, TurnPrediction, TurnRequest
+from fusion_runtime.contract import (
+    Capabilities,
+    InvalidRequest,
+    TurnDetector,
+    TurnPrediction,
+    TurnRequest,
+)
 
 UNSURE = 0.5
 

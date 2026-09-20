@@ -30,7 +30,7 @@ def list_models() -> None:
         rows.append((entry.stage, entry.id, format_size(entry.total_bytes), status, ", ".join(used_by[entry.id]) or "-"))
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
     for row in rows:
-        typer.echo("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+        typer.echo("  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)).rstrip())
 
     for profile in Profile:
         missing = [e.id for e in entries_for_profile(profile_config(profile, apply_env=False), catalog)
@@ -56,18 +56,21 @@ def pull(
 ) -> None:
     """Download models into the model directory."""
     from fusion_runtime.catalog import (
+        ChooseAModel,
+        ModelAccessDenied,
         UnknownModelError,
         entries_for_profile,
         format_size,
         get_entries,
+        hf_reference,
+        is_hf_downloaded,
         is_installed,
         load_catalog,
+        pull_hf,
     )
     from fusion_runtime.catalog.download import DownloadError, bytes_to_download, check_disk_space
     from fusion_runtime.catalog.download import pull as pull_entry
     from fusion_runtime.config import model_dir
-
-    from fusion_runtime.catalog import ChooseAModel, ModelAccessDenied, hf_reference, is_hf_downloaded, pull_hf
 
     catalog = load_catalog()
     ids = list(ids or [])

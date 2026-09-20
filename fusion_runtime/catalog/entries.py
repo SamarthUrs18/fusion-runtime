@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from importlib.resources import files as package_files
 from pathlib import Path
 from typing import Optional
-from typing import Optional
 
 STAGES = ("stt", "llm", "tts", "vad")
 

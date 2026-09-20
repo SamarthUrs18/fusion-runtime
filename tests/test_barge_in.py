@@ -12,7 +12,6 @@ import asyncio
 
 import numpy as np
 import pytest
-
 from fusion_runtime.config import PipelineConfig
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator
 

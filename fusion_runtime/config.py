@@ -5,10 +5,11 @@ Centralized config for all models. Default = self-hosted, low-latency.
 Cloud providers require explicit opt-in.
 """
 import os
-from pathlib import Path
-from pydantic import BaseModel, Field, field_validator
-from typing import Any, Dict, Literal, Optional
 from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel, Field, field_validator
 
 
 def model_dir() -> Path:
@@ -207,14 +208,14 @@ class PipelineConfig(BaseModel):
     tts: TTSConfig = Field(default_factory=TTSConfig)
     vad: VADConfig = Field(default_factory=VADConfig)
     turn_detection: TurnDetectionConfig = Field(default_factory=TurnDetectionConfig)
-    
+
     # Global settings
     target_latency_ms: int = 500
     allow_cloud_fallback: bool = False  # Must explicitly enable
     enable_batching: bool = True
     batch_timeout_ms: int = 50
     max_batch_size: int = 8
-    
+
     # Audio
     sample_rate: int = 16000
     channels: int = 1

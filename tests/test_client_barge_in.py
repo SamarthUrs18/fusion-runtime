@@ -11,7 +11,6 @@ actually goes quiet rather than only until the reply finishes generating.
 import json
 
 import pytest
-
 from fusion_runtime.cli._talk_client import PlaybackReporter, ReplyGate
 
 

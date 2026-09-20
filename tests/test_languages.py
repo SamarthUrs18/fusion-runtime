@@ -1,10 +1,8 @@
 """Languages end to end: sentence splitting, word matching, and language settings per stage."""
 import pytest
-
-from fusion_runtime.config import TTSConfig, load_profile
+from fusion_runtime.config import TTSConfig, TurnDetectionConfig, load_profile
 from fusion_runtime.contract import InvalidRequest, ModelSpec, STTRequest
 from fusion_runtime.engine import PipelineOrchestrator
-from fusion_runtime.config import TurnDetectionConfig
 from fusion_runtime.engine.text import speakable_segments, words
 from fusion_runtime.runtimes.ctranslate2.stt import CTranslate2STT
 from fusion_runtime.runtimes.onnx.kokoro import KokoroFamily

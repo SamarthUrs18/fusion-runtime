@@ -63,13 +63,13 @@ class LlamaCppLLM(LLMRuntime):
         def build():
             from llama_cpp import Llama
 
-            kwargs: Dict[str, Any] = dict(
-                model_path=str(path),
-                n_ctx=options.get("n_ctx", 4096),
-                n_gpu_layers=options.get("n_gpu_layers", -1),
-                n_batch=options.get("n_batch", 512),
-                verbose=False,
-            )
+            kwargs: Dict[str, Any] = {
+                "model_path": str(path),
+                "n_ctx": options.get("n_ctx", 4096),
+                "n_gpu_layers": options.get("n_gpu_layers", -1),
+                "n_batch": options.get("n_batch", 512),
+                "verbose": False,
+            }
             if options.get("n_threads"):
                 kwargs["n_threads"] = options["n_threads"]
             llm = Llama(**kwargs)

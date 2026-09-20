@@ -1,7 +1,7 @@
 """LLM runtime contract."""
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple
+from typing import Any, AsyncIterator, Dict, Optional, Sequence, Tuple
 
 from fusion_runtime.contract.common import ModelRuntime, Request
 

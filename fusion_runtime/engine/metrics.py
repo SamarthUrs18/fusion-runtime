@@ -1,6 +1,6 @@
 """Per-turn latency budgets and pipeline metrics."""
-from dataclasses import dataclass, field
 import time
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -9,11 +9,11 @@ class LatencyBudget:
     total_ms: int
     spent_ms: float = 0
     stage_budgets: dict = field(default_factory=dict)
-    
+
     def allocate(self, stage: str, ms: int) -> "StageBudget":
         self.stage_budgets[stage] = ms
         return StageBudget(self, stage, ms)
-    
+
     def record(self, stage: str, ms: float):
         self.spent_ms += ms
         if stage in self.stage_budgets:
@@ -29,19 +29,19 @@ class StageBudget:
     stage: str
     allocated_ms: int
     start_time: float = field(default_factory=time.perf_counter)
-    
+
     def __enter__(self):
         return self
-    
+
     def __exit__(self, *args):
         elapsed = (time.perf_counter() - self.start_time) * 1000
         self.budget.record(self.stage, elapsed)
-    
+
     @property
     def remaining_ms(self) -> float:
         elapsed = (time.perf_counter() - self.start_time) * 1000
         return max(0, self.allocated_ms - elapsed)
-    
+
     @property
     def is_exceeded(self) -> bool:
         return self.remaining_ms <= 0

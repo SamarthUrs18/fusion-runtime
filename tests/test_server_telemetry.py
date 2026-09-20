@@ -2,11 +2,9 @@
 code and a fix, and /metrics and /health work. Uses a fake orchestrator, so no models load."""
 import time
 
+import fusion_runtime.server as server
 import pytest
 from fastapi.testclient import TestClient
-
-import fusion_runtime.server as server
-from fusion_runtime.config import DEVELOPMENT_CONFIG
 from fusion_runtime.contract import AuthFailed
 from fusion_runtime.telemetry import ListSink, telemetry
 

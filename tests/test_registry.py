@@ -2,9 +2,13 @@
 from types import SimpleNamespace
 
 import pytest
-
 from fusion_runtime import registry
-from fusion_runtime.registry import UnknownRuntime, available_runtimes, create_runtime, runtime_class
+from fusion_runtime.registry import (
+    UnknownRuntime,
+    available_runtimes,
+    create_runtime,
+    runtime_class,
+)
 from fusion_runtime.testing.fakes import FakeLLMRuntime, FakeTTSRuntime, fake_spec
 
 FAKE_TTS = "fusion_runtime.testing.fakes:FakeTTSRuntime"

@@ -32,7 +32,13 @@ Only plug in models whose license allows your use.
 import asyncio
 import re
 
-from fusion_runtime.contract import Capabilities, InvalidRequest, TurnDetector, TurnPrediction, TurnRequest
+from fusion_runtime.contract import (
+    Capabilities,
+    InvalidRequest,
+    TurnDetector,
+    TurnPrediction,
+    TurnRequest,
+)
 
 # An English caller who stops on one of these words is usually not done:
 # "I'd like a table for ... four", "and ... also a window seat".

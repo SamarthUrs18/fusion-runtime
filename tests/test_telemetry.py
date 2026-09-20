@@ -8,10 +8,8 @@ import time
 
 import numpy as np
 import pytest
-
 from fusion_runtime.contract import AuthFailed, RateLimited
 from fusion_runtime.telemetry import (
-    ConsoleSink,
     ListSink,
     LoopMonitor,
     SessionTrace,
@@ -328,7 +326,6 @@ async def test_speech_arriving_after_the_bot_spoke_still_interrupts(hub):
 
 def test_logs_survive_native_libraries_silencing_stderr(tmp_path):
     """llama.cpp points fd 2 at /dev/null while loading a model; our log lines must still arrive."""
-    import os
     import subprocess
     import sys
 

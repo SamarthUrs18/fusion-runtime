@@ -1,8 +1,8 @@
 """Interruption ("barge-in") state shared between generation and the watcher."""
-from dataclasses import dataclass, field
-from typing import Optional
 import asyncio
 import time
+from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass

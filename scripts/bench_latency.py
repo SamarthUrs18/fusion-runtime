@@ -93,7 +93,6 @@ def build_config(profile: str, overrides: dict):
 
 async def main(turns: int, profile: str, overrides: dict) -> None:
     from fusion_runtime import PipelineOrchestrator
-
     from fusion_runtime.telemetry import telemetry
 
     telemetry.configure(format="off")  # numbers only; run `frun up` to see the full event stream

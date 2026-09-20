@@ -36,7 +36,12 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 from fusion_runtime.catalog import gguf
 from fusion_runtime.catalog.entries import ModelEntry, is_installed, load_catalog, missing_files
 from fusion_runtime.contract.common import (
-    STAGES, InvalidRequest, ModelNotFound, ModelSpec, Stage, UnsupportedModel,
+    STAGES,
+    InvalidRequest,
+    ModelNotFound,
+    ModelSpec,
+    Stage,
+    UnsupportedModel,
 )
 
 # Which stages each built-in runtime serves.

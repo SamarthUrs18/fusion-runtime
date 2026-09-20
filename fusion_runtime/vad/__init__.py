@@ -1,6 +1,6 @@
 """Voice activity detection. Turn detectors live in fusion_runtime.turns."""
-from fusion_runtime.vad.base import SpeechSegment, VADBase, VADResult
-from fusion_runtime.vad.silero import SileroVAD, vad_stream_segments
+from fusion_runtime.vad.base import VADBase
+from fusion_runtime.vad.silero import SileroVAD
 from fusion_runtime.vad.turn import TurnState
 
 

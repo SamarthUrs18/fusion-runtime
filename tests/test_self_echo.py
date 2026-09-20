@@ -22,7 +22,6 @@ import asyncio
 import contextlib
 
 import pytest
-
 from fusion_runtime.config import PipelineConfig, TurnDetectionConfig
 from fusion_runtime.contract import LLMChunk
 from fusion_runtime.engine import LatencyBudget, PipelineMetrics, PipelineOrchestrator

@@ -3,13 +3,11 @@ import json
 import struct
 
 import pytest
-
 from fusion_runtime.catalog import gguf
 from fusion_runtime.catalog.entries import ModelEntry, load_catalog
 from fusion_runtime.config import DEVELOPMENT_CONFIG, HYBRID_CONFIG
 from fusion_runtime.contract.common import InvalidRequest, ModelNotFound, UnsupportedModel
 from fusion_runtime.resolver import resolve, resolve_stage_config
-
 
 # ---- helpers ---------------------------------------------------------------------------
 
@@ -250,7 +248,7 @@ def test_an_undownloaded_hf_model_says_how_to_get_it(tmp_path, monkeypatch):
 
 async def test_the_server_downloads_a_model_the_agent_asks_for(tmp_path, monkeypatch):
     """A deployment starts from an empty disk: the server fetches what the agent names."""
-    from fusion_runtime.agent import Agent, STT
+    from fusion_runtime.agent import STT, Agent
     from fusion_runtime.catalog import hf_local_dir
     from fusion_runtime.engine import PipelineOrchestrator
 
@@ -271,7 +269,7 @@ async def test_the_server_downloads_a_model_the_agent_asks_for(tmp_path, monkeyp
 
 
 async def test_auto_download_can_be_switched_off(tmp_path, monkeypatch):
-    from fusion_runtime.agent import Agent, STT
+    from fusion_runtime.agent import STT, Agent
     from fusion_runtime.engine import PipelineOrchestrator
 
     monkeypatch.setenv("FUSION_MODEL_DIR", str(tmp_path))
@@ -284,8 +282,7 @@ async def test_auto_download_can_be_switched_off(tmp_path, monkeypatch):
 
 def test_a_repo_with_several_copies_of_a_model_asks_which_one(monkeypatch):
     """A GGUF repo holds the same model 9 times over; downloading them all is gigabytes."""
-    from fusion_runtime.catalog import DownloadError
-    from fusion_runtime.catalog import download
+    from fusion_runtime.catalog import DownloadError, download
 
     monkeypatch.setattr(download, "hf_files", lambda repo, revision=None, token=None: [
         ("config.json", 2_000),

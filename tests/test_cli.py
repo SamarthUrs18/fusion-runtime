@@ -3,10 +3,9 @@ import json
 import subprocess
 import sys
 
-from typer.testing import CliRunner
-
 from fusion_runtime.cli.app import app
 from fusion_runtime.cli.version import package_version
+from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -69,7 +68,7 @@ def test_unknown_package_attribute_raises():
     import pytest
 
     with pytest.raises(AttributeError):
-        fusion_runtime.does_not_exist
+        _ = fusion_runtime.does_not_exist
 
 
 # ---- frun models -------------------------------------------------------------
@@ -236,7 +235,6 @@ def test_up_warns_when_something_else_holds_the_port_over_ipv6(monkeypatch):
 
 def test_talk_says_when_another_program_answers(monkeypatch):
     import websockets
-
     from fusion_runtime.cli import _talk_client
 
     class Boom:

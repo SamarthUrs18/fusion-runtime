@@ -6,9 +6,14 @@ are the right places.
 
 ## Before you start
 
-**The licence isn't settled.** `pyproject.toml` currently declares AGPL-3.0-or-later, and that is
-under review until the first public release. If the licence matters to how you can use or
-contribute to this, wait for the release rather than assuming the current declaration is final.
+**The licence is [Apache-2.0](LICENSE).** It was chosen so that anyone can embed this in a
+commercial product and rebrand it, which is what most of the people who'll rely on it need to do.
+
+**Your first pull request will ask you to sign a [CLA](CLA.md).** A bot posts the link; you reply
+with one line and it's done, once, for every contribution you ever make. It asks for a licence,
+not ownership — you keep the copyright in everything you write. It exists because a licence
+change can't be applied retroactively to code that arrived without one, and a project that may
+one day offer different terms has to ask on day one or never.
 
 **Don't paste code from other voice frameworks.** LiveKit, Pipecat and the rest are fine to read
 and learn from; their code, their packages and their model weights carry licences this project
@@ -39,8 +44,15 @@ CI runs the non-integration suite on Python 3.11, 3.12 and 3.13. Integration tes
 themselves when the models aren't downloaded, which is why CI stays fast and why a green CI run
 doesn't prove a model change works — run them locally for anything touching a runtime.
 
-`ruff` and `mypy` are configured (line length 100) but not enforced in CI. Run them before you
-open a pull request.
+```bash
+ruff check .          # CI runs this; it passes on main
+ruff check . --fix    # for the mechanical ones
+```
+
+`mypy` is configured but **not** enforced: it reports 82 errors today, nearly all of them
+`Optional` narrowing. Gating on it means fixing those first, so it stays a local tool until
+someone does that pass. `B904` (`raise ... from e`) is off the ruff gate for the same reason —
+22 sites, each a real if small improvement, better as one deliberate change than 22 rushed ones.
 
 ## How the code is laid out
 
@@ -106,6 +118,8 @@ the engine, or the audio path.
 
 ## Security
 
-Don't open a public issue for a security problem. Email the address on the
-[GitHub profile](https://github.com/SamarthUrs18) instead, and give it a few days before
-disclosing.
+Don't open a public issue for a security problem. Email **security@fusion-runtime.dev**
+instead, and give it a few days before disclosing.
+
+Things worth reporting: anything that gets past authentication, reaches audio or transcripts
+across sessions, or turns a model reference into code execution.

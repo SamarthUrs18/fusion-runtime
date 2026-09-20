@@ -2,7 +2,6 @@
 import asyncio
 
 import pytest
-
 from fusion_runtime.contract import InvalidRequest, Transcript
 from fusion_runtime.engine.streaming import raise_if_error, rolling_transcripts
 from fusion_runtime.engine.text import speakable_segments

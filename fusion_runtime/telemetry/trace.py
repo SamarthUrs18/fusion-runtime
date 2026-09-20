@@ -26,7 +26,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fusion_runtime.telemetry.events import ErrorInfo, Event
-from fusion_runtime.telemetry.hub import Telemetry, current_session_id, telemetry as default_hub
+from fusion_runtime.telemetry.hub import Telemetry, current_session_id
+from fusion_runtime.telemetry.hub import telemetry as default_hub
 
 
 @dataclass

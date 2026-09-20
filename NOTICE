@@ -1,0 +1,13 @@
+fusion-runtime
+Copyright 2026 Samarth Urs
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this software except in compliance with the License. A copy is in the LICENSE
+file beside this one, and at http://www.apache.org/licenses/LICENSE-2.0
+
+This product bundles no third-party source code. It downloads models at run time
+and installs libraries from PyPI; those carry their own licences, which the
+`frun models list` output and the dependency metadata state. The models used by
+default are permissively licensed (Whisper MIT, Silero VAD MIT, Qwen2.5
+Apache-2.0, Kokoro Apache-2.0), but a model you point it at yourself may not be —
+check before you ship one.

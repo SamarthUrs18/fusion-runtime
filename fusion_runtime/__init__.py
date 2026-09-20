@@ -2,7 +2,8 @@
 fusion-runtime: Low-latency voice AI inference runtime.
 """
 import importlib
-from importlib.metadata import PackageNotFoundError, version as _package_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _package_version
 from typing import TYPE_CHECKING
 
 try:
@@ -37,6 +38,7 @@ _EXPORTS = {
 __all__ = list(_EXPORTS)
 
 if TYPE_CHECKING:  # let editors and type checkers see the real names
+    from fusion_runtime.agent import LLM, STT, TTS, VAD, Agent, Turns, load_agent
     from fusion_runtime.config import (
         DEVELOPMENT_CONFIG,
         HYBRID_CONFIG,
@@ -49,7 +51,6 @@ if TYPE_CHECKING:  # let editors and type checkers see the real names
         TurnDetectionConfig,
         VADConfig,
     )
-    from fusion_runtime.agent import LLM, STT, TTS, Agent, Turns, VAD, load_agent
     from fusion_runtime.engine import PipelineOrchestrator, run_single_turn
 
 

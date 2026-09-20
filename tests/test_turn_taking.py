@@ -20,14 +20,12 @@ import asyncio
 import contextlib
 
 import pytest
-
 from fusion_runtime.config import PipelineConfig
-from fusion_runtime.contract import LLMChunk
+from fusion_runtime.contract import Capabilities, LLMChunk, TurnDetector, TurnPrediction
 from fusion_runtime.engine import LatencyBudget, PipelineMetrics, PipelineOrchestrator
-from fusion_runtime.engine.streaming import PartialTranscript
-from fusion_runtime.contract import Capabilities, TurnDetector, TurnPrediction
 from fusion_runtime.engine.barge_in import BargeInState
 from fusion_runtime.engine.conversation import Conversation
+from fusion_runtime.engine.streaming import PartialTranscript
 from fusion_runtime.telemetry import ListSink, telemetry
 from fusion_runtime.vad import TurnState
 

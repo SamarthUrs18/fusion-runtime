@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]  # PEP 639: SPDX `license` + `license-files`
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "fusion-runtime"
 version = "0.1.0"
 description = "Low-latency voice AI inference runtime (STT→LLM→TTS <500ms)"
 readme = "README.md"
-license = {text = "AGPL-3.0-or-later"}
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 # kokoro-onnx caps at <3.14, so that is where we cap too: a user on 3.14 gets
 # "requires a different Python" instead of a resolver error deep in an install.
 requires-python = ">=3.11,<3.14"
@@ -113,9 +114,34 @@ python_functions = ["test_*"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "T20"]
-ignore = ["E501", "B008"]
 src = ["fusion_runtime"]
+
+[tool.ruff.lint]
+# Deliberately not selected:
+#   N   — N818 wants every exception named *Error; the contract's names (Cancelled,
+#         Overloaded, RateLimited) read better at a call site and are the public API.
+#   T20 — `print` is what the CLI is for.
+#   UP  — pyupgrade is a worthwhile pass, but a separate one: it rewrites ~430 type
+#         annotations, which would bury every real change in the diff for a week.
+select = ["E", "F", "I", "W", "B", "C4", "SIM"]
+ignore = [
+    "E501",   # long lines: the limit guides, it doesn't fail a build
+    "B008",   # FastAPI's Depends() in an argument default is the documented pattern
+    "SIM105", # contextlib.suppress reads worse than try/except/pass at these sites
+    "SIM102", # a nested `if` is often the clearer way to say two separate conditions
+    "B027",   # an optional hook on a base class is deliberate, not a missing decorator
+    # B904 (`raise ... from e`) fires 22 times and each one is a real if small
+    # improvement to tracebacks. Left off the gate so it can be a deliberate pass
+    # rather than 22 rushed edits; turn it on when that pass happens.
+    "B904",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]   # re-exporting is what these files are for
+# Tests import mid-file to set up state before a module reads it, compare against
+# True/False to assert the value rather than truthiness, and assert on bare
+# Exception where the point is that *something* fails.
+"tests/*" = ["E402", "E712", "B017", "C408"]
 
 [tool.mypy]
 python_version = "3.11"
