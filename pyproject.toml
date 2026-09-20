@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "fusion-runtime"
 version = "0.1.0"
 description = "Low-latency voice AI inference runtime (STT→LLM→TTS <500ms)"
+authors = [{ name = "Samarth Urs", email = "hello@fusion-runtime.dev" }]
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
@@ -90,9 +91,9 @@ all = [
 
 [project.urls]
 Homepage = "https://fusion-runtime.dev"
-Repository = "https://github.com/fusion-runtime/fusion-runtime"
 Documentation = "https://fusion-runtime.dev/docs"
-Issues = "https://github.com/fusion-runtime/fusion-runtime/issues"
+Repository = "https://github.com/SamarthUrs18/fusion-runtime"
+Issues = "https://github.com/SamarthUrs18/fusion-runtime/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

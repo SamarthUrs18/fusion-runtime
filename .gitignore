@@ -68,3 +68,6 @@ Thumbs.db
 # Environment files (secrets)
 .env.local
 .env.production
+
+# Audio written by examples/sdk_example.py
+reply.wav

@@ -99,7 +99,16 @@ script and `frun up` can share one definition.
 
 `run_single_turn` waits for the whole reply. For audio as it is produced — which is what makes
 barge-in possible — use `orchestrator.run_pipeline(audio_chunks, prompt)`, an async iterator of
-PCM chunks. `initialize()` is the expensive call; hold the orchestrator and reuse it.
+PCM chunks, roughly one per sentence. `initialize()` is the expensive call; hold the orchestrator
+and reuse it.
+
+[`examples/sdk_example.py`](examples/sdk_example.py) runs both paths against a real recording and
+writes the reply to a WAV file:
+
+```bash
+frun models pull
+python3 examples/sdk_example.py            # or: python3 examples/sdk_example.py my-recording.wav
+```
 
 ## On your own site
 
@@ -170,10 +179,16 @@ Shared-model scaling for speech-to-text is the next piece of work.
 
 `fusion-runtime` works as an alias for `frun`.
 
-## Documentation
+## Documentation and contact
 
 Everything else — configuration, turn detection, languages, the server API, telemetry, limits,
 GPU setup and deployment — is at **[fusion-runtime.dev/docs](https://fusion-runtime.dev/docs)**.
+
+| | |
+|---|---|
+| Site and docs | **[fusion-runtime.dev](https://fusion-runtime.dev)** |
+| Questions, or anything else | **hello@fusion-runtime.dev** |
+| Security problems | **security@fusion-runtime.dev** — not a public issue, please ([why](CONTRIBUTING.md#security)) |
 
 ## Development
 
