@@ -44,7 +44,7 @@ RUNTIME_STAGES: Dict[str, Tuple[str, ...]] = {
     "llama_cpp": ("llm",),
     "ctranslate2": ("stt",),
     "onnx": ("tts",),
-    "openai_http": ("llm",),  # STT/TTS over HTTP when a customer needs it
+    "openai_http": ("llm",),  # chat only; hosted STT/TTS would be a separate runtime
 }
 
 # Runtimes the agent file accepts but that nothing starts yet. Pointing at a server

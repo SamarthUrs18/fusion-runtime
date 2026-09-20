@@ -6,8 +6,18 @@ Run before and after any change to the engine or a runtime, on the same machine:
     python3 scripts/bench_latency.py            # development profile, 6 measured turns
     python3 scripts/bench_latency.py --turns 10
 
+Any stage can be pointed at another model, which is how one machine compares
+models instead of comparing itself to a different machine:
+
+    python3 scripts/bench_latency.py --profile production
+    python3 scripts/bench_latency.py --profile production --stt hf:Systran/faster-whisper-small
+    python3 scripts/bench_latency.py --llm http://localhost:8000/v1   # vLLM or llama-server
+
+Models must already be downloaded (`frun models pull hf:owner/repo`).
+
 Reference on an 8 GB M1 MacBook Air (development profile, CPU), Sep 2026:
 first-audio median ~660 ms; event loop blocked at most ~25 ms while the LLM streams.
+Reference on an RTX 3090 (production profile), Sep 2026: first-audio median 472 ms.
 Numbers vary by a few tens of ms between runs; close other heavy apps first.
 """
 import argparse
@@ -67,13 +77,29 @@ async def event_loop_lag(llm) -> tuple[float, float, float]:
     return statistics.median(gaps), gaps[int(len(gaps) * 0.95)], gaps[-1]
 
 
-async def main(turns: int) -> None:
-    from fusion_runtime import DEVELOPMENT_CONFIG, PipelineOrchestrator
+def build_config(profile: str, overrides: dict):
+    """A profile with some stages pointed at other models.
+
+    Only the model reference changes; the profile's device and precision
+    settings stay, so a sweep measures the model and not the settings.
+    """
+    from fusion_runtime.config import PROFILES
+
+    config = PROFILES[profile]
+    changed = {stage: getattr(config, stage).model_copy(update={"model": ref})
+               for stage, ref in overrides.items() if ref}
+    return config.model_copy(update=changed) if changed else config
+
+
+async def main(turns: int, profile: str, overrides: dict) -> None:
+    from fusion_runtime import PipelineOrchestrator
 
     from fusion_runtime.telemetry import telemetry
 
     telemetry.configure(format="off")  # numbers only; run `frun up` to see the full event stream
-    orchestrator = PipelineOrchestrator(DEVELOPMENT_CONFIG)
+    config = build_config(profile, overrides)
+    print(f"profile={profile}  stt={config.stt.model}  llm={config.llm.model}  tts={config.tts.model}")
+    orchestrator = PipelineOrchestrator(config)
     await orchestrator.initialize()
     audio = FIXTURE.read_bytes()[44:]  # skip the WAV header
 
@@ -88,4 +114,9 @@ async def main(turns: int) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--turns", type=int, default=6, help="measured turns (after one warm-up turn)")
-    asyncio.run(main(parser.parse_args().turns))
+    parser.add_argument("--profile", default="development", choices=["development", "production", "hybrid"])
+    parser.add_argument("--stt", help="speech-to-text model reference (catalog id, path, hf:owner/repo)")
+    parser.add_argument("--llm", help="language model reference (catalog id, path, hf:owner/repo, or an OpenAI-compatible URL)")
+    parser.add_argument("--tts", help="text-to-speech model reference")
+    args = parser.parse_args()
+    asyncio.run(main(args.turns, args.profile, {"stt": args.stt, "llm": args.llm, "tts": args.tts}))
