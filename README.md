@@ -23,19 +23,19 @@ tokens/sec, interruptions honoured mid-sentence.
 Requires Python 3.11–3.13.
 
 ```bash
-pip install "fusion-runtime[talk]"
+pip install fusion-runtime
 frun models pull          # ~0.9 GB: Whisper tiny, Qwen2.5 0.5B, Kokoro, Silero VAD
 frun up
 ```
 
-Not on PyPI until the first release. Until then, from a clone:
-`pip install -e ".[talk]"`.
+Not on PyPI until the first release. Until then, from a clone: `pip install -e .`.
 
 Then open **http://localhost:8000** and click Talk. That page is served by the runtime itself —
 no build step, nothing to install. You can talk over the agent to interrupt it.
 
-`frun talk` does the same from a terminal. `frun doctor` checks libraries, GPU, models and audio,
-and says how to fix what it finds.
+`frun talk` does the same from a terminal — that one needs a microphone library, so
+`pip install "fusion-runtime[talk]"`. `frun doctor` checks libraries, GPU, models and audio, and
+says how to fix what it finds.
 
 ## An agent is one file
 

@@ -7,7 +7,10 @@
 #     bash scripts/pod_sweep.sh                 # everything
 #     bash scripts/pod_sweep.sh --skip-pull     # models already downloaded
 #
-# Downloads about 9 GB the first time. Results land in sweep-results.txt.
+# It does four things, in order: proves the GPU is actually being used and stops if
+# it isn't, downloads the models, measures Whisper tiny/small/medium and a 7B from
+# another model family, then starts a server and measures one, two and four callers
+# at once. Downloads about 9 GB the first time. Results land in sweep-results.txt.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -71,6 +74,58 @@ run "stt: medium" --stt hf:Systran/faster-whisper-medium
 # A model from another family, to check the claim that the chat template comes
 # out of the GGUF and no model-specific code exists anywhere.
 run "llm: Mistral 7B (different family, same size)" --llm "$SECOND_LLM"
+
+# ---- 4. several callers at once -------------------------------------------------------
+# The one thing the banner says isn't measured. This needs a running server, because
+# concurrency is a property of sessions, not of the pipeline in isolation.
+echo
+echo "== concurrency: starting a server =="
+frun up --host 127.0.0.1 > frun-sweep.log 2>&1 &
+SERVER_PID=$!
+trap 'kill $SERVER_PID 2>/dev/null' EXIT
+
+for i in $(seq 1 90); do
+  if curl -fs http://127.0.0.1:8000/health > /dev/null 2>&1; then
+    echo "server ready after ${i}s"
+    break
+  fi
+  sleep 1
+done
+if ! curl -fs http://127.0.0.1:8000/health > /dev/null 2>&1; then
+  echo "the server never became healthy — see frun-sweep.log" | tee -a "$RESULTS"
+  exit 1
+fi
+
+{ echo; echo "--- concurrency: in-process llama.cpp"; } >> "$RESULTS"
+python3 scripts/concurrency_check.py --callers 1,2,4 --turns 3 \
+  --label "in-process llama.cpp on this GPU" 2>&1 | tee -a "$RESULTS"
+
+# The comparison that makes the claim real. vLLM and llama-server both speak the
+# OpenAI API, which is what the openai_http runtime uses, so pointing the agent at
+# one changes nothing but the URL. Start it yourself and set LLM_URL:
+#
+#   python3 -m vllm.entrypoints.openai.api_server --model Qwen/Qwen2.5-7B-Instruct --port 8080 &
+#   LLM_URL=http://127.0.0.1:8080/v1 bash scripts/pod_sweep.sh --skip-pull
+if [ -n "${LLM_URL:-}" ]; then
+  echo
+  echo "== concurrency: against $LLM_URL =="
+  kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null || true
+  FUSION_LLM_URL="$LLM_URL" frun up --host 127.0.0.1 > frun-sweep-remote.log 2>&1 &
+  SERVER_PID=$!
+  for i in $(seq 1 90); do
+    curl -fs http://127.0.0.1:8000/health > /dev/null 2>&1 && break
+    sleep 1
+  done
+  { echo; echo "--- concurrency: LLM at $LLM_URL"; } >> "$RESULTS"
+  python3 scripts/concurrency_check.py --callers 1,2,4 --turns 3 \
+    --label "LLM served at $LLM_URL" 2>&1 | tee -a "$RESULTS"
+else
+  echo
+  echo "Skipping the served-LLM comparison: set LLM_URL to an OpenAI-compatible endpoint"
+  echo "(vLLM or llama-server) and run again with --skip-pull to get the other half."
+fi
+
+kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null || true
 
 echo
 echo "== done =="
