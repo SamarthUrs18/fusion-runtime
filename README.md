@@ -15,9 +15,9 @@
 **A self-hosted voice agent runtime.** Speech-to-text, the LLM and text-to-speech run together on
 one machine and stream into each other, so a reply starts playing while it's still being generated.
 
-**On an RTX 3090 with a 7B model: about 1 second from the caller finishing speaking to audio
-coming back** — roughly half of it a silence wait you can configure — at 127 tokens/sec, with
-interruptions honoured mid-sentence.
+**On an RTX 3090 with a 7B model: about 490 ms of processing once a turn ends**, or 991 ms
+stopwatched from your last syllable — the difference is a silence wait you can configure. 127
+tokens/sec, interruptions honoured mid-sentence.
 
 ## Quickstart
 
@@ -147,22 +147,27 @@ small + Kokoro on the one card — through the browser client, 21 September 2026
 
 | | Median | Range |
 |---|---|---|
-| **Time to first audio** — you stop speaking, you hear a reply | **991 ms** | 858–1061 |
+| **Processing** — turn ends, audio comes back | **~490 ms** | 288–657 |
+| **Stopwatch from your last syllable** | **991 ms** | 858–1061 |
+| ↳ of which: silence wait before the turn is judged over | ~500 ms | `turns.wait_ms` |
 | Speech-to-text | 119 ms | 58–329 |
 | LLM first token | 27 ms | 20–70 |
-| Text-to-speech, first chunk | 430 ms | 320–509 |
+| First token → first audio (a sentence gets written, then spoken) | 430 ms | 320–509 |
+| Text-to-speech real-time factor | 0.09 | speech is synthesized ~11× faster than real time |
 | LLM tokens/sec | 127 | 106–130 |
 
-**Read the first row carefully, because it is the one that gets misquoted.** 991 ms is what a
-caller lives through. Most of the gap between it and the stages below is the runtime deliberately
-waiting through silence to decide the caller has finished (`turns.wait_ms`, 500 ms by default) —
-a setting, not a speed limit. The stages don't sum to the total because they overlap: transcription
-of what you already said runs during that wait. And the language model is 27 ms of it, which is
-usually the opposite of where people expect a voice agent's time to go.
+**Two numbers, because there are two honest answers.** A stopwatch started at your last syllable
+reads 991 ms. About 500 ms of that is the runtime waiting through silence to decide you've
+finished — which elapses while you're still finishing, so people don't experience it as waiting.
+What a caller feels is closer to the 490 ms of processing. Quote whichever you like, but say
+which one: a voice stack claiming a number under 500 ms is almost always measuring from "we
+decided the caller stopped", not "the caller stopped".
 
-If you see a smaller number quoted for a voice stack, check whether it starts at "the caller
-stopped talking" or at "we decided the caller stopped talking". Those differ by about half a
-second, and only the first one is a caller's experience.
+**The stages don't sum, and that's not sleight of hand.** Transcription of what you already said
+runs during the silence wait. And "first token → first audio" is mostly the language model
+writing a sentence — text-to-speech can't start on half a clause — so it is not a measure of how
+fast Kokoro is. Kokoro's own speed is the real-time factor: 0.09, or about 126 ms of compute for
+1.4 seconds of speech.
 
 Every figure is the runtime's own per-turn telemetry (`frun talk --verbose`, or the browser
 console), so you can reproduce them rather than trusting ours. Barge-in fired on every attempt.

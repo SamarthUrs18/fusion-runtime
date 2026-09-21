@@ -169,7 +169,11 @@
       parts.push("llm " + ms(s.llm_first_token_ms) +
         (s.llm_tokens_per_second ? " · " + Math.round(s.llm_tokens_per_second) + " tok/s" : ""));
     }
-    if (s.tts_first_chunk_ms != null) parts.push("voice " + ms(s.tts_first_chunk_ms));
+    // Not synthesis time: this spans the model writing a whole sentence and then
+    // that sentence being spoken, because speech can't start on half a clause.
+    // Labelling it "voice" made Kokoro look four times slower than it is.
+    if (s.tts_first_chunk_ms != null) parts.push("to speech " + ms(s.tts_first_chunk_ms));
+    if (s.tts_rtf != null) parts.push("synthesis " + s.tts_rtf + "× real time");
     if (!parts.length) return;
     var el = document.createElement("div");
     el.className = "metrics";
