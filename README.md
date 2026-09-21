@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-dark.png">
-    <img alt="fusion-runtime" src="docs/brand/logo-light.png" width="340">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/SamarthUrs18/fusion-runtime/main/docs/brand/logo-dark.png">
+    <img alt="fusion-runtime" src="https://raw.githubusercontent.com/SamarthUrs18/fusion-runtime/main/docs/brand/logo-light.png" width="340">
   </picture>
 </p>
 
@@ -25,20 +25,9 @@ Requires Python 3.11–3.13.
 
 ```bash
 pip install fusion-runtime
-frun models pull          # ~0.9 GB: Whisper tiny, Qwen2.5 0.5B, Kokoro, Silero VAD
-frun up
 ```
 
-Not on PyPI until the first release. Until then, from a clone: `pip install -e .`.
-
-Then open **http://localhost:8000** and click Talk. That page is served by the runtime itself —
-no build step, nothing to install. You can talk over the agent to interrupt it.
-
-`frun talk` does the same from a terminal — that one needs a microphone library, so
-`pip install "fusion-runtime[talk]"`. `frun doctor` checks libraries, GPU, models and audio, and
-says how to fix what it finds.
-
-## An agent is one file
+An agent is one file. This is the whole thing:
 
 ```python
 # agent.py
@@ -47,69 +36,35 @@ from fusion_runtime import Agent, LLM, STT, TTS, Turns
 agent = Agent(
     name="shopkart-orders",
     prompt="You are the order line for ShopKart. Keep answers to one short sentence.",
-    stt=STT("whisper-tiny.en"),
-    llm=LLM("qwen2.5-7b-q4", max_tokens=200),
+    stt=STT("whisper-tiny.en"),          # or "whisper-small" for better accuracy
+    llm=LLM("qwen2.5-0.5b-q4", max_tokens=256),
     tts=TTS("kokoro-v1.0", voice="af_heart"),
     turns=Turns(wait_ms=500, interrupt_after_ms=300),
 )
 ```
 
 ```bash
-frun models pull agent.py     # exactly the models it names
-frun up agent.py --reload
+frun models pull agent.py     # exactly the models it names, nothing else
+frun up agent.py              # add --reload to restart on every edit
 ```
 
-A model is named as a catalog id (`frun models list`), a file path, `hf:owner/repo` for anything
-on Hugging Face, or a URL for an OpenAI-compatible endpoint. Settings the config knows are
-applied; anything else is passed through to that runtime.
+Open **http://localhost:8000** and click Talk. That page is served by the runtime itself — no
+build step, nothing to install. Talk over the agent to interrupt it.
+
+Or from a second terminal: `pip install "fusion-runtime[talk]"` then `frun talk`.
+
+That is the whole loop — one file, two commands, a conversation. `frun up` with no file runs a
+default agent if you just want to hear it work, and `frun doctor` checks libraries, GPU, models
+and audio and says how to fix what it finds.
+
+### Naming models
+
+A model is a catalog id (`frun models list`), a file path, `hf:owner/repo` for anything on
+Hugging Face, or a URL for an OpenAI-compatible endpoint. Settings the config knows are applied;
+anything else is passed through to that runtime.
 
 Secrets never go in the agent file — it names the *variable* holding a key
 (`api_key_env="GROQ_API_KEY"`), so `agent.py` is safe to commit.
-
-## From your own Python
-
-`frun up` is a thin wrapper. The same pipeline runs inside your process, so you can put a voice
-turn behind a queue worker, a test, or a batch job with no server involved:
-
-```python
-import asyncio, wave
-from fusion_runtime import Agent, LLM, STT, TTS, PipelineOrchestrator, run_single_turn
-
-agent = Agent(
-    prompt="You are the order line for ShopKart. Answer in one short sentence.",
-    stt=STT("whisper-tiny.en"),
-    llm=LLM("qwen2.5-0.5b-q4", max_tokens=60),
-    tts=TTS("kokoro-v1.0", voice="af_heart"),
-)
-
-async def main():
-    orchestrator = PipelineOrchestrator(agent.config())
-    await orchestrator.initialize()          # loads the models once; reuse it across turns
-    with wave.open("caller.wav", "rb") as w:
-        audio = w.readframes(w.getnframes())
-    reply = await run_single_turn(orchestrator, audio, system_prompt=agent.prompt)
-    print(f"{len(reply) / 2 / 24000:.2f}s of speech")   # 24 kHz mono 16-bit PCM
-    await orchestrator.shutdown()
-
-asyncio.run(main())
-```
-
-`agent.config()` is the agent resolved against its profile and the environment — the same
-`PipelineConfig` the server builds. `load_agent("agent.py")` returns the `Agent` from a file, so a
-script and `frun up` can share one definition.
-
-`run_single_turn` waits for the whole reply. For audio as it is produced — which is what makes
-barge-in possible — use `orchestrator.run_pipeline(audio_chunks, prompt)`, an async iterator of
-PCM chunks, roughly one per sentence. `initialize()` is the expensive call; hold the orchestrator
-and reuse it.
-
-[`examples/sdk_example.py`](examples/sdk_example.py) runs both paths against a real recording and
-writes the reply to a WAV file:
-
-```bash
-frun models pull
-python3 examples/sdk_example.py            # or: python3 examples/sdk_example.py my-recording.wav
-```
 
 ## On your own site
 
@@ -213,6 +168,13 @@ moves the knee, and how far, is not yet measured.
 | `frun version` | The installed version. `--version` and `-V` work too |
 
 `fusion-runtime` works as an alias for `frun`.
+
+## Using it as a library
+
+`frun up agent.py` covers running an agent. The pipeline can also run inside your own process —
+for a queue worker, a test, or a batch job over recorded calls — with no server involved. See
+[`examples/sdk_example.py`](examples/sdk_example.py), which is runnable, and
+[the docs](https://fusion-runtime.dev/docs#python).
 
 ## Documentation and contact
 
