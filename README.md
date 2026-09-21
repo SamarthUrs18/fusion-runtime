@@ -15,8 +15,9 @@
 **A self-hosted voice agent runtime.** Speech-to-text, the LLM and text-to-speech run together on
 one machine and stream into each other, so a reply starts playing while it's still being generated.
 
-**On an RTX 3090 with a 7B model: 472 ms from the caller finishing to audio coming back**, 105
-tokens/sec, interruptions honoured mid-sentence.
+**On an RTX 3090 with a 7B model: about 900 ms from the caller finishing speaking to audio
+coming back** — roughly half of it a silence wait you can configure — at 122 tokens/sec, with
+interruptions honoured mid-sentence.
 
 ## Quickstart
 
@@ -141,31 +142,56 @@ have working defaults — see the docs.
 
 ## Performance
 
-Measured, not estimated. RTX 3090, Qwen 7B q4 + Whisper tiny.en + Kokoro, all on the one card:
+Measured, not estimated. RTX 3090, Qwen 7B q4 + Whisper + Kokoro on the one card, 12 turns
+through the browser client, 21 September 2026:
 
-| | Median | Range |
+| | Median |
+|---|---|
+| **Time to first audio** — you stop speaking, you hear a reply | **903 ms** |
+| ├ end-of-turn silence wait (`turns.wait_ms`, configurable) | ~492 ms |
+| ├ text-to-speech, first chunk | 331 ms |
+| ├ speech-to-text | 60 ms |
+| └ LLM first token | 21 ms |
+| LLM tokens/sec | 122 |
+
+**Read the first row carefully, because it is the one that gets misquoted.** 903 ms is what a
+caller lives through. Of that, 492 ms is the runtime deliberately waiting through silence to
+decide the caller has finished — a setting, not a speed limit. The processing that follows takes
+about 410 ms, and the language model is 21 ms of it. If you see a smaller number quoted for a
+voice stack, check whether it starts at "the caller stopped talking" or at "we decided the caller
+stopped talking".
+
+Every figure is the runtime's own per-turn telemetry (`frun talk --verbose`, or the browser
+console), so you can reproduce them rather than trusting ours. Barge-in fired on every attempt.
+
+## Several callers at once
+
+Measured on the same 3090, real WebSocket sessions, three turns each:
+
+| Callers | Response, median | Turns/sec |
 |---|---|---|
-| **Response** — caller stops, audio comes back | **472 ms** | 169–706 |
-| LLM tokens/sec | ~105 | 92–122 |
-| Text-to-speech real-time factor | 0.14 | 0.04–0.25 |
+| 1 | ~460 ms | 0.21 |
+| 4 | ~740 ms | 0.55 |
+| 8 | ~4600 ms | 0.69 |
+| 12 | ~7500 ms | 0.74 |
 
-Barge-in fired on six of six attempts. Every figure comes from the runtime's own per-turn
-telemetry (`frun talk --verbose`), so you can reproduce them rather than trusting ours.
+**Four simultaneous callers land in the same range as one**, within run-to-run variance. Past
+that it saturates: throughput plateaus around 0.7 turns/sec, so an extra caller past the knee
+buys queue time rather than capacity. Eight is not a conversation.
 
-A 7B answers about as fast as a 0.5B did on an 8 GB MacBook Air, because the end-of-turn wait and
-the first sentence of speech dominate — not the model. Not yet measured: several callers at once,
-and long calls.
+The bottleneck is one specific thing. At twelve callers the language model's first token takes
+4790 ms of a 5312 ms response, while speech-to-text stays at 76 ms and text-to-speech at 469 ms.
+A single in-process llama.cpp context decodes one reply at a time; the speech stages do not care
+how many callers there are.
 
-## Concurrency
-
-Conversations are fully isolated. For several at once, point the LLM at vLLM or `llama-server` —
-the runtime already speaks to both — since the in-process model decodes one reply at a time:
+So to go past four, move the language model out and leave speech where it is:
 
 ```python
 llm = LLM("http://localhost:8080/v1", model_name="qwen2.5-7b-instruct")
 ```
 
-Shared-model scaling for speech-to-text is the next piece of work.
+vLLM and `llama-server -np N` both speak the API the `openai_http` runtime uses. Whether that
+moves the knee, and how far, is not yet measured.
 
 ## The `frun` CLI
 

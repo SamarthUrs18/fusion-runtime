@@ -80,7 +80,10 @@ run "llm: Mistral 7B (different family, same size)" --llm "$SECOND_LLM"
 # concurrency is a property of sessions, not of the pipeline in isolation.
 echo
 echo "== concurrency: starting a server =="
-frun up --host 127.0.0.1 > frun-sweep.log 2>&1 &
+# The production profile, like every measurement above. Plain `frun up` takes the
+# development one, which wants qwen2.5-0.5b — a model this script never pulls, so
+# the server refused to start and the whole phase was lost.
+FUSION_CONFIG=production frun up --host 127.0.0.1 > frun-sweep.log 2>&1 &
 SERVER_PID=$!
 trap 'kill $SERVER_PID 2>/dev/null' EXIT
 
@@ -92,7 +95,8 @@ for i in $(seq 1 90); do
   sleep 1
 done
 if ! curl -fs http://127.0.0.1:8000/health > /dev/null 2>&1; then
-  echo "the server never became healthy — see frun-sweep.log" | tee -a "$RESULTS"
+  echo "the server never became healthy. Its last words:" | tee -a "$RESULTS"
+  tail -20 frun-sweep.log | tee -a "$RESULTS"
   exit 1
 fi
 
@@ -110,7 +114,7 @@ if [ -n "${LLM_URL:-}" ]; then
   echo
   echo "== concurrency: against $LLM_URL =="
   kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null || true
-  FUSION_LLM_URL="$LLM_URL" frun up --host 127.0.0.1 > frun-sweep-remote.log 2>&1 &
+  FUSION_CONFIG=production FUSION_LLM_URL="$LLM_URL" frun up --host 127.0.0.1 > frun-sweep-remote.log 2>&1 &
   SERVER_PID=$!
   for i in $(seq 1 90); do
     curl -fs http://127.0.0.1:8000/health > /dev/null 2>&1 && break

@@ -33,8 +33,10 @@ def test_every_profile_model_exists_in_catalog():
     # Guards against config pointing at a file nothing downloads (the old 7B bug)
     assert [e.id for e in entries_for_profile(DEVELOPMENT_CONFIG)] == [
         "whisper-tiny.en", "qwen2.5-0.5b-q4", "kokoro-v1.0", "silero-vad"]
+    # Production takes whisper-small; development stays on tiny.en, where a laptop
+    # CPU makes the difference seconds rather than the ~30 ms it costs on a GPU.
     assert [e.id for e in entries_for_profile(PRODUCTION_CONFIG)] == [
-        "whisper-tiny.en", "qwen2.5-7b-q4", "kokoro-v1.0", "silero-vad"]
+        "whisper-small", "qwen2.5-7b-q4", "kokoro-v1.0", "silero-vad"]
 
 
 def test_hybrid_profile_downloads_no_llm():

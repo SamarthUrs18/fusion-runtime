@@ -237,7 +237,12 @@ DEVELOPMENT_CONFIG = PipelineConfig(
 )
 
 PRODUCTION_CONFIG = PipelineConfig(
-    stt=STTConfig(provider=Provider.FASTER_WHISPER, model="tiny.en", device="cuda"),
+    # Whisper small, not tiny.en. Measured on an RTX 3090: small costs about 30 ms
+    # of a ~900 ms turn, and tiny.en misheard four utterances in seven during a live
+    # call — the agent then answers the wrong question, which is the most visible
+    # failure this product has. Development keeps tiny.en, because on a laptop CPU
+    # small is several times slower and that 30 ms becomes seconds.
+    stt=STTConfig(provider=Provider.FASTER_WHISPER, model="whisper-small", device="cuda"),
     llm=LLMConfig(provider=Provider.LLAMA_CPP, model=_LLM_MODEL_7B, n_gpu_layers=-1),
     tts=TTSConfig(provider=Provider.KOKORO, model=_TTS_MODEL),
 )

@@ -26,6 +26,19 @@ local_dir = "stt/tiny.en"
 path = "stt/tiny.en"
 files = { "config.json" = 2317, "model.bin" = 75537502, "tokenizer.json" = 2128466, "vocabulary.txt" = 422309 }
 
+["whisper-small"]
+stage = "stt"
+runtime = "ctranslate2"
+family = "whisper"
+description = "Whisper small, multilingual (the production default)"
+license = "MIT"
+source = "huggingface"
+repo = "Systran/faster-whisper-small"
+revision = "536b0662742c02347bc0e980a01041f333bce120"
+local_dir = "stt/small"
+path = "stt/small"
+files = { "config.json" = 2370, "model.bin" = 483546902, "tokenizer.json" = 2203239, "vocabulary.txt" = 459861 }
+
 ["qwen2.5-0.5b-q4"]
 stage = "llm"
 runtime = "llama_cpp"
