@@ -48,14 +48,22 @@ frun models pull agent.py     # exactly the models it names, nothing else
 frun up agent.py              # add --reload to restart on every edit
 ```
 
-Open **http://localhost:8000** and click Talk. That page is served by the runtime itself — no
-build step, nothing to install. Talk over the agent to interrupt it.
+Then talk to it from a second terminal:
 
-Or from a second terminal: `pip install "fusion-runtime[talk]"` then `frun talk`.
+```bash
+pip install "fusion-runtime[talk]"
+frun talk
+```
 
-That is the whole loop — one file, two commands, a conversation. `frun up` with no file runs a
-default agent if you just want to hear it work, and `frun doctor` checks libraries, GPU, models
-and audio and says how to fix what it finds.
+That is the whole loop — one file, two commands, a conversation. Talk over the agent to
+interrupt it.
+
+The runtime also serves a browser client at **http://localhost:8000** — the same one you would
+embed in a page. It needs a session token when the server has keys configured (`frun token`
+prints a URL with one), so `frun talk` is the shorter path while you are trying things out.
+
+`frun up` with no file runs a default agent if you just want to hear it work, and `frun doctor`
+checks libraries, GPU, models and audio and says how to fix what it finds.
 
 ### Naming models
 

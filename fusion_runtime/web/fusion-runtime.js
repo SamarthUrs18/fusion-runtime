@@ -254,9 +254,12 @@
         reject(new Error("couldn't reach " + socketUrl(self.options, null)));
       };
       ws.onclose = function (event) {
-        if (self.state === "live") {
-          self._setState("closed", event.reason || ("code " + event.code));
-        }
+        var why = self._refusal || event.reason || ("code " + event.code);
+        if (self.state === "live") self._setState("closed", why);
+        // A socket refused before it went live never reached "live", so the
+        // reason would otherwise be dropped entirely.
+        else if (self._refusal) self.emit("error", { message: self._refusal });
+        self._refusal = null;
         self.stop();
       };
       ws.onmessage = function (event) {
@@ -303,6 +306,10 @@
         this.emit("trace", msg);
         break;
       case "error":
+        // Kept so onclose can use it. The server refuses a socket by accepting it,
+        // saying why, and then closing — without this the close handler overwrites
+        // "this server needs a token" with a bare "code 1008".
+        this._refusal = msg.fix ? msg.message + " " + msg.fix : msg.message;
         this.emit("error", { message: msg.message, server: msg });
         break;
       default:
