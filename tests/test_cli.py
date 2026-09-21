@@ -27,6 +27,14 @@ def test_no_args_shows_help():
     assert "Usage" in result.output
 
 
+def test_version_flag_matches_the_subcommand():
+    """`--version` is what people type first; it used to be "No such option"."""
+    for argv in (["--version"], ["-V"], ["version"]):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 0, argv
+        assert result.output.strip() == f"fusion-runtime {package_version()}", argv
+
+
 def test_version_prints_package_version():
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0

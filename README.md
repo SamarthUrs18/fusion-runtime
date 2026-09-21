@@ -205,6 +205,7 @@ moves the knee, and how far, is not yet measured.
 | `frun models list` / `pull` | What's available, and downloading it |
 | `frun key new` / `keys list` / `token` | Keys and browser tokens |
 | `frun doctor` | Checks the machine and says how to fix what's wrong |
+| `frun version` | The installed version. `--version` and `-V` work too |
 
 `fusion-runtime` works as an alias for `frun`.
 
