@@ -27,6 +27,27 @@ def test_no_args_shows_help():
     assert "Usage" in result.output
 
 
+def test_config_falls_back_to_the_environment(monkeypatch):
+    """FUSION_CONFIG was read by the server and then overwritten by this command,
+    so a container started with it quietly ran development: a 0.5B on CPU."""
+    monkeypatch.setattr("uvicorn.run", lambda *a, **k: None)
+    monkeypatch.setattr("fusion_runtime.cli._checks.missing_models", lambda *a, **k: [])
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+
+    monkeypatch.setenv("FUSION_CONFIG", "production")
+    assert runner.invoke(app, ["up"]).exit_code == 0
+    assert os.environ["FUSION_CONFIG"] == "production"
+
+    # an explicit flag still wins over the variable
+    assert runner.invoke(app, ["up", "--config", "development"]).exit_code == 0
+    assert os.environ["FUSION_CONFIG"] == "development"
+
+    # and a value that isn't a profile is refused by name, not ignored
+    monkeypatch.setenv("FUSION_CONFIG", "nonsense")
+    result = runner.invoke(app, ["up"])
+    assert result.exit_code != 0 and "isn't a profile" in result.output
+
+
 def test_version_flag_matches_the_subcommand():
     """`--version` is what people type first; it used to be "No such option"."""
     for argv in (["--version"], ["-V"], ["version"]):
@@ -199,7 +220,7 @@ def _free_port():
 def test_up_starts_server_with_chosen_profile(monkeypatch):
     _all_models_installed(monkeypatch)
     calls = _record_uvicorn(monkeypatch)
-    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")  # restored after the test
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)
     port = _free_port()
     result = runner.invoke(app, ["up", "--port", str(port), "--config", "production"])
     assert result.exit_code == 0, result.output
@@ -215,7 +236,7 @@ def test_up_default_port_suggests_plain_talk(monkeypatch):
     _all_models_installed(monkeypatch)
     _record_uvicorn(monkeypatch)
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
-    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)
     result = runner.invoke(app, ["up"])
     assert "run `frun talk` in another terminal" in result.output
 
@@ -235,7 +256,7 @@ def test_up_warns_when_something_else_holds_the_port_over_ipv6(monkeypatch):
     _record_uvicorn(monkeypatch)
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
     monkeypatch.setattr("fusion_runtime.cli._checks.port_answers_over_ipv6", lambda port: True)
-    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)
     result = runner.invoke(app, ["up"])
     assert result.exit_code == 0
     assert "IPv6" in result.output and "lsof" in result.output
@@ -287,7 +308,7 @@ def test_up_refuses_to_expose_an_unprotected_server(monkeypatch):
     _all_models_installed(monkeypatch)
     _record_uvicorn(monkeypatch)
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
-    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)
     monkeypatch.setenv("FUSION_ACCEPTED_KEYS", "")  # empty, not absent: a .env would fill it in
     result = runner.invoke(app, ["up", "--host", "0.0.0.0"])
     assert result.exit_code == 1
@@ -300,7 +321,7 @@ def test_up_starts_on_a_public_address_once_a_key_is_set(monkeypatch):
     _all_models_installed(monkeypatch)
     _record_uvicorn(monkeypatch)
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
-    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)
     monkeypatch.setenv("FUSION_ACCEPTED_KEYS", new_key())
     result = runner.invoke(app, ["up", "--host", "0.0.0.0"])
     assert result.exit_code == 0, result.output
@@ -314,7 +335,7 @@ def test_up_names_the_variable_mixup_when_only_the_client_key_is_set(monkeypatch
     _all_models_installed(monkeypatch)
     _record_uvicorn(monkeypatch)
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
-    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)
     monkeypatch.setenv("FUSION_ACCEPTED_KEYS", "")
     monkeypatch.setenv("FUSION_API_KEY", new_key())
     result = runner.invoke(app, ["up", "--host", "0.0.0.0"])
@@ -326,7 +347,7 @@ def test_up_says_when_it_is_answering_localhost_only(monkeypatch):
     _all_models_installed(monkeypatch)
     _record_uvicorn(monkeypatch)
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
-    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)
     monkeypatch.setenv("FUSION_ACCEPTED_KEYS", "")  # empty, not absent: a .env would fill it in
     result = runner.invoke(app, ["up"])
     assert "localhost only" in result.output
@@ -416,7 +437,8 @@ def test_up_passes_log_settings_to_the_server(monkeypatch):
     _all_models_installed(monkeypatch)
     calls = _record_uvicorn(monkeypatch)
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
-    for var in ("FUSION_CONFIG", "FUSION_LOG_FORMAT", "FUSION_LOG_LEVEL", "FUSION_LOG_CONTENT"):
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)  # not a legal profile name
+    for var in ("FUSION_LOG_FORMAT", "FUSION_LOG_LEVEL", "FUSION_LOG_CONTENT"):
         monkeypatch.setenv(var, "unset-before-test")
     result = runner.invoke(app, ["up", "--log-format", "json", "--log-level", "debug", "--log-content"])
     assert result.exit_code == 0, result.output
@@ -429,7 +451,8 @@ def test_up_defaults_keep_content_out_of_logs(monkeypatch):
     _all_models_installed(monkeypatch)
     _record_uvicorn(monkeypatch)
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
-    for var in ("FUSION_CONFIG", "FUSION_LOG_FORMAT", "FUSION_LOG_LEVEL", "FUSION_LOG_CONTENT"):
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)  # not a legal profile name
+    for var in ("FUSION_LOG_FORMAT", "FUSION_LOG_LEVEL", "FUSION_LOG_CONTENT"):
         monkeypatch.setenv(var, "unset-before-test")
     runner.invoke(app, ["up"])
     assert (os.environ["FUSION_LOG_FORMAT"], os.environ["FUSION_LOG_CONTENT"]) == ("pretty", "0")
@@ -493,7 +516,7 @@ def test_up_takes_the_agent_from_the_environment(monkeypatch, tmp_path):
     _all_models_installed(monkeypatch)
     calls = _record_uvicorn(monkeypatch)
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
-    monkeypatch.setenv("FUSION_CONFIG", "unset-before-test")
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)
     monkeypatch.setenv("FUSION_AGENT", str(agent))
 
     result = runner.invoke(app, ["up"])

@@ -2,6 +2,7 @@
 import os
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 
 import typer
 
@@ -29,7 +30,10 @@ def up(
         "127.0.0.1", help="Address to listen on. 0.0.0.0 accepts connections from other machines."
     ),
     port: int = typer.Option(8000, help="Port to listen on."),
-    config: Profile = typer.Option(Profile.development, "--config", "-c", help="Which models and devices to use."),
+    config: Optional[Profile] = typer.Option(
+        None, "--config", "-c",
+        help="Which models and devices to use. Defaults to $FUSION_CONFIG, then development.",
+    ),
     log_format: LogFormat = typer.Option(
         LogFormat.pretty, "--log-format",
         help="pretty: readable lines for a terminal. json: one JSON object per line, for log collectors and deployments.",
@@ -70,6 +74,23 @@ def up(
     ),
 ) -> None:
     """Start the voice server. Talk to it from another terminal with `frun talk`."""
+    # The flag wins, then $FUSION_CONFIG, then development. Without this the flag's
+    # default silently beat the variable and then overwrote it, so a container
+    # started with FUSION_CONFIG=production quietly ran the development profile:
+    # a 0.5B model on CPU instead of a 7B on the GPU, with nothing said about it.
+    if config is None:
+        wanted = (os.environ.get("FUSION_CONFIG") or "").strip()
+        if wanted:
+            try:
+                config = Profile(wanted)
+            except ValueError:
+                raise typer.BadParameter(
+                    f"FUSION_CONFIG={wanted!r} isn't a profile. "
+                    f"Use one of: {', '.join(p.value for p in Profile)}",
+                ) from None
+        else:
+            config = Profile.development
+
     from fusion_runtime.cli._checks import missing_models, port_answers_over_ipv6, port_in_use
     from fusion_runtime.config import (
         ACCEPTED_KEYS_ENV,

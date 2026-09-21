@@ -103,8 +103,11 @@ def _summary_line(event: Event) -> str:
         rate = f", {a['llm_tokens_per_second']:.0f} tok/s" if a.get("llm_tokens_per_second") else ""
         pieces.append(f"llm first {ms('llm_first_token_ms')}{rate}")
     if a.get("tts_first_chunk_ms") is not None:
+        # Not synthesis time: it spans the model writing a whole sentence and then
+        # that sentence being spoken, so "tts first" read as Kokoro being four times
+        # slower than it is. rtf beside it is the synthesis rate, which is Kokoro.
         rtf = f", rtf {a['tts_rtf']:.2f}" if a.get("tts_rtf") is not None else ""
-        pieces.append(f"tts first {ms('tts_first_chunk_ms')}{rtf}")
+        pieces.append(f"text→voice {ms('tts_first_chunk_ms')}{rtf}")
     if a.get("interrupted"):
         pieces.append(f"interrupted, stopped in {ms('interruption_stop_ms')}")
     return " · ".join(pieces)

@@ -2,6 +2,8 @@
 import time
 from dataclasses import dataclass, field
 
+from fusion_runtime.telemetry import telemetry
+
 
 @dataclass
 class LatencyBudget:
@@ -17,9 +19,13 @@ class LatencyBudget:
     def record(self, stage: str, ms: float):
         self.spent_ms += ms
         if stage in self.stage_budgets:
-            remaining = self.stage_budgets[stage] - ms
-            if remaining < 0:
-                print(f"⚠️ Stage {stage} exceeded budget by {-remaining:.0f}ms")
+            over = ms - self.stage_budgets[stage]
+            if over > 0:
+                # Never print from library code: a deployment running --log-format json
+                # would get one unstructured line in the middle of its log stream, and
+                # stdout is the server's audio-adjacent hot path, not a debug channel.
+                telemetry.emit("stage.over_budget", level="warning", stage=stage,
+                               over_ms=round(over), budget_ms=self.stage_budgets[stage])
 
 
 @dataclass

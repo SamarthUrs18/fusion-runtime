@@ -220,7 +220,7 @@ def test_up_refuses_a_missing_key_before_starting(monkeypatch):
 def test_up_llm_flags_set_the_endpoint_for_the_server(monkeypatch):
     for name in LLM_ENV:
         monkeypatch.setenv(name, "")  # restored after the test
-    monkeypatch.setenv("FUSION_CONFIG", "unset")
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)
     calls = []
     monkeypatch.setattr("uvicorn.run", lambda *a, **k: calls.append(k))
     monkeypatch.setattr("fusion_runtime.cli._checks.missing_models", lambda *a, **k: [])
@@ -234,7 +234,7 @@ def test_up_llm_flags_set_the_endpoint_for_the_server(monkeypatch):
 def test_up_turn_flags_reach_the_server(monkeypatch):
     for name in LLM_ENV + ("FUSION_TURN_DETECTOR", "FUSION_TURN_WAIT_MS", "FUSION_INTERRUPT_AFTER_MS"):
         monkeypatch.setenv(name, "")
-    monkeypatch.setenv("FUSION_CONFIG", "unset")
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)
     monkeypatch.setattr("uvicorn.run", lambda *a, **k: None)
     monkeypatch.setattr("fusion_runtime.cli._checks.missing_models", lambda *a, **k: [])
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
