@@ -51,7 +51,6 @@ frun up agent.py              # add --reload to restart on every edit
 Then talk to it from a second terminal:
 
 ```bash
-pip install "fusion-runtime[talk]"
 frun talk
 ```
 
