@@ -24,8 +24,11 @@ tokens/sec, interruptions honoured mid-sentence.
 Requires Python 3.11–3.13.
 
 ```bash
-pip install fusion-runtime
+pip install "fusion-runtime[talk]"
 ```
+
+`[talk]` adds the microphone client used below. A server that only serves the browser client
+doesn't need it: `pip install fusion-runtime`.
 
 An agent is one file. This is the whole thing:
 
@@ -57,12 +60,24 @@ frun talk
 That is the whole loop — one file, two commands, a conversation. Talk over the agent to
 interrupt it.
 
-The runtime also serves a browser client at **http://localhost:8000** — the same one you would
-embed in a page. It needs a session token when the server has keys configured (`frun token`
-prints a URL with one), so `frun talk` is the shorter path while you are trying things out.
-
 `frun up` with no file runs a default agent if you just want to hear it work, and `frun doctor`
 checks libraries, GPU, models and audio and says how to fix what it finds.
+
+### In a browser instead
+
+The runtime serves a browser client at **http://localhost:8000** — the same one you would embed
+in your own page.
+
+With no keys configured, open it and click Talk. With keys configured (`FUSION_ACCEPTED_KEYS`),
+a page can't hold a secret, so it needs a short-lived session token:
+
+```bash
+frun token        # prints a URL with a token in it — open that
+```
+
+Tokens are single-use and expire in about a minute. The page is handed its next one over the
+socket it already has, so a conversation keeps going without asking again. If you open the bare
+URL on a server with keys, the connection closes and the page says the token wasn't accepted.
 
 ### Naming models
 
