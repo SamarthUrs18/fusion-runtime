@@ -164,6 +164,11 @@
     var s = msg.summary || {};
     var parts = [];
     if (s.ttfa_ms != null) parts.push("first audio " + ms(s.ttfa_ms));
+    // The largest single item in "first audio", and it used to be invisible here —
+    // so the stages never added up to the total and nobody could see why. It is
+    // the runtime waiting through silence to be sure the caller has finished,
+    // and it is a setting (turns.wait_ms), not a speed limit.
+    if (s.end_of_turn_wait_ms != null) parts.push("silence wait " + ms(s.end_of_turn_wait_ms));
     if (s.stt_transcribe_ms != null) parts.push("speech→text " + ms(s.stt_transcribe_ms));
     if (s.llm_first_token_ms != null) {
       parts.push("llm " + ms(s.llm_first_token_ms) +
@@ -172,8 +177,7 @@
     // Not synthesis time: this spans the model writing a whole sentence and then
     // that sentence being spoken, because speech can't start on half a clause.
     // Labelling it "voice" made Kokoro look four times slower than it is.
-    if (s.tts_first_chunk_ms != null) parts.push("to speech " + ms(s.tts_first_chunk_ms));
-    if (s.tts_rtf != null) parts.push("synthesis " + s.tts_rtf + "× real time");
+    if (s.tts_first_chunk_ms != null) parts.push("text→voice " + ms(s.tts_first_chunk_ms));
     if (!parts.length) return;
     var el = document.createElement("div");
     el.className = "metrics";
