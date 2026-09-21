@@ -24,11 +24,8 @@ tokens/sec, interruptions honoured mid-sentence.
 Requires Python 3.11–3.13.
 
 ```bash
-pip install "fusion-runtime[talk]"
+pip install fusion-runtime
 ```
-
-`[talk]` adds the microphone client used below. A server that only serves the browser client
-doesn't need it: `pip install fusion-runtime`.
 
 An agent is one file. This is the whole thing:
 
@@ -54,6 +51,7 @@ frun up agent.py              # add --reload to restart on every edit
 Then talk to it from a second terminal:
 
 ```bash
+pip install "fusion-runtime[talk]"
 frun talk
 ```
 
