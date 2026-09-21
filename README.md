@@ -15,8 +15,8 @@
 **A self-hosted voice agent runtime.** Speech-to-text, the LLM and text-to-speech run together on
 one machine and stream into each other, so a reply starts playing while it's still being generated.
 
-**On an RTX 3090 with a 7B model: about 900 ms from the caller finishing speaking to audio
-coming back** — roughly half of it a silence wait you can configure — at 122 tokens/sec, with
+**On an RTX 3090 with a 7B model: about 1 second from the caller finishing speaking to audio
+coming back** — roughly half of it a silence wait you can configure — at 127 tokens/sec, with
 interruptions honoured mid-sentence.
 
 ## Quickstart
@@ -142,24 +142,27 @@ have working defaults — see the docs.
 
 ## Performance
 
-Measured, not estimated. RTX 3090, Qwen 7B q4 + Whisper + Kokoro on the one card, 12 turns
-through the browser client, 21 September 2026:
+Measured, not estimated. The production profile as it ships — RTX 3090, Qwen 7B q4 + Whisper
+small + Kokoro on the one card — through the browser client, 21 September 2026:
 
-| | Median |
-|---|---|
-| **Time to first audio** — you stop speaking, you hear a reply | **903 ms** |
-| ├ end-of-turn silence wait (`turns.wait_ms`, configurable) | ~492 ms |
-| ├ text-to-speech, first chunk | 331 ms |
-| ├ speech-to-text | 60 ms |
-| └ LLM first token | 21 ms |
-| LLM tokens/sec | 122 |
+| | Median | Range |
+|---|---|---|
+| **Time to first audio** — you stop speaking, you hear a reply | **991 ms** | 858–1061 |
+| Speech-to-text | 119 ms | 58–329 |
+| LLM first token | 27 ms | 20–70 |
+| Text-to-speech, first chunk | 430 ms | 320–509 |
+| LLM tokens/sec | 127 | 106–130 |
 
-**Read the first row carefully, because it is the one that gets misquoted.** 903 ms is what a
-caller lives through. Of that, 492 ms is the runtime deliberately waiting through silence to
-decide the caller has finished — a setting, not a speed limit. The processing that follows takes
-about 410 ms, and the language model is 21 ms of it. If you see a smaller number quoted for a
-voice stack, check whether it starts at "the caller stopped talking" or at "we decided the caller
-stopped talking".
+**Read the first row carefully, because it is the one that gets misquoted.** 991 ms is what a
+caller lives through. Most of the gap between it and the stages below is the runtime deliberately
+waiting through silence to decide the caller has finished (`turns.wait_ms`, 500 ms by default) —
+a setting, not a speed limit. The stages don't sum to the total because they overlap: transcription
+of what you already said runs during that wait. And the language model is 27 ms of it, which is
+usually the opposite of where people expect a voice agent's time to go.
+
+If you see a smaller number quoted for a voice stack, check whether it starts at "the caller
+stopped talking" or at "we decided the caller stopped talking". Those differ by about half a
+second, and only the first one is a caller's experience.
 
 Every figure is the runtime's own per-turn telemetry (`frun talk --verbose`, or the browser
 console), so you can reproduce them rather than trusting ours. Barge-in fired on every attempt.
