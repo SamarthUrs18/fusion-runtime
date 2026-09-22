@@ -22,9 +22,6 @@ class FakeOrchestrator:
     async def shutdown(self):
         pass
 
-    def get_metrics_summary(self):
-        return {"count": 0}
-
     async def run_pipeline(self, audio_stream, system_prompt, on_event=None, barge_in=None, trace=None):
         async for chunk in audio_stream:
             trace.audio_received(len(chunk))

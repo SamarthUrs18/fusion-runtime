@@ -22,7 +22,7 @@ import contextlib
 import pytest
 from fusion_runtime.config import PipelineConfig
 from fusion_runtime.contract import Capabilities, LLMChunk, TurnDetector, TurnPrediction
-from fusion_runtime.engine import LatencyBudget, PipelineMetrics, PipelineOrchestrator
+from fusion_runtime.engine import PipelineOrchestrator
 from fusion_runtime.engine.barge_in import BargeInState
 from fusion_runtime.engine.conversation import Conversation
 from fusion_runtime.engine.streaming import PartialTranscript
@@ -148,7 +148,7 @@ async def next_token_checkpoints(gen, checkpoints):
 async def first_reply_times(orch, text, checkpoints, turn_state=None):
     turn_state = turn_state or TurnState()
     driver = asyncio.create_task(hold_then_grow_silence(turn_state, hold_ms=0))
-    gen = orch._llm_stage(stt_once_then_stall(text), "system prompt", LatencyBudget(total_ms=500), PipelineMetrics(),
+    gen = orch._llm_stage(stt_once_then_stall(text), "system prompt",
                           turn_state=turn_state)
     try:
         results, task = await next_token_checkpoints(gen, checkpoints)
@@ -223,8 +223,6 @@ class TestTurnTiming:
         gen = orch._llm_stage(
             stt_once_then_stall("Hello there."),
             "system prompt",
-            LatencyBudget(total_ms=500),
-            PipelineMetrics(),
             turn_state=turn_state,
         )
         try:
@@ -251,8 +249,6 @@ class TestTurnTiming:
             async for tok in orch._llm_stage(
                 finite_stt_stream(),
                 "system prompt",
-                LatencyBudget(total_ms=500),
-                PipelineMetrics(),
                 turn_state=turn_state,
             )
         ]
@@ -279,8 +275,6 @@ class TestTurnTiming:
         async for _ in orch._llm_stage(
             growing_stt_stream(),
             "system prompt",
-            LatencyBudget(total_ms=500),
-            PipelineMetrics(),
             turn_state=turn_state,
         ):
             pass
@@ -307,8 +301,6 @@ class TestTurnTiming:
         gen = orch._llm_stage(
             stt_once_then_stall("Hello there."),  # never closes — like a live session
             "system prompt",
-            LatencyBudget(total_ms=500),
-            PipelineMetrics(),
             turn_state=turn_state,
         )
         try:
@@ -351,7 +343,7 @@ class TestInterruptedReplies:
             yield PartialTranscript(text="Actually make it 8 pm.", confidence=1.0, latency_ms=0)
 
         try:
-            tokens = orch._llm_stage(stt(), "sys", LatencyBudget(total_ms=500), PipelineMetrics(),
+            tokens = orch._llm_stage(stt(), "sys",
                                      turn_state=turn_state, barge_in=barge_in)
             segments = [segment async for segment in speakable_segments(tokens)]
         finally:
@@ -389,7 +381,7 @@ class TestResumedTurns:
             yield PartialTranscript(text="My name is Priya.", confidence=1.0, latency_ms=0)
 
         try:
-            async for _ in orch._llm_stage(stt(), "sys", LatencyBudget(total_ms=500), PipelineMetrics(),
+            async for _ in orch._llm_stage(stt(), "sys",
                                            turn_state=turn_state, barge_in=barge_in, conversation=Conversation("sys")):
                 pass
         finally:
@@ -422,7 +414,7 @@ class TestResumedTurns:
             yield PartialTranscript(text="What are your hours?", confidence=1.0, latency_ms=0)
 
         try:
-            async for _ in orch._llm_stage(stt(), "sys", LatencyBudget(total_ms=500), PipelineMetrics(),
+            async for _ in orch._llm_stage(stt(), "sys",
                                            turn_state=turn_state, barge_in=barge_in, conversation=Conversation("sys")):
                 pass
         finally:

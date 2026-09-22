@@ -24,7 +24,7 @@ import contextlib
 import pytest
 from fusion_runtime.config import PipelineConfig, TurnDetectionConfig
 from fusion_runtime.contract import LLMChunk
-from fusion_runtime.engine import LatencyBudget, PipelineMetrics, PipelineOrchestrator
+from fusion_runtime.engine import PipelineOrchestrator
 from fusion_runtime.engine.streaming import PartialTranscript
 from fusion_runtime.engine.text import END_OF_REPLY
 from fusion_runtime.vad import TurnState
@@ -156,8 +156,6 @@ class TestPipelineDiscardsSelfEcho:
         gen = orch._llm_stage(
             stt_stream(),
             "system prompt",
-            LatencyBudget(total_ms=500),
-            PipelineMetrics(),
             turn_state=turn_state,
         )
         task1 = task2 = None

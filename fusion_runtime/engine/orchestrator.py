@@ -4,7 +4,6 @@ import contextlib
 import copy
 import difflib
 import time
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncIterator, List, Optional
 
@@ -22,7 +21,6 @@ from fusion_runtime.contract import (
 )
 from fusion_runtime.engine.barge_in import BargeInState
 from fusion_runtime.engine.conversation import Conversation
-from fusion_runtime.engine.metrics import LatencyBudget, PipelineMetrics
 from fusion_runtime.engine.scheduler import ModelScheduler
 from fusion_runtime.engine.streaming import PartialTranscript, TurnTranscriber, raise_if_error
 from fusion_runtime.engine.text import END_OF_REPLY, REPLY_CUT_OFF, speakable_segments, words
@@ -55,9 +53,6 @@ class PipelineOrchestrator:
         # Batching
         self._batch_queue: asyncio.Queue = asyncio.Queue()
         self._batch_task: Optional[asyncio.Task] = None
-
-        # Metrics
-        self.metrics_history: deque = deque(maxlen=1000)
 
         # What each stage's model resolved to (runtime, format, metadata), filled in by initialize()
         self.resolved_models: dict = {}
@@ -228,9 +223,6 @@ class PipelineOrchestrator:
         conversation; one is created if not given.
         """
         pipeline_start = time.perf_counter()
-        budget = LatencyBudget(total_ms=self.config.target_latency_ms)
-        metrics = PipelineMetrics()
-        metrics.pipeline_start = pipeline_start
 
         def emit(event: dict):
             if on_event is not None:
@@ -270,24 +262,19 @@ class PipelineOrchestrator:
         try:
             # Stage 1: VAD + STT Streaming
             stt_stream = self._stt_stage(
-                self._drain(main_q), budget, metrics, emit, turn_state, stt_reset, trace
+                self._drain(main_q), emit, turn_state, stt_reset, trace
             )
 
             # Stage 2: LLM Streaming (consumes STT partials)
             llm_stream = self._llm_stage(
-                stt_stream, system_prompt, budget, metrics, emit, turn_state, stt_reset, barge_in, trace
+                stt_stream, system_prompt, emit, turn_state, stt_reset, barge_in, trace
             )
 
             # Stage 3: TTS Streaming (consumes LLM tokens)
-            tts_stream = self._tts_stage(llm_stream, budget, metrics, trace)
+            tts_stream = self._tts_stage(llm_stream, trace)
 
             # Yield audio chunks
-            first_audio = True
             async for audio_chunk in tts_stream:
-                now = time.perf_counter()
-                if first_audio:
-                    metrics.tts_first_chunk_ms = (now - pipeline_start) * 1000
-                    first_audio = False
                 turn = trace.responding
                 if turn is not None and "audio_first_sent" not in turn.marks:
                     turn.mark("audio_first_sent")
@@ -315,9 +302,8 @@ class PipelineOrchestrator:
                 await watcher_task
             trace.finish()
 
-        metrics.e2e_latency_ms = (time.perf_counter() - pipeline_start) * 1000
-        self.metrics_history.append(metrics)
-        trace.event("pipeline.done", level="debug", stage="pipeline", duration_ms=metrics.e2e_latency_ms,
+        trace.event("pipeline.done", level="debug", stage="pipeline",
+                    duration_ms=(time.perf_counter() - pipeline_start) * 1000,
                     turns=trace.turn_count)
 
     @staticmethod
@@ -572,16 +558,12 @@ class PipelineOrchestrator:
     async def _stt_stage(
         self,
         audio_stream: AsyncIterator[bytes],
-        budget: LatencyBudget,
-        metrics: PipelineMetrics,
         emit=None,
         turn_state: Optional[TurnState] = None,
         stt_reset: Optional[asyncio.Event] = None,
         trace: Optional[SessionTrace] = None,
     ) -> AsyncIterator[PartialTranscript]:
         """VAD + STT with streaming partial results."""
-        stt_start = time.perf_counter()
-        budget.allocate("stt", 100)
         stt_config = getattr(self.config, "stt", None)
         stt_scheduler = self.scheduler("stt")
         session_id = trace.session_id if trace is not None else None
@@ -616,7 +598,6 @@ class PipelineOrchestrator:
                     # Always partial: the one "is_final" transcript event for a turn is sent by
                     # _llm_stage once turn detection has decided the turn is over.
                     emit({"type": "transcript", "text": result.text, "is_final": False})
-            metrics.stt_latency_ms = (time.perf_counter() - stt_start) * 1000
 
         # Re-transcribe the turn so far as speech arrives (see engine/streaming.py). Turn
         # detection reaches the transcriber through turn_state, to transcribe the last
@@ -753,8 +734,6 @@ class PipelineOrchestrator:
         self,
         stt_stream: AsyncIterator[PartialTranscript],
         system_prompt: str,
-        budget: LatencyBudget,
-        metrics: PipelineMetrics,
         emit=None,
         turn_state: Optional[TurnState] = None,
         stt_reset: Optional[asyncio.Event] = None,
@@ -787,7 +766,6 @@ class PipelineOrchestrator:
             conversation = Conversation.for_context(
                 system_prompt, getattr(llm_config, "n_ctx", None), getattr(llm_config, "max_tokens", None))
         llm_scheduler = self.scheduler("llm")
-        llm_start = time.perf_counter()
         first_token = True
         response_buffer = ""
         # The bot's own most recently spoken text (partial, if it was cut
@@ -1038,7 +1016,6 @@ class PipelineOrchestrator:
             start_next_turn()
 
             messages = conversation.messages_for(transcript)
-            budget.allocate("llm", 150)
 
             if barge_in is not None:
                 barge_in.mark_speaking()
@@ -1116,7 +1093,6 @@ class PipelineOrchestrator:
                         break
 
                     if first_token:
-                        metrics.llm_first_token_ms = (time.perf_counter() - metrics.pipeline_start) * 1000
                         first_token = False
                         if turn is not None:
                             turn.mark("llm_first_token")
@@ -1125,7 +1101,6 @@ class PipelineOrchestrator:
 
                     is_final = llm_result.finish_reason is not None
                     if is_final:
-                        metrics.llm_total_ms = (time.perf_counter() - llm_start) * 1000
                         finish_reason = llm_result.finish_reason
 
                     if llm_result.text:
@@ -1244,14 +1219,10 @@ class PipelineOrchestrator:
     async def _tts_stage(
         self,
         llm_stream: AsyncIterator[str],
-        budget: LatencyBudget,
-        metrics: PipelineMetrics,
         trace: Optional[SessionTrace] = None,
     ) -> AsyncIterator[bytes]:
         """Speak the reply sentence by sentence as the LLM streams it."""
-        tts_start = time.perf_counter()
         first_chunk = True
-        budget.allocate("tts", 100)
         tts_config = getattr(self.config, "tts", None)
         output_rate = getattr(tts_config, "sample_rate", 24000)
         tts_scheduler = self.scheduler("tts")
@@ -1296,12 +1267,10 @@ class PipelineOrchestrator:
                             trace.event("tts.chunk", turn=turn, level="debug", stage="tts", duration_ms=synth_ms,
                                         audio_ms=round(audio_s * 1000))
                     if first_chunk:
-                        metrics.tts_first_chunk_ms = (time.perf_counter() - metrics.pipeline_start) * 1000
                         first_chunk = False
                     yield pcm
             finally:
                 await stream.aclose()
-        metrics.tts_total_ms = (time.perf_counter() - tts_start) * 1000
 
     # ============ Batching Support ============
 
@@ -1334,22 +1303,6 @@ class PipelineOrchestrator:
         # Group by stage
         # This is where cross-request batching happens
         pass
-
-    def get_metrics_summary(self) -> dict:
-        """Get aggregated metrics."""
-        if not self.metrics_history:
-            return {}
-
-        m = self.metrics_history
-        return {
-            "count": len(m),
-            "stt_p50": sorted([x.stt_latency_ms for x in m])[len(m)//2],
-            "llm_first_p50": sorted([x.llm_first_token_ms for x in m])[len(m)//2],
-            "tts_first_p50": sorted([x.tts_first_chunk_ms for x in m])[len(m)//2],
-            "e2e_p50": sorted([x.e2e_latency_ms for x in m])[len(m)//2],
-            "e2e_p99": sorted([x.e2e_latency_ms for x in m])[int(len(m)*0.99)],
-        }
-
 
 def _model_label(resolved) -> str:
     """Short, stable model name for logs and metrics: catalog id, name on the server, or path."""
