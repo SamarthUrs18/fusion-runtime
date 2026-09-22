@@ -37,9 +37,6 @@ class FakeOrchestrator:
     async def shutdown(self):
         pass
 
-    def get_metrics_summary(self):
-        return {"count": 0}
-
     async def run_pipeline(self, audio_stream, system_prompt, on_event=None, barge_in=None, trace=None):
         # Waits on audio that these tests never send, which is the point: without
         # it the session ended the moment it began, handed its slot straight back,

@@ -90,7 +90,6 @@ async def main(source: Path) -> None:
         # chunk. The count tells you how the reply was cut up, not how well it streamed.
         print(f"streamed: {chunks} chunk(s), {total / 2 / TTS_SAMPLE_RATE:.2f}s of speech")
 
-        print(f"metrics: {orchestrator.get_metrics_summary()}")
     finally:
         await orchestrator.shutdown()
 

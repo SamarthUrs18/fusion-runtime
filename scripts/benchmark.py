@@ -131,13 +131,8 @@ async def benchmark_sdk(num_runs: int = 5):
             print(f"  Min:    {min(latencies):.0f}ms")
             print(f"  Max:    {max(latencies):.0f}ms")
 
-            # Show detailed metrics
-            metrics = orchestrator.get_metrics_summary()
-            print("\n  Pipeline breakdown (P50):")
-            print(f"    STT:      {metrics.get('stt_p50', 0):.0f}ms")
-            print(f"    LLM first: {metrics.get('llm_first_p50', 0):.0f}ms")
-            print(f"    TTS first: {metrics.get('tts_first_p50', 0):.0f}ms")
-            print(f"    E2E:       {metrics.get('e2e_p50', 0):.0f}ms")
+            # Per-stage numbers come from the session trace (see scripts/bench_latency.py),
+            # which measures turns; this script only times whole requests.
 
     finally:
         await orchestrator.shutdown()

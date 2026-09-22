@@ -1,7 +1,7 @@
 """Per-call conversation history: sent to the LLM, trimmed to fit, honest about interruptions."""
 from fusion_runtime.config import PipelineConfig
 from fusion_runtime.contract import LLMChunk
-from fusion_runtime.engine import LatencyBudget, PipelineMetrics, PipelineOrchestrator
+from fusion_runtime.engine import PipelineOrchestrator
 from fusion_runtime.engine.conversation import Conversation
 from fusion_runtime.engine.streaming import PartialTranscript
 
@@ -86,7 +86,7 @@ async def test_llm_stage_sends_history_on_later_turns():
         yield PartialTranscript(text=text, confidence=1.0, latency_ms=0)
 
     for text in ("book a table", "for two"):
-        async for _ in orch._llm_stage(one_turn(text), "sys", LatencyBudget(total_ms=500), PipelineMetrics(),
+        async for _ in orch._llm_stage(one_turn(text), "sys",
                                        conversation=conversation):
             pass
 
