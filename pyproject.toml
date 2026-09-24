@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fusion-runtime"
-version = "0.1.0"
+version = "0.1.1"
 description = "Low-latency voice AI inference runtime (STT→LLM→TTS <500ms)"
 authors = [{ name = "Samarth Urs", email = "hello@fusion-runtime.dev" }]
 readme = "README.md"
