@@ -15,8 +15,17 @@ thread decode ahead, even one token, slowed Kokoro down badly on CPU: median
 time to first audio went from ~650 ms to 900-1600 ms (8 GB MacBook Air),
 because llama.cpp's threads keep the cores busy after each token.
 
-Options (from config): n_ctx, n_gpu_layers, n_batch, n_threads, chat_template,
-warmup (default true).
+Options:
+    n_ctx, n_gpu_layers, n_batch, n_threads   from the LLM config
+    chat_template     a Jinja template, for GGUF files without one
+    warmup            decode a few tokens while loading (default true)
+    flash_attn        flash attention: faster, and less memory for the context
+    kv_cache_type     "f16" (default), "q8_0" or "q4_0": the context's memory, halved or
+                      quartered. Quantized caches need flash attention, so it's turned on
+    use_mmap, use_mlock   map the file instead of reading it; pin it in RAM
+    main_gpu, tensor_split  which GPU, or how to split the model across several
+    seed              for repeatable sampling
+    llama_kwargs      anything else, passed to llama_cpp.Llama as it is
 """
 import asyncio
 import threading
@@ -35,6 +44,12 @@ from fusion_runtime.contract import (
 )
 
 _DONE = object()  # end-of-stream marker from the decode thread
+
+# Settings this runtime reads (the resolver refuses others, so a typo doesn't pass silently)
+OPTIONS = ("n_ctx", "n_gpu_layers", "n_batch", "n_threads", "chat_template", "warmup", "flash_attn", "kv_cache_type",
+           "use_mmap", "use_mlock", "main_gpu", "tensor_split", "seed", "llama_kwargs")
+KV_CACHE_TYPES = ("f16", "q8_0", "q4_0")
+_PASSED_AS_IS = ("use_mmap", "use_mlock", "main_gpu", "tensor_split", "seed")
 
 
 class LlamaCppLLM(LLMRuntime):
@@ -59,19 +74,17 @@ class LlamaCppLLM(LLMRuntime):
         path = Path(self.spec.model)
         if not path.is_file():
             raise ModelNotFound(f"GGUF model not found at {path}. Run: frun models pull")
+        kwargs = llama_kwargs(options)
+        kwargs["model_path"] = str(path)
 
         def build():
+            import llama_cpp
             from llama_cpp import Llama
 
-            kwargs: Dict[str, Any] = {
-                "model_path": str(path),
-                "n_ctx": options.get("n_ctx", 4096),
-                "n_gpu_layers": options.get("n_gpu_layers", -1),
-                "n_batch": options.get("n_batch", 512),
-                "verbose": False,
-            }
-            if options.get("n_threads"):
-                kwargs["n_threads"] = options["n_threads"]
+            if "kv_cache_type" in kwargs:
+                cache_type = getattr(llama_cpp, f"GGML_TYPE_{kwargs.pop('kv_cache_type').upper()}")
+                kwargs.setdefault("type_k", cache_type)
+                kwargs.setdefault("type_v", cache_type)
             llm = Llama(**kwargs)
             template = options.get("chat_template")
             if template:
@@ -187,6 +200,41 @@ class LlamaCppLLM(LLMRuntime):
                 yield LLMChunk(text=text)
         finally:
             stop.set()  # finished, failed, or abandoned mid-reply: stop decoding
+
+
+def llama_kwargs(options) -> Dict[str, Any]:
+    """The arguments for llama_cpp.Llama, from the runtime's options. Raises InvalidRequest for bad values."""
+    kwargs: Dict[str, Any] = {
+        "n_ctx": options.get("n_ctx", 4096),
+        "n_gpu_layers": options.get("n_gpu_layers", -1),
+        "n_batch": options.get("n_batch", 512),
+        "verbose": False,
+    }
+    if options.get("n_threads"):
+        kwargs["n_threads"] = options["n_threads"]
+    for name in _PASSED_AS_IS:
+        if options.get(name) is not None:
+            kwargs[name] = options[name]
+    flash_attn = options.get("flash_attn")
+    cache_type = options.get("kv_cache_type")
+    if cache_type is not None:
+        if cache_type not in KV_CACHE_TYPES:
+            raise InvalidRequest(f"kv_cache_type is one of {', '.join(KV_CACHE_TYPES)}, got {cache_type!r}")
+        if cache_type != "f16":
+            if flash_attn is False:
+                raise InvalidRequest(f'kv_cache_type="{cache_type}" needs flash attention; drop flash_attn=False '
+                                     'or use kv_cache_type="f16"')
+            flash_attn = True  # llama.cpp can't quantize the V cache without it
+        kwargs["kv_cache_type"] = cache_type  # turned into type_k / type_v once llama_cpp is imported
+    if flash_attn is not None:
+        kwargs["flash_attn"] = bool(flash_attn)
+    extra = options.get("llama_kwargs") or {}
+    if not isinstance(extra, dict):
+        raise InvalidRequest(f"llama_kwargs takes a dict of llama_cpp.Llama arguments, got {type(extra).__name__}")
+    if "model_path" in extra:
+        raise InvalidRequest("llama_kwargs can't set model_path; name the model instead")
+    kwargs.update(extra)
+    return kwargs
 
 
 def _user(text: str):

@@ -25,6 +25,10 @@ from fusion_runtime.contract import (
     Transcript,
 )
 
+# Settings this runtime reads (the resolver refuses others, so a typo doesn't pass silently)
+OPTIONS = ("device", "compute_type", "language", "beam_size", "vad_filter", "no_speech_threshold", "cpu_threads",
+           "warmup")
+
 WHISPER_SAMPLE_RATE = 16000
 
 # Whisper invents text when it hears almost nothing — usually phrases from the

@@ -19,6 +19,12 @@ Detection by format, never by model name:
     http(s):// URL                → openai_http
     safetensors folder            → not run in process: serve it with vLLM and point at its URL
 
+A model served by vLLM, SGLang or llama-server is named with that runtime in
+front ("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ"). It resolves to openai_http at
+the server's usual local address (`url=` for another), and the model name on
+the server defaults to the repo id, which is what those servers use. You
+start the server; fusion-runtime doesn't yet.
+
 An explicit `runtime` (a built-in name, a plugin name or "module:Class")
 skips detection; a reference that isn't a local file is then handed to that
 runtime unchanged, so plugins can take any kind of model reference.
@@ -52,12 +58,26 @@ RUNTIME_STAGES: Dict[str, Tuple[str, ...]] = {
     "openai_http": ("llm",),  # chat only; hosted STT/TTS would be a separate runtime
 }
 
-# Runtimes the agent file accepts but that nothing starts yet. Pointing at a server
-# you run yourself works today and is the same protocol, so say that.
-PLANNED_RUNTIMES = {
-    "vllm": "vLLM",
-    "sglang": "SGLang",
-    "llama_server": "llama-server",
+# Servers named as a runtime: they speak the OpenAI API, so openai_http talks to them.
+# (display name, the address `<server> serve` listens on by default)
+SERVED_RUNTIMES: Dict[str, Tuple[str, str]] = {
+    "vllm": ("vLLM", "http://localhost:8000/v1"),
+    "sglang": ("SGLang", "http://localhost:30000/v1"),
+    "llama_server": ("llama-server", "http://localhost:8080/v1"),
+}
+
+# Where each built-in runtime lists the settings it reads (OPTIONS). Plugins aren't checked.
+_RUNTIME_OPTIONS = {
+    "llama_cpp": "fusion_runtime.runtimes.llama_cpp.llm",
+    "openai_http": "fusion_runtime.runtimes.openai_http.llm",
+    "ctranslate2": "fusion_runtime.runtimes.ctranslate2.stt",
+    "onnx": "fusion_runtime.runtimes.onnx.tts",
+}
+# Settings for starting an inference server, which fusion-runtime doesn't do yet
+_SERVER_LAUNCH_SETTINGS = {
+    "gpu_memory": "--gpu-memory-utilization 0.6", "gpu_memory_utilization": "--gpu-memory-utilization 0.6",
+    "max_model_len": "--max-model-len 4096", "max_callers": "--max-num-seqs 16", "max_num_seqs": "--max-num-seqs 16",
+    "quantization": "--quantization awq", "tensor_parallel_size": "--tensor-parallel-size 2", "extra_args": "...",
 }
 
 _SPLIT_PART = re.compile(r"^(?P<stem>.+)-(?P<part>\d{5})-of-(?P<total>\d{5})\.gguf$")
@@ -114,13 +134,8 @@ def resolve(
         root = model_dir()
     catalog = load_catalog() if catalog is None else catalog
 
-    if runtime in PLANNED_RUNTIMES:
-        name = PLANNED_RUNTIMES[runtime]
-        raise UnsupportedModel(
-            f"fusion-runtime doesn't start {name} for you yet. Start it yourself and point the agent at it:\n"
-            f'    llm=LLM("http://localhost:8000/v1", model_name="{ref}")\n'
-            f"It speaks the OpenAI API, which is what the openai_http runtime uses."
-        )
+    if runtime in SERVED_RUNTIMES:
+        return _served(stage, runtime, ref, family, options)
     if ref.startswith(("http://", "https://")):
         chosen = runtime or "openai_http"
         _check_runtime_stage(chosen, stage, ref)
@@ -156,9 +171,6 @@ def resolve_stage_config(stage: Stage, stage_config, *, catalog=None, root: Opti
     become runtime options; API keys never do (only the name of the
     environment variable holding one).
     """
-    from fusion_runtime.config import Provider
-
-    provider = stage_config.provider
     settings = stage_config.model_dump(
         exclude={"provider", "model", "api_key", "api_base", "runtime", "family", "options"})
     settings = {k: v for k, v in settings.items() if v is not None}
@@ -167,8 +179,54 @@ def resolve_stage_config(stage: Stage, stage_config, *, catalog=None, root: Opti
     ref = stage_config.model
 
     if stage_config.runtime:
-        return resolve(stage, ref, runtime=stage_config.runtime, family=family, options=settings,
-                       catalog=catalog, root=root)
+        resolved = resolve(stage, ref, runtime=stage_config.runtime, family=family, options=settings,
+                           catalog=catalog, root=root)
+        check_options(resolved.spec, stage_config.options, type(stage_config).model_fields,
+                      served_by=stage_config.runtime if stage_config.runtime in SERVED_RUNTIMES else None)
+        return resolved
+    resolved = _resolve_provider(stage, stage_config, ref, family, settings, catalog, root)
+    check_options(resolved.spec, stage_config.options, type(stage_config).model_fields)
+    return resolved
+
+
+def check_options(spec: ModelSpec, given: Mapping[str, Any], config_fields=(), served_by: Optional[str] = None) -> None:
+    """Refuse settings a built-in runtime doesn't read, instead of ignoring them.
+
+    `given` is what the agent or config passed beyond the stage's own config fields;
+    a misspelt setting (n_gpu_layer=20) would otherwise be dropped without a word.
+    """
+    module = _RUNTIME_OPTIONS.get(spec.runtime)
+    if module is None:
+        return  # a plugin knows its own settings
+    import importlib
+
+    source = importlib.import_module(module)
+    family_options = getattr(source, "FAMILY_OPTIONS", None)
+    if family_options is not None and spec.family not in family_options:
+        return  # a family we don't know may read settings of its own
+    runtime_options = set(source.OPTIONS) | set((family_options or {}).get(spec.family, ()))
+    known = runtime_options | set(config_fields) | ({"url"} if served_by else set())
+    unknown = [name for name in given if name not in known]
+    if not unknown:
+        return
+    name = unknown[0]
+    where = SERVED_RUNTIMES[served_by][0] if served_by else spec.runtime
+    if name in _SERVER_LAUNCH_SETTINGS:
+        server = SERVED_RUNTIMES[served_by][0] if served_by else "the model server"
+        raise InvalidRequest(
+            f"{name} is a setting for starting {server}, and fusion-runtime doesn't start it yet. "
+            f"Pass it when you start the server (vllm serve ... {_SERVER_LAUNCH_SETTINGS[name]}); "
+            "see the README's single-GPU recipe")
+    close = difflib.get_close_matches(name, sorted(known), n=1)
+    hint = f" Did you mean {close[0]!r}?" if close else f" It reads: {', '.join(sorted(runtime_options))}."
+    raise InvalidRequest(f"{where} has no setting {name!r}.{hint}")
+
+
+def _resolve_provider(stage, stage_config, ref, family, settings, catalog, root) -> ResolvedModel:
+    """The older form: a `provider` instead of a runtime."""
+    from fusion_runtime.config import Provider
+
+    provider = stage_config.provider
     if stage == "llm" and (provider == Provider.OPENAI or ref.startswith(("http://", "https://"))):
         if ref.startswith(("http://", "https://")):
             url = ref
@@ -345,6 +403,35 @@ def _onnx(stage, path: Path, runtime, family, options, source) -> ResolvedModel:
             "Set the model family (for example family=\"kokoro\")"
         )
     return ResolvedModel(ModelSpec(stage, chosen, str(path), family, options), source, "onnx", voices=voices)
+
+
+def _served(stage, runtime: str, ref: str, family, options) -> ResolvedModel:
+    """A model on a vLLM / SGLang / llama-server you started: openai_http at its address."""
+    name, default_url = SERVED_RUNTIMES[runtime]
+    if stage != "llm":
+        raise UnsupportedModel(f"{name} serves language models, not the {stage} stage")
+    options = dict(options)
+    url = options.pop("url", None)
+    if ref.startswith(("http://", "https://")):
+        url, model_name = url or ref, options.get("model_name")
+        if not model_name:
+            raise InvalidRequest(f"set the model's name on the {name} server (model_name=...) for {ref}")
+    else:
+        url = url or default_url
+        # vLLM and SGLang serve a model under the id it was loaded by (the repo id, unless
+        # --served-model-name says otherwise); llama-server answers to any name.
+        model_name = options.get("model_name") or _served_model_name(ref)
+    if not url.startswith(("http://", "https://")):
+        raise InvalidRequest(f"url must be the {name} server's address, like {default_url}; got {url!r}")
+    options["model_name"] = model_name
+    return ResolvedModel(ModelSpec("llm", "openai_http", url, family, options), "url", "http",
+                         metadata={"served_by": name})
+
+
+def _served_model_name(ref: str) -> str:
+    if ref.startswith("hf:"):
+        ref = ref[3:]
+    return ref.split("@", 1)[0]
 
 
 def _check_runtime_stage(runtime: str, stage: str, ref: str) -> None:

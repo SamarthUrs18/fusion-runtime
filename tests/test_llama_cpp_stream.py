@@ -154,3 +154,26 @@ async def test_tool_requests_are_rejected_with_where_to_run_tools_instead():
 
     with pytest.raises(InvalidRequest, match="can't call tools.*llama-server --jinja"):
         await collect(make_llm(FakeLlama()), tools=(ToolSpec("lookup_order", "Find an order", {"type": "object"}),))
+
+
+def test_memory_settings_become_llama_arguments():
+    from fusion_runtime.contract import InvalidRequest
+    from fusion_runtime.runtimes.llama_cpp.llm import llama_kwargs
+
+    plain = llama_kwargs({})
+    assert plain == {"n_ctx": 4096, "n_gpu_layers": -1, "n_batch": 512, "verbose": False}
+
+    tuned = llama_kwargs({"n_ctx": 8192, "kv_cache_type": "q8_0", "use_mlock": True, "seed": 7,
+                          "llama_kwargs": {"n_ubatch": 256}})
+    # A quantized KV cache needs flash attention, so it comes with it
+    assert tuned["kv_cache_type"] == "q8_0" and tuned["flash_attn"] is True
+    assert tuned["use_mlock"] is True and tuned["seed"] == 7 and tuned["n_ubatch"] == 256
+    assert llama_kwargs({"kv_cache_type": "f16"}).get("flash_attn") is None
+    assert llama_kwargs({"flash_attn": False})["flash_attn"] is False
+
+    for options, message in (({"kv_cache_type": "q5"}, "one of f16, q8_0, q4_0"),
+                             ({"kv_cache_type": "q4_0", "flash_attn": False}, "needs flash attention"),
+                             ({"llama_kwargs": ["n_ubatch"]}, "takes a dict"),
+                             ({"llama_kwargs": {"model_path": "x"}}, "can't set model_path")):
+        with pytest.raises(InvalidRequest, match=message):
+            llama_kwargs(options)

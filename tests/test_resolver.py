@@ -333,21 +333,66 @@ def test_a_repo_written_without_the_hf_prefix_says_so(tmp_path):
         resolve("llm", "qwen2.5-0.5b", catalog=load_catalog(), root=tmp_path)
 
 
-def test_vllm_says_it_is_not_managed_yet_and_how_to_use_it(tmp_path):
-    with pytest.raises(UnsupportedModel, match=r"(?s)doesn't start vLLM for you yet.*http://localhost:8000/v1"):
-        resolve("llm", "hf:org/model", runtime="vllm", catalog=empty_catalog(), root=tmp_path)
-    with pytest.raises(UnsupportedModel, match="llama-server"):
-        resolve("llm", "./model.gguf", runtime="llama_server", catalog=empty_catalog(), root=tmp_path)
-
-
-def test_sglang_says_how_to_use_it_rather_than_model_not_found():
-    """Any server speaking the OpenAI API works today; what we don't do is start
-    one. Without this the reference is read as a model name and the error talks
-    about a missing download."""
+def test_a_served_model_resolves_to_its_server_under_its_repo_id(tmp_path):
+    """vllm:/sglang:/llama_server: in front of a model means "I started that server": talk to it
+    over the OpenAI API at its usual address, asking for the model by the id it was loaded with."""
     from fusion_runtime.agent import LLM
-    from fusion_runtime.contract import UnsupportedModel
 
-    runtime, ref = LLM("sglang:hf:org/model").split()
-    assert runtime == "sglang"
-    with pytest.raises(UnsupportedModel, match="doesn't start SGLang for you yet"):
-        resolve("llm", ref, runtime=runtime)
+    runtime, ref = LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ@main").split()
+    vllm = resolve("llm", ref, runtime=runtime, catalog=empty_catalog(), root=tmp_path)
+    assert (vllm.spec.runtime, vllm.spec.model) == ("openai_http", "http://localhost:8000/v1")
+    assert vllm.spec.options["model_name"] == "Qwen/Qwen2.5-7B-Instruct-AWQ"
+    assert vllm.metadata["served_by"] == "vLLM"
+
+    sglang = resolve("llm", "hf:org/model", runtime="sglang", options={"url": "http://gpu:30000/v1"},
+                     catalog=empty_catalog(), root=tmp_path)
+    assert sglang.spec.model == "http://gpu:30000/v1" and "url" not in sglang.spec.options
+    assert resolve("llm", "./model.gguf", runtime="llama_server", catalog=empty_catalog(),
+                   root=tmp_path).spec.model == "http://localhost:8080/v1"
+
+    by_url = resolve("llm", "http://gpu:8000/v1", runtime="vllm", options={"model_name": "m"},
+                     catalog=empty_catalog(), root=tmp_path)
+    assert by_url.spec.model == "http://gpu:8000/v1"
+    with pytest.raises(InvalidRequest, match="model_name"):
+        resolve("llm", "http://gpu:8000/v1", runtime="vllm", catalog=empty_catalog(), root=tmp_path)
+    with pytest.raises(UnsupportedModel, match="serves language models"):
+        resolve("stt", "hf:org/whisper", runtime="vllm", catalog=empty_catalog(), root=tmp_path)
+
+
+def test_an_agent_names_a_served_model_and_keeps_its_settings(tmp_path, monkeypatch):
+    from fusion_runtime.agent import LLM, Agent
+
+    monkeypatch.delenv("FUSION_LLM_URL", raising=False)
+    config = Agent(llm=LLM("sglang:hf:org/model", max_tokens=100, extra_body={"top_k": 20})).config()
+    resolved = resolve_stage_config("llm", config.llm, catalog=empty_catalog(), root=tmp_path)
+    assert resolved.spec.model == "http://localhost:30000/v1"
+    assert resolved.spec.options["max_tokens"] == 100 and resolved.spec.options["extra_body"] == {"top_k": 20}
+
+
+def test_unknown_settings_are_refused_with_the_likely_one(tmp_path, monkeypatch):
+    from fusion_runtime.agent import LLM, STT, Agent
+
+    monkeypatch.delenv("FUSION_LLM_URL", raising=False)
+    gguf_file = tmp_path / "m.gguf"
+    gguf_file.write_bytes(b"")
+
+    def resolve_llm(llm):
+        return resolve_stage_config("llm", Agent(llm=llm).config().llm, catalog=empty_catalog(), root=tmp_path)
+
+    with pytest.raises(InvalidRequest, match="has no setting 'n_gpu_layer'.*Did you mean 'n_gpu_layers'"):
+        resolve_llm(LLM("http://x/v1", model_name="m", n_gpu_layer=20))
+    with pytest.raises(InvalidRequest, match="has no setting 'extra_bdy'.*'extra_body'"):
+        resolve_llm(LLM("http://x/v1", model_name="m", extra_bdy={}))
+    # Server launch settings get pointed at the server's own flags
+    with pytest.raises(InvalidRequest, match=r"gpu_memory is a setting for starting vLLM.*--gpu-memory-utilization"):
+        resolve_llm(LLM("vllm:hf:org/model", gpu_memory=0.6))
+    whisper = tmp_path / "whisper"
+    whisper.mkdir()
+    (whisper / "model.bin").write_bytes(b"")
+    (whisper / "config.json").write_text('{"lang_ids": [1]}')
+    with pytest.raises(InvalidRequest, match="beam_sise.*Did you mean 'beam_size'"):
+        resolve_stage_config("stt", Agent(stt=STT(str(whisper), beam_sise=2)).config().stt,
+                             catalog=empty_catalog(), root=tmp_path)
+    # Settings the runtime reads pass, and plugins take whatever they take
+    resolve_llm(LLM("vllm:hf:org/model", url="http://gpu:8000/v1", timeout_s=5))
+    resolve_llm(LLM("my-model", runtime="my_pkg.llm:Custom", anything=1))

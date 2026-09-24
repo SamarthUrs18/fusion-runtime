@@ -24,6 +24,10 @@ from fusion_runtime.contract import (
     UnsupportedModel,
 )
 
+# Settings this runtime reads, and the ones each family adds (the resolver refuses others)
+OPTIONS = ("voice", "speed", "language", "voices_path", "warmup", "max_concurrency")
+FAMILY_OPTIONS = {"kokoro": ()}
+
 FAMILIES = {
     "kokoro": "fusion_runtime.runtimes.onnx.kokoro:KokoroFamily",
 }
