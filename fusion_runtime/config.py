@@ -300,9 +300,13 @@ def with_env_overrides(config: PipelineConfig, environ=None) -> PipelineConfig:
     model = env.get(LLM_MODEL_ENV)
     if not model:
         raise ValueError(f"{LLM_URL_ENV} is set; also set {LLM_MODEL_ENV} to the model's name on that server")
+    from fusion_runtime.runtimes.openai_http.llm import OPTIONS as ENDPOINT_OPTIONS
+
     llm = config.llm.model_copy(update={
         "provider": Provider.OPENAI, "runtime": None, "api_base": url, "model": model,
         "api_key_env": env.get(LLM_KEY_ENV_ENV) or None,
+        # Settings for the runtime this replaces (flash_attn for llama.cpp, say) don't apply to an endpoint
+        "options": {k: v for k, v in config.llm.options.items() if k in ENDPOINT_OPTIONS},
     })
     return config.model_copy(update={"llm": llm})
 

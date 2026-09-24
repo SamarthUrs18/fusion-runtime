@@ -396,3 +396,13 @@ def test_unknown_settings_are_refused_with_the_likely_one(tmp_path, monkeypatch)
     # Settings the runtime reads pass, and plugins take whatever they take
     resolve_llm(LLM("vllm:hf:org/model", url="http://gpu:8000/v1", timeout_s=5))
     resolve_llm(LLM("my-model", runtime="my_pkg.llm:Custom", anything=1))
+
+
+def test_pointing_the_llm_elsewhere_by_env_drops_the_old_runtime_s_settings(tmp_path):
+    from fusion_runtime.agent import LLM, Agent
+
+    agent = Agent(llm=LLM("qwen2.5-0.5b-q4", flash_attn=True, extra_body={"top_k": 5}))
+    config = agent.config({"FUSION_LLM_URL": "http://gpu:8000/v1", "FUSION_LLM_MODEL": "m"})
+    resolved = resolve_stage_config("llm", config.llm, catalog=empty_catalog(), root=tmp_path)
+    assert resolved.spec.runtime == "openai_http"
+    assert "flash_attn" not in resolved.spec.options and resolved.spec.options["extra_body"] == {"top_k": 5}
