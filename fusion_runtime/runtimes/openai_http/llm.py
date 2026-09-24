@@ -14,12 +14,19 @@ Options:
     timeout_s     connect/read timeout (default 30)
     verify        check the endpoint and key while loading (default true)
     max_concurrency  requests in flight at once (default 16)
+    extra_body    extra fields merged into every request body, for server-specific
+                  sampling settings (vLLM's top_k or repetition_penalty, for example)
+
+Tool calling uses the OpenAI format: tools go out as `tools`, and the calls
+stream back in pieces (`delta.tool_calls`), which are joined here and handed
+over whole on the last chunk. vLLM needs `--enable-auto-tool-choice` and a
+`--tool-call-parser` for the model; llama-server needs `--jinja`.
 """
 import asyncio
 import json
 import os
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -37,7 +44,11 @@ from fusion_runtime.contract import (
     Overloaded,
     RateLimited,
     RuntimeFailure,
+    ToolCall,
 )
+
+# Settings this runtime reads, besides the LLM config's own fields
+OPTIONS = ("model_name", "api_key_env", "timeout_s", "verify", "max_concurrency", "extra_body")
 
 
 @dataclass
@@ -102,7 +113,8 @@ class OpenAIHTTPLLM(LLMRuntime):
 
     @property
     def capabilities(self) -> Capabilities:
-        return Capabilities(max_concurrency=self.spec.options.get("max_concurrency", 16), decodes_on_demand=False)
+        return Capabilities(max_concurrency=self.spec.options.get("max_concurrency", 16), decodes_on_demand=False,
+                            tools=True)
 
     def health(self) -> Health:
         return self._health
@@ -137,13 +149,12 @@ class OpenAIHTTPLLM(LLMRuntime):
     async def generate(self, request: LLMRequest) -> AsyncIterator[LLMChunk]:
         if not request.messages:
             raise InvalidRequest("messages must not be empty")
-        if request.tools:
-            raise InvalidRequest("tool calling isn't supported by the openai_http runtime yet")
         request.cancel.raise_if_cancelled()
         if self.client is None:
             raise RuntimeFailure("runtime not loaded")
 
         body: Dict = {
+            **(self.spec.options.get("extra_body") or {}),
             "model": self.model_name,
             "messages": [_message(m) for m in request.messages],
             "max_tokens": request.max_tokens,
@@ -153,6 +164,10 @@ class OpenAIHTTPLLM(LLMRuntime):
         }
         if request.stop:
             body["stop"] = list(request.stop)
+        if request.tools:
+            body["tools"] = [{"type": "function", "function": {
+                "name": t.name, "description": t.description, "parameters": t.parameters}} for t in request.tools]
+            body["tool_choice"] = "auto"
 
         loop = asyncio.get_running_loop()
         try:
@@ -169,6 +184,7 @@ class OpenAIHTTPLLM(LLMRuntime):
                     await response.aread()
                     raise _status_error(response, self.spec.model)
                 produced = 0
+                calls = _ToolCallParts()
                 async for line in response.aiter_lines():
                     if request.cancel.cancelled:
                         break
@@ -187,18 +203,20 @@ class OpenAIHTTPLLM(LLMRuntime):
                     if not choices:
                         continue
                     choice = choices[0]
-                    text = (choice.get("delta") or {}).get("content") or ""
+                    delta = choice.get("delta") or {}
+                    text = delta.get("content") or ""
+                    if delta.get("tool_calls"):
+                        calls.add(delta["tool_calls"], self.spec.model)
                     if text:
                         produced += 1
                     if choice.get("finish_reason"):
-                        yield LLMChunk(text=text, finish_reason=choice["finish_reason"],
-                                       usage={"completion_tokens": produced})
+                        yield _last_chunk(text, choice["finish_reason"], calls, produced)
                         return
                     if text:
                         yield LLMChunk(text=text)
                 if request.cancel.cancelled:
                     raise Cancelled(request.cancel.reason or "cancelled")
-                yield LLMChunk(finish_reason="stop", usage={"completion_tokens": produced})
+                yield _last_chunk("", "stop", calls, produced)
         except AdapterError:
             raise
         except (httpx.HTTPError, httpx.StreamError) as e:
@@ -217,13 +235,57 @@ def _client(url: str, api_key_env: Optional[str], timeout_s: float,
                              timeout=httpx.Timeout(timeout_s, connect=min(timeout_s, 5.0)))
 
 
-def _message(message) -> Dict[str, str]:
-    out = {"role": message.role, "content": message.content}
+def _message(message) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"role": message.role, "content": message.content}
     if message.name:
         out["name"] = message.name
     if message.tool_call_id:
         out["tool_call_id"] = message.tool_call_id
+    if message.tool_calls:
+        out["content"] = message.content or None  # the OpenAI format: no text, only calls
+        out["tool_calls"] = [{"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}}
+                             for c in message.tool_calls]
     return out
+
+
+class _ToolCallParts:
+    """Tool calls arrive in pieces: the id and name first, then the arguments a few characters at a time.
+
+    Pieces are matched by `index`. Servers that send each call whole (Ollama) fit the same shape.
+    """
+
+    def __init__(self) -> None:
+        self.parts: Dict[int, Dict[str, str]] = {}
+
+    def add(self, deltas, url: str) -> None:
+        if not isinstance(deltas, list):
+            raise RuntimeFailure(f"{url} sent tool calls in an unexpected shape")
+        for position, delta in enumerate(deltas):
+            if not isinstance(delta, dict):
+                raise RuntimeFailure(f"{url} sent tool calls in an unexpected shape")
+            index = delta.get("index", position)
+            part = self.parts.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            function = delta.get("function") or {}
+            if delta.get("id"):
+                part["id"] = delta["id"]
+            if function.get("name"):
+                part["name"] += function["name"]
+            arguments = function.get("arguments")
+            if isinstance(arguments, (dict, list)):  # some servers send parsed JSON instead of text
+                arguments = json.dumps(arguments)
+            if arguments:
+                part["arguments"] += arguments
+
+    def complete(self) -> Tuple[ToolCall, ...]:
+        return tuple(ToolCall(id=part["id"] or f"call_{index}", name=part["name"], arguments=part["arguments"] or "{}")
+                     for index, part in sorted(self.parts.items()) if part["name"])
+
+
+def _last_chunk(text: str, finish_reason: str, calls: _ToolCallParts, produced: int) -> LLMChunk:
+    tool_calls = calls.complete()
+    # Some servers finish a tool call with "stop" (older vLLM and llama-server builds); the calls are what count
+    return LLMChunk(text=text, tool_calls=tool_calls, finish_reason="tool_calls" if tool_calls else finish_reason,
+                    usage={"completion_tokens": produced})
 
 
 def _status_error(response: httpx.Response, url: str) -> AdapterError:

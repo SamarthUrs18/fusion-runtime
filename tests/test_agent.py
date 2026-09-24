@@ -103,9 +103,18 @@ def test_empty_prompt_is_rejected():
         Agent(prompt="   ")
 
 
-def test_tools_say_they_are_coming():
-    with pytest.raises(AgentError, match="tool calling isn't supported yet"):
+def test_tools_become_tool_objects_and_bad_ones_are_explained():
+    def order_status(order_id: str) -> str:
+        """Look up where an order is."""
+        return "shipped"
+
+    agent = Agent(prompt="hi", tools=[order_status])
+    assert [t.name for t in agent.tools] == ["order_status"]
+    assert agent.describe()["tools"] == ["order_status"]
+    with pytest.raises(AgentError, match="tool name"):
         Agent(prompt="hi", tools=[lambda: None])
+    with pytest.raises(AgentError, match="two tools are named"):
+        Agent(prompt="hi", tools=[order_status, order_status])
 
 
 def test_bad_timing_values_are_rejected():

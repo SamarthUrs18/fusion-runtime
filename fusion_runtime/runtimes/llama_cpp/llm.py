@@ -102,7 +102,9 @@ class LlamaCppLLM(LLMRuntime):
         if not request.messages:
             raise InvalidRequest("messages must not be empty")
         if request.tools:
-            raise InvalidRequest("tool calling isn't supported by the llama_cpp runtime yet")
+            raise InvalidRequest(
+                "the llama_cpp runtime can't call tools (llama-cpp-python's tool support depends on the model's "
+                "chat format). Serve the model with llama-server --jinja, vLLM or SGLang and use its URL")
         request.cancel.raise_if_cancelled()
         if self.llm is None:
             raise RuntimeFailure("model not loaded")

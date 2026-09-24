@@ -102,6 +102,8 @@ async def startup():
 
     orchestrator = PipelineOrchestrator(config)
     await orchestrator.initialize()
+    if agent is not None and agent.tools:
+        orchestrator.check_tools(agent.tools)  # an LLM that can't call them fails now, not mid-call
     telemetry.emit("server.ready", stage="server", duration_ms=(time.monotonic() - _started_at) * 1000)
 
 
@@ -426,6 +428,7 @@ async def voice_chat(request: VoiceChatRequest, principal: Principal = Depends(r
                 request.system_prompt or (agent.prompt if agent is not None else DEFAULT_PROMPT),
                 on_event=collect,
                 trace=trace,
+                tools=agent.tools if agent is not None else (),
             )
             try:
                 async for chunk in pipeline:
@@ -663,6 +666,7 @@ async def voice_websocket(websocket: WebSocket):
                     on_event=lambda event: _dispatch_event(websocket, event),
                     barge_in=barge_in,
                     trace=trace,
+                    tools=agent.tools if agent is not None else (),
                 )
                 try:
                     async for chunk in pipeline:

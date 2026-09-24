@@ -12,8 +12,16 @@
 
     frun up agent.py
 
-The agent is the product, so it lives in code: versioned, reviewed, and able to
-hold the tools it will gain later. Secrets never belong here — those come from
+Tools are plain functions the model can call mid-call (see fusion_runtime.tools):
+
+    @tool(description="Look up where an order is")
+    async def order_status(order_id: str) -> str:
+        ...
+
+    agent = Agent(prompt="...", llm=LLM("http://localhost:8000/v1", model_name="..."), tools=[order_status])
+
+The agent is the product, so it lives in code: versioned, reviewed, and it
+holds the tools. Secrets never belong here — those come from
 environment variables (`api_key_env`, `HF_TOKEN`).
 
 A stage takes a model name, with settings when it needs them:
@@ -196,7 +204,7 @@ class Agent:
     language: Optional[str] = None  # what callers speak; None keeps the profile's setting
     turns: Optional[Turns] = None
     vad: Optional[VAD] = None
-    tools: Sequence[Any] = ()
+    tools: Sequence[Any] = ()  # functions the model can call; plain functions become tools
     profile: str = "development"  # the defaults everything above is applied to
     source: Optional[Path] = None  # the file it was loaded from, when it came from one
 
@@ -209,11 +217,12 @@ class Agent:
             raise AgentError(f"turns takes Turns(...), got {type(self.turns).__name__}")
         if self.vad is not None and not isinstance(self.vad, VAD):
             raise AgentError(f"vad takes VAD(...), got {type(self.vad).__name__}")
-        if self.tools:
-            raise AgentError(
-                "tool calling isn't supported yet, so tools= can't be used. "
-                "Everything else in the agent works; tools are the next piece being built"
-            )
+        from fusion_runtime.tools import ToolError, as_tools
+
+        try:
+            self.tools = as_tools(self.tools)
+        except ToolError as e:
+            raise AgentError(str(e)) from None
 
     def config(self, environ: Optional[Mapping[str, str]] = None):
         """This agent as a PipelineConfig: profile defaults, the agent on top, then the environment."""
@@ -282,6 +291,7 @@ class Agent:
             "stt": model_of("stt"), "llm": model_of("llm"), "tts": model_of("tts"),
             "turn_detector": detector.ref if detector is not None else None,
             "language": self.language,
+            "tools": [t.name for t in self.tools] or None,
             "profile": self.profile,
         }.items() if v is not None}
 

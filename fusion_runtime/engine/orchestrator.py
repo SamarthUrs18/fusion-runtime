@@ -5,13 +5,14 @@ import copy
 import difflib
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import AsyncIterator, List, Optional
+from typing import AsyncIterator, Dict, List, Optional, Sequence
 
 from fusion_runtime.config import PipelineConfig, TurnDetectionConfig
 from fusion_runtime.contract import (
     Cancelled,
     LLMRequest,
     LLMRuntime,
+    Message,
     STTRequest,
     STTRuntime,
     TTSRequest,
@@ -25,6 +26,7 @@ from fusion_runtime.engine.scheduler import ModelScheduler
 from fusion_runtime.engine.streaming import PartialTranscript, TurnTranscriber, raise_if_error
 from fusion_runtime.engine.text import END_OF_REPLY, REPLY_CUT_OFF, speakable_segments, words
 from fusion_runtime.telemetry import SessionTrace, describe_error, tag_stage, telemetry
+from fusion_runtime.tools import Tool, ToolResult
 from fusion_runtime.vad import TurnState, VADBase, create_vad
 
 # Silence after which the user's last words are transcribed, ahead of the turn ending
@@ -209,10 +211,14 @@ class PipelineOrchestrator:
         on_event=None,
         barge_in: Optional["BargeInState"] = None,
         trace: Optional[SessionTrace] = None,
+        tools: Sequence[Tool] = (),
     ) -> AsyncIterator[bytes]:
         """
         Main pipeline: Audio → STT → LLM → TTS → Audio
         Yields audio chunks for playback.
+
+        tools — functions the model may call mid-reply (fusion_runtime.tools);
+        the LLM runtime must support tool calling (see check_tools).
 
         on_event(dict) — optional callback receiving live events:
           {"type": "transcript", "text": ..., "is_final": bool}
@@ -267,7 +273,7 @@ class PipelineOrchestrator:
 
             # Stage 2: LLM Streaming (consumes STT partials)
             llm_stream = self._llm_stage(
-                stt_stream, system_prompt, emit, turn_state, stt_reset, barge_in, trace
+                stt_stream, system_prompt, emit, turn_state, stt_reset, barge_in, trace, tools=tools
             )
 
             # Stage 3: TTS Streaming (consumes LLM tokens)
@@ -740,6 +746,7 @@ class PipelineOrchestrator:
         barge_in: Optional[BargeInState] = None,
         trace: Optional[SessionTrace] = None,
         conversation: Optional[Conversation] = None,
+        tools: Sequence[Tool] = (),
     ) -> AsyncIterator[str]:
         """LLM streaming, gated by real (forward-measured) silence rather
         than reacting only when new STT text happens to arrive.
@@ -766,6 +773,8 @@ class PipelineOrchestrator:
             conversation = Conversation.for_context(
                 system_prompt, getattr(llm_config, "n_ctx", None), getattr(llm_config, "max_tokens", None))
         llm_scheduler = self.scheduler("llm")
+        tool_specs = tuple(t.spec for t in tools)
+        tools_by_name = {t.name: t for t in tools}
         first_token = True
         response_buffer = ""
         # The bot's own most recently spoken text (partial, if it was cut
@@ -1033,100 +1042,132 @@ class PipelineOrchestrator:
             finish_reason = None
             # tokens/s is only meaningful when the model decodes while we wait (see Capabilities)
             measure_decode = getattr(getattr(self.llm, "capabilities", None), "decodes_on_demand", True)
+            max_tool_rounds = max(0, int(getattr(llm_config, "max_tool_rounds", 4)))
 
-            # A new turn has nothing buffered to play, so it's due now. Playback-aware
-            # scheduling will move this deadline as the call's unplayed audio changes.
-            request = LLMRequest(
-                messages=messages,
-                max_tokens=getattr(llm_config, "max_tokens", 512),
-                temperature=getattr(llm_config, "temperature", 0.7),
-                top_p=getattr(llm_config, "top_p", 0.9),
-                session_id=trace.session_id if trace is not None else None,
-                deadline=time.monotonic(),
-                language=turn_language(),
-            )
-            async with llm_scheduler.slot(request) as slot:
-                if turn is not None:
-                    turn.add("llm_queue_ms", slot.wait_ms)
-                    if slot.queued_ahead:
-                        trace.event("llm.queued", turn=turn, stage="llm", duration_ms=slot.wait_ms,
-                                    queued_ahead=slot.queued_ahead)
-                stream = self.llm.generate(request)
-                while True:
-                    waited_from = time.monotonic()
-                    try:
-                        llm_result = await stream.__anext__()
-                    except StopAsyncIteration:
-                        break
-                    except Exception as e:
-                        raise tag_stage(e, "llm")
-                    if turn is not None and not first_token and measure_decode:
-                        # Time actually spent waiting on the model for this token. Wall-clock
-                        # time would also count TTS synthesis, since the LLM only decodes
-                        # when the pipeline asks for the next token.
-                        turn.add("llm_decode_ms", (time.monotonic() - waited_from) * 1000)
-                    if barge_in is not None and barge_in.interrupted.is_set():
-                        # The watcher caught real user speech starting while we
-                        # were mid-reply — stop forwarding further tokens for
-                        # this turn right away. The "interrupted" emit already
-                        # went out from the watcher itself, not from here, so
-                        # the client hears about it as early as possible.
-                        barge_in.interrupted.clear()
-                        finish_reason = "interrupted"
-                        if turn is not None:
-                            turn.mark("llm_stopped")
-                            trace.event("llm.stopped", turn=turn, stage="llm", reason="barge_in",
-                                        stop_ms=turn.between_ms("barge_in_fired", "llm_stopped"))
-                        await stream.aclose()
-                        if emit:
-                            # A normal reply only gets printed client-side on
-                            # its is_final event — without this, a cut-off
-                            # reply would vanish from the transcript entirely
-                            # (its audio played partially, but nothing shown).
+            # One round per model reply. A reply that asks for tools gets them run and the results
+            # sent back, and the model answers again; the last round is offered no tools, so the
+            # caller always hears an answer instead of a loop of calls.
+            for tool_round in range(max_tool_rounds + 1):
+                offered = tool_specs if tool_round < max_tool_rounds else ()
+                round_text = ""
+                tool_calls: tuple = ()
+                # A new turn has nothing buffered to play, so it's due now. Playback-aware
+                # scheduling will move this deadline as the call's unplayed audio changes.
+                request = LLMRequest(
+                    messages=messages,
+                    max_tokens=getattr(llm_config, "max_tokens", 512),
+                    temperature=getattr(llm_config, "temperature", 0.7),
+                    top_p=getattr(llm_config, "top_p", 0.9),
+                    session_id=trace.session_id if trace is not None else None,
+                    deadline=time.monotonic(),
+                    language=turn_language(),
+                    tools=offered,
+                )
+                async with llm_scheduler.slot(request) as slot:
+                    if turn is not None:
+                        turn.add("llm_queue_ms", slot.wait_ms)
+                        if slot.queued_ahead:
+                            trace.event("llm.queued", turn=turn, stage="llm", duration_ms=slot.wait_ms,
+                                        queued_ahead=slot.queued_ahead)
+                    stream = self.llm.generate(request)
+                    while True:
+                        waited_from = time.monotonic()
+                        try:
+                            llm_result = await stream.__anext__()
+                        except StopAsyncIteration:
+                            break
+                        except Exception as e:
+                            raise tag_stage(e, "llm")
+                        if turn is not None and not first_token and measure_decode:
+                            # Time actually spent waiting on the model for this token. Wall-clock
+                            # time would also count TTS synthesis, since the LLM only decodes
+                            # when the pipeline asks for the next token.
+                            turn.add("llm_decode_ms", (time.monotonic() - waited_from) * 1000)
+                        if barge_in is not None and barge_in.interrupted.is_set():
+                            # The watcher caught real user speech starting while we
+                            # were mid-reply — stop forwarding further tokens for
+                            # this turn right away. The "interrupted" emit already
+                            # went out from the watcher itself, not from here, so
+                            # the client hears about it as early as possible.
+                            barge_in.interrupted.clear()
+                            finish_reason = "interrupted"
+                            if turn is not None:
+                                turn.mark("llm_stopped")
+                                trace.event("llm.stopped", turn=turn, stage="llm", reason="barge_in",
+                                            stop_ms=turn.between_ms("barge_in_fired", "llm_stopped"))
+                            await stream.aclose()
+                            if emit:
+                                # A normal reply only gets printed client-side on
+                                # its is_final event — without this, a cut-off
+                                # reply would vanish from the transcript entirely
+                                # (its audio played partially, but nothing shown).
+                                emit({
+                                    "type": "response",
+                                    "text": response_buffer,
+                                    "is_final": True,
+                                    "interrupted": True,
+                                })
+                            yield REPLY_CUT_OFF  # drop words already generated but not yet spoken
+                            break
+
+                        if first_token:
+                            first_token = False
+                            if turn is not None:
+                                turn.mark("llm_first_token")
+                                trace.event("llm.first_token", turn=turn, stage="llm",
+                                            duration_ms=turn.between_ms("llm_request", "llm_first_token"), **llm_labels)
+
+                        if llm_result.tool_calls:
+                            tool_calls = tuple(llm_result.tool_calls)
+                        # Asking for tools ends this round, not the reply: the answer comes after them
+                        is_final = llm_result.finish_reason is not None and not (offered and tool_calls)
+                        if llm_result.finish_reason is not None:
+                            finish_reason = llm_result.finish_reason
+
+                        if llm_result.text:
+                            round_text += llm_result.text
+                            response_buffer += llm_result.text
+                            if turn is not None:
+                                turn.add("llm_tokens")
+
+                        # The terminal chunk from most providers carries no text
+                        # (text="", is_final=True) — it must still be emitted, or
+                        # the client's "is_final" completion event never arrives
+                        # and nothing ever gets printed even though TTS already
+                        # spoke the reply.
+                        if emit and (llm_result.text or is_final):
                             emit({
                                 "type": "response",
                                 "text": response_buffer,
-                                "is_final": True,
-                                "interrupted": True,
+                                "is_final": is_final,
                             })
-                        yield REPLY_CUT_OFF  # drop words already generated but not yet spoken
-                        break
 
-                    if first_token:
-                        first_token = False
-                        if turn is not None:
-                            turn.mark("llm_first_token")
-                            trace.event("llm.first_token", turn=turn, stage="llm",
-                                        duration_ms=turn.between_ms("llm_request", "llm_first_token"), **llm_labels)
+                        if llm_result.text:
+                            yield llm_result.text
+                        if llm_result.finish_reason is not None:
+                            # Lets TTS speak the last sentence now, while this turn is still open,
+                            # instead of waiting for a token after the final full stop that never comes.
+                            # Before a tool call, that's the "Let me check" the caller hears while it runs.
+                            yield END_OF_REPLY
 
-                    is_final = llm_result.finish_reason is not None
-                    if is_final:
-                        finish_reason = llm_result.finish_reason
-
-                    if llm_result.text:
-                        response_buffer += llm_result.text
-                        if turn is not None:
-                            turn.add("llm_tokens")
-
-                    # The terminal chunk from most providers carries no text
-                    # (text="", is_final=True) — it must still be emitted, or
-                    # the client's "is_final" completion event never arrives
-                    # and nothing ever gets printed even though TTS already
-                    # spoke the reply.
-                    if emit and (llm_result.text or is_final):
-                        emit({
-                            "type": "response",
-                            "text": response_buffer,
-                            "is_final": is_final,
-                        })
-
-                    if llm_result.text:
-                        yield llm_result.text
-                    if is_final:
-                        # Lets TTS speak the last sentence now, while this turn is still open,
-                        # instead of waiting for a token after the final full stop that never comes
-                        yield END_OF_REPLY
-
+                if finish_reason == "interrupted" or not (offered and tool_calls):
+                    break
+                if response_buffer and not response_buffer.endswith((" ", "\n")):
+                    response_buffer += " "  # the reply continues after the tools, as a new sentence
+                messages = [*messages, Message(role="assistant", content=round_text, tool_calls=tool_calls)]
+                results = await self._run_tools(tool_calls, tools_by_name, barge_in, trace, turn)
+                if results is None:  # the caller talked over the wait: drop the answer that was coming
+                    finish_reason = "interrupted"
+                    if emit:
+                        emit({"type": "response", "text": response_buffer.strip(), "is_final": True,
+                              "interrupted": True})
+                    yield REPLY_CUT_OFF
+                    break
+                messages = [*messages, *(Message(role="tool", content=result.content, name=call.name,
+                                                 tool_call_id=call.id)
+                                         for call, result in zip(tool_calls, results, strict=True))]
+                finish_reason = None
+            response_buffer = response_buffer.strip()
             if barge_in is not None:
                 barge_in.mark_idle()
             if turn is not None:
@@ -1215,6 +1256,65 @@ class PipelineOrchestrator:
                 await accumulate_task
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher_task
+
+    def check_tools(self, tools: Sequence[Tool]) -> None:
+        """Refuse tools the loaded LLM can't call, at startup rather than on the first call."""
+        if not tools or getattr(getattr(self.llm, "capabilities", None), "tools", False):
+            return
+        resolved = self.__dict__.get("resolved_models", {}).get("llm")
+        runtime = resolved.spec.runtime if resolved else type(self.llm).__name__
+        raise ValueError(
+            f"the agent has tools, but the {runtime} runtime can't call them. Serve the model with vLLM, "
+            "SGLang or llama-server (--jinja) and point the agent at it: "
+            'LLM("http://localhost:8000/v1", model_name="...")'
+        )
+
+    async def _run_tools(self, calls, tools_by_name: Dict[str, Tool], barge_in: Optional[BargeInState],
+                         trace: Optional[SessionTrace], turn) -> Optional[List[ToolResult]]:
+        """Run the calls the model asked for, together. None if the caller interrupted while they ran.
+
+        A tool that fails, times out or doesn't exist gives the model an error to read, never
+        an exception here: one broken lookup shouldn't hang up on the caller.
+        """
+        async def one(call) -> ToolResult:
+            tool = tools_by_name.get(call.name)
+            if trace is not None:
+                trace.event("tool.call", turn=turn, stage="tool", tool=call.name,
+                            **telemetry.content(call.arguments, "arguments"))
+            if tool is None:
+                known = ", ".join(sorted(tools_by_name)) or "none"
+                result = ToolResult(f"error: there is no tool named {call.name!r}; the tools are: {known}",
+                                    ok=False, error="unknown_tool")
+            else:
+                result = await tool.run(call.arguments)
+            if turn is not None:
+                turn.add("tool_calls")
+                turn.add("tool_ms", result.duration_ms)
+            if trace is not None:
+                trace.event("tool.done", turn=turn, level="info" if result.ok else "warning", stage="tool",
+                            tool=call.name, duration_ms=round(result.duration_ms, 1), ok=result.ok,
+                            error=result.error, **telemetry.content(result.content, "result"))
+            return result
+
+        running = asyncio.ensure_future(asyncio.gather(*(one(call) for call in calls)))
+        if barge_in is None:
+            return await running
+        interrupted = asyncio.ensure_future(barge_in.interrupted.wait())
+        try:
+            await asyncio.wait({running, interrupted}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            interrupted.cancel()
+        if running.done():
+            return running.result()
+        barge_in.interrupted.clear()
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+        if trace is not None and turn is not None:
+            turn.mark("llm_stopped")
+            trace.event("tool.cancelled", turn=turn, stage="tool", reason="barge_in",
+                        tools=[call.name for call in calls])
+        return None
 
     async def _tts_stage(
         self,

@@ -94,6 +94,9 @@ def format_turn_summary(summary: dict) -> str:
     if summary.get("llm_first_token_ms") is not None:
         rate = f" {summary['llm_tokens_per_second']:.0f} tok/s" if summary.get("llm_tokens_per_second") else ""
         parts.append(f"llm {ms('llm_first_token_ms')}{rate}")
+    if summary.get("tool_calls"):
+        calls = summary["tool_calls"]
+        parts.append(f"{calls} tool call{'s' if calls != 1 else ''} {ms('tool_ms')}")
     if summary.get("tts_first_chunk_ms") is not None:
         parts.append(f"tts {ms('tts_first_chunk_ms')}")
     if summary.get("playback_delay_ms") is not None:

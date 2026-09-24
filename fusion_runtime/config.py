@@ -103,6 +103,7 @@ class LLMConfig(_StageRuntime):
     temperature: float = 0.7
     top_p: float = 0.9
     max_tokens: int = 512
+    max_tool_rounds: int = 4  # tool calls the model may make before it has to answer, per turn
     # Streaming
     stream: bool = True
     # OpenAI-compatible endpoints (provider=openai, or a URL as the model)

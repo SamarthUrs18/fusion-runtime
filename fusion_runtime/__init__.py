@@ -32,6 +32,8 @@ _EXPORTS = {
     "Turns": "fusion_runtime.agent",
     "VAD": "fusion_runtime.agent",
     "load_agent": "fusion_runtime.agent",
+    "tool": "fusion_runtime.tools",
+    "Tool": "fusion_runtime.tools",
     "PipelineOrchestrator": "fusion_runtime.engine",
     "run_single_turn": "fusion_runtime.engine",
 }
@@ -52,6 +54,7 @@ if TYPE_CHECKING:  # let editors and type checkers see the real names
         VADConfig,
     )
     from fusion_runtime.engine import PipelineOrchestrator, run_single_turn
+    from fusion_runtime.tools import Tool, tool
 
 
 def __getattr__(name: str):

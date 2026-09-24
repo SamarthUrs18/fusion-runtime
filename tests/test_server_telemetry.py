@@ -22,7 +22,7 @@ class FakeOrchestrator:
     async def shutdown(self):
         pass
 
-    async def run_pipeline(self, audio_stream, system_prompt, on_event=None, barge_in=None, trace=None):
+    async def run_pipeline(self, audio_stream, system_prompt, on_event=None, barge_in=None, trace=None, tools=()):
         async for chunk in audio_stream:
             trace.audio_received(len(chunk))
             if FakeOrchestrator.fail_with is not None:
@@ -124,7 +124,7 @@ def test_health_reports_version_uptime_and_sessions(events):
 class TalkingOrchestrator(FakeOrchestrator):
     """A pipeline that reports one finished turn, the way the real one does."""
 
-    async def run_pipeline(self, audio_stream, system_prompt, on_event=None, barge_in=None, trace=None):
+    async def run_pipeline(self, audio_stream, system_prompt, on_event=None, barge_in=None, trace=None, tools=()):
         if trace.on_turn_trace is None:  # the real pipeline wires traces to on_event this way
             trace.on_turn_trace = lambda turn_trace: on_event({"type": "turn.trace", **turn_trace})
         async for chunk in audio_stream:

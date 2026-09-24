@@ -31,6 +31,7 @@ from fusion_runtime.contract import (
     ModelRuntime,
     STTRequest,
     STTRuntime,
+    ToolSpec,
     Transcript,
     TTSRequest,
     TTSRuntime,
@@ -279,6 +280,13 @@ async def _llm_checks(runtime: LLMRuntime, run, cancel_timeout_s: float, prompt:
     await run("works after a stream is abandoned", lambda: _abandon_then_reuse(runtime.generate, request))
     await run("serves concurrent requests up to max_concurrency",
               lambda: _concurrent(runtime.generate, request, max(1, min(caps.max_concurrency, 3))))
+    if not caps.tools:
+        # The engine checks capabilities before offering tools; a runtime that ignored them
+        # instead would leave the model answering "let me check" with nothing to check.
+        tools = (ToolSpec("lookup", "Look something up", {"type": "object", "properties": {}}),)
+        await run("rejects tools with InvalidRequest when it can't call them",
+                  lambda: _expect_raises(lambda: _drain(runtime.generate(request(tools=tools))),
+                                         InvalidRequest, "tools on a runtime without tool support"))
 
 
 async def _stt_checks(runtime: STTRuntime, run, audio: bytes) -> None:

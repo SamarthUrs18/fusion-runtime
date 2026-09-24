@@ -37,7 +37,7 @@ class FakeOrchestrator:
     async def shutdown(self):
         pass
 
-    async def run_pipeline(self, audio_stream, system_prompt, on_event=None, barge_in=None, trace=None):
+    async def run_pipeline(self, audio_stream, system_prompt, on_event=None, barge_in=None, trace=None, tools=()):
         # Waits on audio that these tests never send, which is the point: without
         # it the session ended the moment it began, handed its slot straight back,
         # and "the server is full" tests passed or failed on timing.

@@ -211,6 +211,9 @@ class SessionTrace:
             "llm_tokens": tokens or None,
             "llm_tokens_per_second": rounded(tokens_per_s),
             "llm_finish": i.get("llm_finish"),
+            # tools the model called; their time is inside llm_duration_ms, not model time
+            "tool_calls": int(c.get("tool_calls", 0)) or None,
+            "tool_ms": rounded(c.get("tool_ms")) if c.get("tool_calls") else None,
             "tts_first_chunk_ms": rounded(turn.between_ms("llm_first_token", "tts_first_chunk")),
             "tts_chunks": int(c.get("tts_chunks", 0)) or None,
             "tts_audio_s": round(tts_audio_s, 2) if tts_audio_s else None,

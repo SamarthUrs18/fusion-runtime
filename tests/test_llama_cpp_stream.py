@@ -149,8 +149,8 @@ async def test_cancel_token_stops_decoding_and_raises_cancelled():
     assert fake.decoded < 10 and fake.active == 0
 
 
-async def test_tool_requests_are_rejected_until_supported():
+async def test_tool_requests_are_rejected_with_where_to_run_tools_instead():
     from fusion_runtime.contract import InvalidRequest, ToolSpec
 
-    with pytest.raises(InvalidRequest, match="tool calling"):
+    with pytest.raises(InvalidRequest, match="can't call tools.*llama-server --jinja"):
         await collect(make_llm(FakeLlama()), tools=(ToolSpec("lookup_order", "Find an order", {"type": "object"}),))
