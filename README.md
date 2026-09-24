@@ -80,11 +80,47 @@ URL on a server with keys, the connection closes and the page says the token was
 ### Naming models
 
 A model is a catalog id (`frun models list`), a file path, `hf:owner/repo` for anything on
-Hugging Face, or a URL for an OpenAI-compatible endpoint. Settings the config knows are applied;
-anything else is passed through to that runtime.
+Hugging Face, or a URL for an OpenAI-compatible endpoint. A model on a vLLM, SGLang or
+llama-server you started is named with that server in front — `vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ`
+— and found at the server's usual address (`url=` for another).
+
+Settings are checked against the runtime that runs the model, so a misspelt one fails at startup
+with the name it probably meant instead of being ignored. For llama.cpp that includes
+`flash_attn`, `kv_cache_type="q8_0"` (half the context memory), `use_mlock`, `main_gpu` and
+`llama_kwargs` for anything else; for an endpoint, `extra_body` for server-specific sampling.
 
 Secrets never go in the agent file — it names the *variable* holding a key
 (`api_key_env="GROQ_API_KEY"`), so `agent.py` is safe to commit.
+
+### Tools
+
+A tool is a function. The model reads its name, docstring and type hints, calls it when it needs
+to, and answers with what it returned:
+
+```python
+from fusion_runtime import Agent, LLM, tool
+
+@tool
+async def order_status(order_id: str) -> dict:
+    """Look up where an order is and when it will arrive.
+
+    Args:
+        order_id: The order number, as the caller reads it out.
+    """
+    return await orders.lookup(order_id)
+
+agent = Agent(prompt="...", llm=LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ"), tools=[order_status])
+```
+
+What the model says before calling ("Let me check.") is spoken while the tool runs. Each call has
+a timeout (`@tool(timeout_s=...)`, 10 s by default); ordinary functions run on a worker thread;
+a tool that fails tells the model what went wrong rather than ending the call; and talking over
+the wait cancels it. After `max_tool_rounds` calls in one turn (4) the model has to answer.
+
+Tools need an LLM server that can call them — vLLM (`--enable-auto-tool-choice
+--tool-call-parser ...`), SGLang, llama-server (`--jinja`) or a hosted API. The in-process
+llama.cpp runtime can't, and `frun up` says so at startup. A runnable version is
+[`examples/tools_agent.py`](examples/tools_agent.py).
 
 ## On your own site
 
@@ -170,11 +206,31 @@ how many callers there are.
 So to go past four, move the language model out and leave speech where it is:
 
 ```python
-llm = LLM("http://localhost:8080/v1", model_name="qwen2.5-7b-instruct")
+llm = LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ", url="http://localhost:8001/v1")
+llm = LLM("llama_server:qwen2.5-7b-instruct")              # llama-server -np N, on :8080
+llm = LLM("http://gpu-box:8000/v1", model_name="...")        # any OpenAI-compatible server
 ```
 
-vLLM and `llama-server -np N` both speak the API the `openai_http` runtime uses. Whether that
-moves the knee, and how far, is not yet measured.
+vLLM and SGLang batch every caller's reply into each step on the GPU instead of decoding one at a
+time. Whether that moves the knee, and how far, is not yet measured.
+
+**On one 24 GB card** (RTX 3090, L4) the server shares the GPU with Whisper and Kokoro, and vLLM
+reserves 90% of the card by default. Cap it, and start it first:
+
+```bash
+vllm serve Qwen/Qwen2.5-7B-Instruct-AWQ --port 8001 \
+  --gpu-memory-utilization 0.6 --max-model-len 4096 --max-num-seqs 16 \
+  --enable-auto-tool-choice --tool-call-parser hermes
+frun up agent.py        # an Agent(profile="production", ...), so Whisper runs on the GPU too
+```
+
+`0.6` is about 14 GB: the weights plus every caller's context. Voice turns are short, so a 4096
+context fits more callers than the model's maximum would. The tool flags are only needed for
+tools, and the parser depends on the model family. Port 8001, because `frun up` is on 8000.
+
+A 4-bit model (AWQ or GPTQ) leaves room for speech; a 16-bit 7B model needs ~15 GB for its
+weights alone and doesn't. The L4 has about a third of the 3090's memory bandwidth, so expect
+slower tokens there. `nvidia-smi` shows what is actually used.
 
 ## The `frun` CLI
 

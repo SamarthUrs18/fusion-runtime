@@ -97,8 +97,12 @@ def pull(
 
     hf_refs = [i for i in ids if i.startswith("hf:")]
     if wanted is not None:  # an agent can name Hugging Face models directly
-        hf_refs += [m for m in (getattr(getattr(wanted, stage, None), "model", "")
-                                for stage in ("stt", "llm", "tts")) if m.startswith("hf:")]
+        from fusion_runtime.resolver import SERVED_RUNTIMES
+
+        stages = [getattr(wanted, stage, None) for stage in ("stt", "llm", "tts")]
+        # A model on vLLM / SGLang / llama-server is that server's to download, not ours
+        hf_refs += [s.model for s in stages if s is not None and s.model.startswith("hf:")
+                    and getattr(s, "runtime", None) not in SERVED_RUNTIMES]
     try:
         chosen = get_entries([i for i in ids if i not in hf_refs], catalog)
     except UnknownModelError as e:

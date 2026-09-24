@@ -546,3 +546,24 @@ def test_models_pull_takes_an_agent_file(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert "qwen2.5-7b-q4" in pulled  # the agent's 7B, not the development profile's 0.5B
     assert "qwen2.5-0.5b-q4" not in pulled
+
+
+def test_models_pull_leaves_a_served_model_to_its_server(monkeypatch, tmp_path):
+    """vllm:hf:org/model is loaded by vLLM from its own cache; pulling it here would
+    download gigabytes of weights nothing in this process reads."""
+    agent = tmp_path / "agent.py"
+    agent.write_text(
+        "from fusion_runtime import Agent, LLM, STT, TTS\n"
+        "agent = Agent(prompt='hi', stt=STT('whisper-tiny.en'), llm=LLM('vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ'),\n"
+        "              tts=TTS('kokoro-v1.0'))\n")
+    pulled = []
+    monkeypatch.setattr("fusion_runtime.catalog.download.pull", lambda entry, root, log=None, force=False:
+                        pulled.append(entry.id))
+    monkeypatch.setattr("fusion_runtime.catalog.is_installed", lambda entry, root: False)
+    monkeypatch.setattr("fusion_runtime.catalog.download.check_disk_space", lambda needed, root: None)
+
+    result = runner.invoke(app, ["models", "pull", str(agent)])
+
+    assert result.exit_code == 0, result.output
+    assert "Qwen2.5-7B-Instruct-AWQ" not in result.output and not any("Qwen" in p for p in pulled)
+    assert "kokoro-v1.0" in pulled
