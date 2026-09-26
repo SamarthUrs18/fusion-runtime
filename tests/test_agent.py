@@ -241,3 +241,15 @@ def test_server_uses_the_agents_prompt(tmp_path, monkeypatch):
     path = write_agent(tmp_path, AGENT_FILE)
     monkeypatch.setattr(server, "agent", load_agent(path))
     assert server.agent.prompt.startswith("You take orders")
+
+
+def test_moving_a_served_model_by_url_keeps_its_name():
+    # Found on a pod: vLLM had to move ports, and the URL alone should have been enough
+    agent = Agent(prompt="hi", llm=LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ@main"))
+    config = agent.config({"FUSION_LLM_URL": "http://localhost:8002/v1"})
+    assert config.llm.api_base == "http://localhost:8002/v1" and config.llm.model == "Qwen/Qwen2.5-7B-Instruct-AWQ"
+    named = Agent(prompt="hi", llm=LLM("http://localhost:9000/v1", model_name="served"))
+    assert named.config({"FUSION_LLM_URL": "http://localhost:9001/v1"}).llm.model == "served"
+    with pytest.raises(ValueError, match="FUSION_LLM_MODEL"):  # a local model has no name on any server
+        Agent(prompt="hi", llm=LLM("qwen2.5-0.5b-q4")).config({"FUSION_LLM_URL": "http://localhost:8002/v1"})
+

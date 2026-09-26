@@ -297,7 +297,8 @@ def with_env_overrides(config: PipelineConfig, environ=None) -> PipelineConfig:
                 updates["api_key_env"] = env[LLM_KEY_ENV_ENV]
             return config.model_copy(update={"llm": config.llm.model_copy(update=updates)})
         return config
-    model = env.get(LLM_MODEL_ENV)
+    # Moving an endpoint (vLLM to another port, say) keeps the name the config already gives it
+    model = env.get(LLM_MODEL_ENV) or _served_name(config.llm)
     if not model:
         raise ValueError(f"{LLM_URL_ENV} is set; also set {LLM_MODEL_ENV} to the model's name on that server")
     from fusion_runtime.runtimes.openai_http.llm import OPTIONS as ENDPOINT_OPTIONS
@@ -309,6 +310,21 @@ def with_env_overrides(config: PipelineConfig, environ=None) -> PipelineConfig:
         "options": {k: v for k, v in config.llm.options.items() if k in ENDPOINT_OPTIONS},
     })
     return config.model_copy(update={"llm": llm})
+
+
+def _served_name(llm: "LLMConfig") -> Optional[str]:
+    """The model's name on a server, if the config already runs its LLM on one; None for a local model."""
+    from fusion_runtime.resolver import SERVED_RUNTIMES, _served_model_name
+
+    named = llm.options.get("model_name")
+    if llm.runtime in SERVED_RUNTIMES:
+        is_url = (llm.model or "").startswith(("http://", "https://"))
+        return named or (None if is_url or not llm.model else _served_model_name(llm.model))
+    if llm.runtime == "openai_http" or (llm.model or "").startswith(("http://", "https://")):
+        return named
+    if llm.runtime is None and llm.provider == Provider.OPENAI and llm.api_base:  # not a hosted API's default
+        return llm.model
+    return None
 
 
 def _with_turn_overrides(config: PipelineConfig, env) -> PipelineConfig:
