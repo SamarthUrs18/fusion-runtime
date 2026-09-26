@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fusion-runtime"
 version = "0.1.1"
-description = "Low-latency voice AI inference runtime (STT→LLM→TTS <500ms)"
+description = "Self-hosted voice agent runtime: speech-to-text, LLM and text-to-speech on your own GPU, with tools"
 authors = [{ name = "Samarth Urs", email = "hello@fusion-runtime.dev" }]
 readme = "README.md"
 license = "Apache-2.0"
