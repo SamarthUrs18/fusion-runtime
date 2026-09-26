@@ -206,7 +206,7 @@ how many callers there are.
 So to go past four, move the language model out and leave speech where it is:
 
 ```python
-llm = LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ", url="http://localhost:8001/v1")
+llm = LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ", url="http://localhost:8002/v1")
 llm = LLM("llama_server:qwen2.5-7b-instruct")              # llama-server -np N, on :8080
 llm = LLM("http://gpu-box:8000/v1", model_name="...")        # any OpenAI-compatible server
 ```
@@ -218,7 +218,7 @@ time. Whether that moves the knee, and how far, is not yet measured.
 reserves 90% of the card by default. Cap it, and start it first:
 
 ```bash
-vllm serve Qwen/Qwen2.5-7B-Instruct-AWQ --port 8001 \
+vllm serve Qwen/Qwen2.5-7B-Instruct-AWQ --port 8002 \
   --gpu-memory-utilization 0.6 --max-model-len 4096 --max-num-seqs 16 \
   --enable-auto-tool-choice --tool-call-parser hermes
 frun up agent.py        # an Agent(profile="production", ...), so Whisper runs on the GPU too
@@ -226,7 +226,7 @@ frun up agent.py        # an Agent(profile="production", ...), so Whisper runs o
 
 `0.6` is about 14 GB: the weights plus every caller's context. Voice turns are short, so a 4096
 context fits more callers than the model's maximum would. The tool flags are only needed for
-tools, and the parser depends on the model family. Port 8001, because `frun up` is on 8000.
+tools, and the parser depends on the model family. Port 8002, because `frun up` is on 8000 and some hosts (Runpod's pod images) already use 8001.
 
 A 4-bit model (AWQ or GPTQ) leaves room for speech; a 16-bit 7B model needs ~15 GB for its
 weights alone and doesn't. The L4 has about a third of the 3090's memory bandwidth, so expect
