@@ -104,3 +104,44 @@ def test_retracting_a_turn_carries_the_words_and_drops_the_cut_off_reply():
     messages = conversation.messages_for("my name is Priya")
     assert [m.content for m in messages] == ["sys", "book a table", "For how many?", "hello my name is Priya"]
     assert Conversation("sys").retract_last_turn() is None
+
+
+def lookup_turn(conversation, user, result, reply):
+    from fusion_runtime.contract import Message, ToolCall
+    asked = Message(role="assistant", content="", tool_calls=(ToolCall("c1", "lookup", "{}"),))
+    answered = Message(role="tool", content=result, name="lookup", tool_call_id="c1")
+    conversation.add_turn(user, reply, steps=[asked, answered])
+
+
+def test_a_turn_with_tools_is_trimmed_as_one_piece():
+    conversation = Conversation("sys", max_messages=5)
+    conversation.add_turn("hi", "Hello.")
+    lookup_turn(conversation, "where is 1042", "shipped", "It shipped.")
+    # Both turns are 6 messages; the older one goes whole, and the tool result keeps its call
+    assert roles(conversation.messages_for("thanks")) == ["system", "user", "assistant", "tool", "assistant", "user"]
+
+
+def test_retracting_a_turn_with_tools_removes_all_of_it():
+    conversation = Conversation("sys")
+    lookup_turn(conversation, "where is", "shipped", "It")
+    assert conversation.retract_last_turn() == "where is"
+    assert conversation.history == []
+    assert conversation.messages_for("order 1042")[-1].content == "where is order 1042"
+
+
+def test_old_tool_results_are_shortened_recent_ones_are_not():
+    conversation = Conversation("sys")
+    lookup_turn(conversation, "first", "x" * 2000, "One.")
+    lookup_turn(conversation, "second", "y" * 2000, "Two.")
+    lookup_turn(conversation, "third", "z" * 2000, "Three.")
+    tool_results = [m.content for m in conversation.messages_for("now") if m.role == "tool"]
+    assert len(tool_results[0]) < 600 and tool_results[0].endswith("(shortened)")
+    assert tool_results[1:] == ["y" * 2000, "z" * 2000]
+    assert len(conversation.history[2].content) == 2000  # stored in full; only the prompt is shortened
+
+
+def test_a_lookup_with_no_words_after_it_is_still_kept():
+    conversation = Conversation("sys")
+    lookup_turn(conversation, "where is 1042", "shipped", "")
+    assert roles(conversation.history) == ["user", "assistant", "tool"]
+    assert not conversation.has_carried_text

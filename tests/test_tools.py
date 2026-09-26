@@ -302,11 +302,14 @@ async def test_the_model_calls_a_tool_then_answers_with_its_result():
     assert sent[-2].role == "assistant" and sent[-2].content == "Let me check."
     assert sent[-2].tool_calls[0].name == "lookup"
     assert sent[-1].role == "tool" and sent[-1].tool_call_id == "call_0" and "shipped" in sent[-1].content
-    # One final response event, with the whole reply; the history keeps what was said, not the tool traffic
+    # One final response event, with the whole reply
     finals = [e for e in events if e.get("type") == "response" and e["is_final"]]
     assert len(finals) == 1 and finals[0]["text"] == "Let me check. It shipped."
+    # The history keeps the call and its result, so the next turn knows the answer came from a lookup
     assert [(m.role, m.content) for m in conversation.history] == [
-        ("user", "where is my order"), ("assistant", "Let me check. It shipped.")]
+        ("user", "where is my order"), ("assistant", "Let me check."), ("tool", '{"status": "shipped"}'),
+        ("assistant", "It shipped.")]
+    assert conversation.history[1].tool_calls[0].name == "lookup"
     assert orch.scheduler("llm").in_flight == 0
 
 
@@ -380,3 +383,50 @@ def test_a_runtime_without_tool_support_is_refused_at_startup():
     with pytest.raises(ValueError, match="can't call them"):
         orch.check_tools(order_tools([]))
     orchestrator(ScriptedLLM()).check_tools(order_tools([]))
+
+
+async def test_the_next_turn_sees_the_earlier_lookup():
+    # Found on a GPU: without the earlier call in its history, the model answered a second order
+    # by imitating its first answer instead of looking it up.
+    log = []
+    llm = ScriptedLLM(
+        [calls("lookup")], [LLMChunk(text="1042 shipped.", finish_reason="stop")],
+        [calls("lookup")], [LLMChunk(text="1043 is packing.", finish_reason="stop")],
+    )
+    orch = orchestrator(llm)
+    conversation = Conversation("sys")
+    for text in ("where is 1042", "and 1043"):
+        [t async for t in orch._llm_stage(one_turn(text), "sys", conversation=conversation, tools=order_tools(log))]
+
+    second_turn = llm.requests[2].messages
+    assert [m.role for m in second_turn] == ["system", "user", "assistant", "tool", "assistant", "user"]
+    assert second_turn[2].tool_calls and second_turn[3].tool_call_id == "call_0"
+    assert conversation.turns == 2
+
+
+async def test_a_call_cut_off_before_its_result_keeps_only_the_words():
+    started = asyncio.Event()
+
+    @tool
+    async def slow() -> str:
+        """Takes a while."""
+        started.set()
+        await asyncio.sleep(10)
+        return "late"
+
+    llm = ScriptedLLM([LLMChunk(text="Let me check."), calls("slow")])
+    orch = orchestrator(llm)
+    barge_in = BargeInState()
+    conversation = Conversation("sys")
+
+    async def interrupt():
+        await started.wait()
+        barge_in.interrupted.set()
+
+    task = asyncio.create_task(interrupt())
+    [t async for t in orch._llm_stage(one_turn("check it"), "sys", conversation=conversation, tools=as_tools([slow]),
+                                       barge_in=barge_in)]
+    await task
+    # An unanswered call would be rejected by the server on the next turn, so only the words remain
+    assert [(m.role, m.content, m.tool_calls) for m in conversation.history] == [
+        ("user", "check it", ()), ("assistant", "Let me check.", ())]

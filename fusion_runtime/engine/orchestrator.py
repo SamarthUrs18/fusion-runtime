@@ -832,7 +832,8 @@ class PipelineOrchestrator:
 
         async def predict(text: str, key) -> None:
             nonlocal detector_failed
-            history = conversation.messages_for("")[1:-1] if detector.uses_history else ()
+            history = ([m for m in conversation.messages_for("")[1:-1] if m.role in ("user", "assistant") and m.content]
+                       if detector.uses_history else ())
             request = TurnRequest(
                 transcript=text,
                 history=tuple(history[-turn_config.detector_history_messages:]) if history else (),
@@ -1043,6 +1044,8 @@ class PipelineOrchestrator:
             # tokens/s is only meaningful when the model decodes while we wait (see Capabilities)
             measure_decode = getattr(getattr(self.llm, "capabilities", None), "decodes_on_demand", True)
             max_tool_rounds = max(0, int(getattr(llm_config, "max_tool_rounds", 4)))
+            steps: List[Message] = []  # tool calls this turn with their results, kept in the history
+            round_text = ""
 
             # One round per model reply. A reply that asks for tools gets them run and the results
             # sent back, and the model answers again; the last round is offered no tools, so the
@@ -1154,7 +1157,8 @@ class PipelineOrchestrator:
                     break
                 if response_buffer and not response_buffer.endswith((" ", "\n")):
                     response_buffer += " "  # the reply continues after the tools, as a new sentence
-                messages = [*messages, Message(role="assistant", content=round_text, tool_calls=tool_calls)]
+                asked = Message(role="assistant", content=round_text, tool_calls=tool_calls)
+                messages = [*messages, asked]
                 results = await self._run_tools(tool_calls, tools_by_name, barge_in, trace, turn)
                 if results is None:  # the caller talked over the wait: drop the answer that was coming
                     finish_reason = "interrupted"
@@ -1163,9 +1167,10 @@ class PipelineOrchestrator:
                               "interrupted": True})
                     yield REPLY_CUT_OFF
                     break
-                messages = [*messages, *(Message(role="tool", content=result.content, name=call.name,
-                                                 tool_call_id=call.id)
-                                         for call, result in zip(tool_calls, results, strict=True))]
+                answered = [Message(role="tool", content=result.content, name=call.name, tool_call_id=call.id)
+                            for call, result in zip(tool_calls, results, strict=True)]
+                messages = [*messages, *answered]
+                steps += [asked, *answered]
                 finish_reason = None
             response_buffer = response_buffer.strip()
             if barge_in is not None:
@@ -1186,7 +1191,10 @@ class PipelineOrchestrator:
             # off — either way it's what actually got spoken, and it's
             # what the next candidate "user" turn gets checked against.
             last_bot_text = response_buffer
-            conversation.add_turn(transcript, response_buffer, interrupted=finish_reason == "interrupted")
+            # A call cut off before its results came back isn't kept: its words ("Let me check.")
+            # are the last round's text, stored as the reply.
+            conversation.add_turn(transcript, round_text if steps else response_buffer,
+                                  interrupted=finish_reason == "interrupted", steps=steps)
             response_buffer = ""
             first_token = True
 
