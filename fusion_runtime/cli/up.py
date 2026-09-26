@@ -145,11 +145,15 @@ def up(
         from fusion_runtime.catalog import entries_for_profile, is_installed
         missing = [e.id for e in entries_for_profile(profile) if not is_installed(e, model_dir())]
     if missing:
-        flag = "" if config is Profile.development else f" --config {config.value}"
+        if agent_file is not None:  # --config is ignored with an agent file, so don't name its profile
+            needs, pull = f"{short_path(agent_file)} needs", f"frun models pull {short_path(agent_file)}"
+        else:
+            flag = "" if config is Profile.development else f" --config {config.value}"
+            needs, pull = f"the {config.value} profile needs", f"frun models pull{flag}"
         typer.echo(
-            f"Error: the {config.value} profile needs models that aren't installed: {', '.join(missing)}\n"
+            f"Error: {needs} models that aren't installed: {', '.join(missing)}\n"
             f"  (model directory: {short_path(model_dir())})\n"
-            f"Run: frun models pull{flag}",
+            f"Run: {pull}",
             err=True,
         )
         raise typer.Exit(1)

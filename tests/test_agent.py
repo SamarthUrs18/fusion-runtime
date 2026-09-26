@@ -253,3 +253,10 @@ def test_moving_a_served_model_by_url_keeps_its_name():
     with pytest.raises(ValueError, match="FUSION_LLM_MODEL"):  # a local model has no name on any server
         Agent(prompt="hi", llm=LLM("qwen2.5-0.5b-q4")).config({"FUSION_LLM_URL": "http://localhost:8002/v1"})
 
+
+def test_missing_models_are_named_for_the_agent_file_not_a_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("FUSION_MODEL_DIR", str(tmp_path / "empty"))
+    path = write_agent(tmp_path, AGENT_FILE)
+    result = cli.invoke(app, ["up", str(path)])
+    assert result.exit_code == 1
+    assert "profile" not in result.output and f"frun models pull {path}" in result.output.replace("\n", "")
