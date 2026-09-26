@@ -10,6 +10,7 @@ audio to come back. Run it against a server you started yourself:
 
     python3 scripts/concurrency_check.py --callers 1,2,4 --turns 3
     python3 scripts/concurrency_check.py --url ws://localhost:8000 --label "llama-server -np 4"
+    python3 scripts/concurrency_check.py --audio tests/fixtures/order_1042.wav   # a tools agent
 
 The number that matters is how the median moves from one caller to several. An
 in-process llama.cpp context decodes one reply at a time, so callers queue
@@ -31,6 +32,10 @@ from pathlib import Path
 
 FIXTURE = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "hello.wav"
 CHUNK_MS = 20
+# Where each reply's time went, from the server's own turn summary: which stage
+# starts to queue as callers are added is the finding, not just that it's slower.
+STAGES = {"stt_transcribe_ms": "stt", "llm_queue_ms": "llm queue", "llm_first_token_ms": "llm first token",
+          "tool_ms": "tools", "tts_first_chunk_ms": "tts first audio"}
 
 
 def load_audio(path: Path) -> bytes:
@@ -83,7 +88,7 @@ async def one_session(index: int, url: str, key: str, audio: bytes, turns: int, 
             stopped_talking_at = time.perf_counter()
 
             first_audio_at = None
-            server_ms = None
+            summary = {}
             deadline = stopped_talking_at + 60
 
             async def keep_the_mic_open(deadline=deadline):
@@ -111,7 +116,7 @@ async def one_session(index: int, url: str, key: str, audio: bytes, turns: int, 
                         results.append({"caller": index, "turn": turn, "error": event.get("message")})
                         return
                     if event.get("type") == "turn.trace":
-                        server_ms = (event.get("summary") or {}).get("response_ms")
+                        summary = event.get("summary") or {}
                         break  # the turn is over; the server said so
             finally:
                 mic.cancel()
@@ -125,7 +130,9 @@ async def one_session(index: int, url: str, key: str, audio: bytes, turns: int, 
                 "caller": index,
                 "turn": turn,
                 "wall_ms": round((first_audio_at - stopped_talking_at) * 1000),
-                "server_ms": round(server_ms) if server_ms else None,
+                "server_ms": round(summary["response_ms"]) if summary.get("response_ms") else None,
+                **{stage: summary.get(stage) for stage in STAGES},
+                "tool_calls": summary.get("tool_calls") or 0,
             })
     finally:
         await ws.close()
@@ -156,6 +163,16 @@ def report(callers: int, results: list, seconds: float, baseline: float = None) 
     if baseline:
         line += f"   {median / baseline:.1f}x of one caller"
     print(line)
+    stages = []
+    for stage, label in STAGES.items():
+        values = [r[stage] for r in ok if r.get(stage) is not None]
+        if values:
+            stages.append(f"{label} {statistics.median(values):.0f}")
+    if stages:
+        print(f"      median ms: {', '.join(stages)}")
+    lookups = sum(r["tool_calls"] for r in ok)
+    if lookups:
+        print(f"      {lookups} tool call(s) in {len(ok)} turns")
     if errors:
         print(f"      {len(errors)} turn(s) failed: {errors[0].get('error')}")
     return median
