@@ -185,34 +185,46 @@ console), so you can reproduce them rather than trusting ours. Barge-in fired on
 
 ## Several callers at once
 
-Measured on the same 3090, real WebSocket sessions, three turns each:
+Measured on the same 3090, real WebSocket sessions, three turns each
+([`scripts/concurrency_check.py`](scripts/concurrency_check.py)). Response is the server's own
+figure: the turn ends, audio comes back.
 
-| Callers | Response, median | Turns/sec |
-|---|---|---|
-| 1 | ~460 ms | 0.21 |
-| 4 | ~740 ms | 0.55 |
-| 8 | ~4600 ms | 0.69 |
-| 12 | ~7500 ms | 0.74 |
+| Callers | In-process llama.cpp | vLLM | SGLang |
+|---|---|---|---|
+| 1 | ~460 ms | 398 ms | 410 ms |
+| 4 | ~740 ms | 698 ms | 848 ms |
+| 8 | ~4600 ms | 1086 ms | 1054 ms |
+| 12 | ~7500 ms | 1083 ms | 1264 ms |
+| 16 | — | 2064 ms | 1598 ms |
 
-**Four simultaneous callers land in the same range as one**, within run-to-run variance. Past
-that it saturates: throughput plateaus around 0.7 turns/sec, so an extra caller past the knee
-buys queue time rather than capacity. Eight is not a conversation.
+**With the model in-process, four callers is the ceiling.** At twelve, the language model's first
+token takes 4790 ms of a 5312 ms response, while speech-to-text stays at 76 ms and text-to-speech
+at 469 ms: one llama.cpp context decodes one reply at a time.
 
-The bottleneck is one specific thing. At twelve callers the language model's first token takes
-4790 ms of a 5312 ms response, while speech-to-text stays at 76 ms and text-to-speech at 469 ms.
-A single in-process llama.cpp context decodes one reply at a time; the speech stages do not care
-how many callers there are.
+**With vLLM or SGLang, twelve callers answer in about a second.** Both batch every caller's reply
+into each step on the GPU, and the language model's first token stayed between 36 and 72 ms from
+one caller to sixteen. The limit moves to speech, which still runs one caller at a time: Kokoro's
+first audio grows from ~350 ms alone to 1.5–2 s at sixteen callers, and Whisper grows with how
+long people talk (a 3-second question: ~200 ms alone, 1.6–2.2 s at sixteen). Batching speech is
+the next step, not the language model.
 
-So to go past four, move the language model out and leave speech where it is:
+**Tools hold up under load.** Every caller asked about the same order on every turn: vLLM looked
+it up in 122 of 123 turns, SGLang in 109. On SGLang every session looked it up the first time;
+the turns without a lookup were the question asked a second, third or fourth time, answered from
+the lookup already in the conversation. That is correct, but if your data can change during a
+call, tell the agent to look things up again.
+
+Measured 26 September 2026: Qwen2.5-7B-Instruct-AWQ, `--gpu-memory-utilization 0.6`,
+`--max-model-len 4096`, Whisper small and Kokoro on the same card, both servers with default
+settings otherwise. The in-process column is Qwen 7B q4 GGUF on llama.cpp, 21 September.
+
+To run the model on a server and leave speech where it is:
 
 ```python
 llm = LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ", url="http://localhost:8002/v1")
 llm = LLM("llama_server:qwen2.5-7b-instruct")              # llama-server -np N, on :8080
 llm = LLM("http://gpu-box:8000/v1", model_name="...")        # any OpenAI-compatible server
 ```
-
-vLLM and SGLang batch every caller's reply into each step on the GPU instead of decoding one at a
-time. Whether that moves the knee, and how far, is not yet measured.
 
 **On one 24 GB card** (RTX 3090, L4) the server shares the GPU with Whisper and Kokoro, and vLLM
 reserves 90% of the card by default. Cap it, and start it first:
@@ -222,6 +234,13 @@ vllm serve Qwen/Qwen2.5-7B-Instruct-AWQ --port 8002 \
   --gpu-memory-utilization 0.6 --max-model-len 4096 --max-num-seqs 16 \
   --enable-auto-tool-choice --tool-call-parser hermes
 frun up agent.py        # an Agent(profile="production", ...), so Whisper runs on the GPU too
+```
+
+SGLang the same way (its usual port is 30000, and `sglang:` finds it there):
+
+```bash
+python -m sglang.launch_server --model-path Qwen/Qwen2.5-7B-Instruct-AWQ --port 30000 \
+  --mem-fraction-static 0.6 --context-length 4096 --tool-call-parser qwen25
 ```
 
 `0.6` is about 14 GB: the weights plus every caller's context. Voice turns are short, so a 4096
