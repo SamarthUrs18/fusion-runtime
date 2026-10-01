@@ -212,6 +212,7 @@ class PipelineOrchestrator:
         barge_in: Optional["BargeInState"] = None,
         trace: Optional[SessionTrace] = None,
         tools: Sequence[Tool] = (),
+        greeting: Optional[str] = None,
     ) -> AsyncIterator[bytes]:
         """
         Main pipeline: Audio → STT → LLM → TTS → Audio
@@ -219,6 +220,8 @@ class PipelineOrchestrator:
 
         tools — functions the model may call mid-reply (fusion_runtime.tools);
         the LLM runtime must support tool calling (see check_tools).
+
+        greeting — said as soon as the pipeline starts, before the caller speaks.
 
         on_event(dict) — optional callback receiving live events:
           {"type": "transcript", "text": ..., "is_final": bool}
@@ -273,7 +276,8 @@ class PipelineOrchestrator:
 
             # Stage 2: LLM Streaming (consumes STT partials)
             llm_stream = self._llm_stage(
-                stt_stream, system_prompt, emit, turn_state, stt_reset, barge_in, trace, tools=tools
+                stt_stream, system_prompt, emit, turn_state, stt_reset, barge_in, trace, tools=tools,
+                greeting=greeting,
             )
 
             # Stage 3: TTS Streaming (consumes LLM tokens)
@@ -752,6 +756,7 @@ class PipelineOrchestrator:
         trace: Optional[SessionTrace] = None,
         conversation: Optional[Conversation] = None,
         tools: Sequence[Tool] = (),
+        greeting: Optional[str] = None,
     ) -> AsyncIterator[str]:
         """LLM streaming, gated by real (forward-measured) silence rather
         than reacting only when new STT text happens to arrive.
@@ -1203,6 +1208,33 @@ class PipelineOrchestrator:
             response_buffer = ""
             first_token = True
 
+        async def speak_greeting(text: str) -> AsyncIterator[str]:
+            """The agent's first words, before the caller says anything.
+
+            Spoken like a reply: a sentence at a time, so talking over it stops it, and
+            remembered as the agent's last words, so its echo isn't taken for the caller.
+            """
+            nonlocal last_bot_text
+            conversation.greeting = text
+            last_bot_text = text
+            if barge_in is not None:
+                barge_in.mark_speaking()
+            if trace is not None:
+                trace.event("greeting.spoken", stage="tts", chars=len(text), **telemetry.content(text, "reply"))
+            if emit:
+                emit({"type": "response", "text": text, "is_final": True, "greeting": True})
+            for sentence in _sentences(text):
+                if barge_in is not None and barge_in.interrupted.is_set():
+                    if trace is not None:
+                        trace.event("greeting.interrupted", stage="barge_in")
+                    yield REPLY_CUT_OFF
+                    break
+                yield sentence
+            else:
+                yield END_OF_REPLY
+            if barge_in is not None:
+                barge_in.mark_idle()
+
         async def maybe_process_turn(candidate: str) -> AsyncIterator[str]:
             """Guards process_turn with the self-echo check. A candidate
             that's really just the bot's own last utterance bleeding back
@@ -1232,6 +1264,9 @@ class PipelineOrchestrator:
         accumulate_task = asyncio.create_task(accumulate_stt())
         watcher_task = asyncio.create_task(watch_for_turn_end())
         try:
+            if greeting and greeting.strip():
+                async for token in speak_greeting(greeting.strip()):
+                    yield token
             while True:
                 ready_wait = asyncio.create_task(turn_ready.wait())
                 done, _ = await asyncio.wait(
@@ -1448,3 +1483,10 @@ async def run_single_turn(
     async for chunk in orchestrator.run_pipeline(audio_chunks(), system_prompt):
         output.extend(chunk)
     return bytes(output)
+
+
+def _sentences(text: str) -> List[str]:
+    """A greeting split after each sentence, spaces kept, so it can stop between them."""
+    import re
+
+    return [part for part in re.split(r"(?<=[.!?])(?=\s)", text) if part]

@@ -43,6 +43,7 @@ Settings the runtime's config already knows (`max_tokens`, `voice`, `n_ctx`,
 new engine flag needs no change here.
 """
 import importlib.util
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +54,19 @@ DEFAULT_PROMPT = "You are a helpful voice assistant. Answer briefly."
 # Runtimes that can appear in front of a model reference ("vllm:hf:org/repo").
 # "module:Class" works too, for plugins.
 KNOWN_RUNTIMES = ("llama_cpp", "ctranslate2", "onnx", "openai_http", "vllm", "sglang", "llama_server")
+
+
+MAX_GREETING_CHARS = 400
+GREETING_ENV = "FUSION_GREETING"  # overrides the agent's greeting, so a deployment can change it without a new file
+
+
+def greeting_for(agent: Optional["Agent"], environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    """What the agent says when a caller connects: $FUSION_GREETING, else the agent's, else nothing."""
+    env = os.environ if environ is None else environ
+    from_env = (env.get(GREETING_ENV) or "").strip()
+    if from_env:
+        return from_env[:MAX_GREETING_CHARS]
+    return agent.greeting if agent is not None else None
 
 
 class AgentError(ValueError):
@@ -205,12 +219,20 @@ class Agent:
     turns: Optional[Turns] = None
     vad: Optional[VAD] = None
     tools: Sequence[Any] = ()  # functions the model can call; plain functions become tools
+    greeting: Optional[str] = None  # said when a caller connects, before they speak; None = wait for them
     profile: str = "development"  # the defaults everything above is applied to
     source: Optional[Path] = None  # the file it was loaded from, when it came from one
 
     def __post_init__(self) -> None:
         if not isinstance(self.prompt, str) or not self.prompt.strip():
             raise AgentError("prompt must not be empty: it's what the agent is told to do")
+        if self.greeting is not None:
+            if not isinstance(self.greeting, str) or not self.greeting.strip():
+                raise AgentError("greeting must be the words to say, or None for the agent to wait for the caller")
+            if len(self.greeting) > MAX_GREETING_CHARS:
+                raise AgentError(f"greeting is {len(self.greeting)} characters; keep it under {MAX_GREETING_CHARS}, "
+                                 "a sentence or two: callers wait through all of it before they can talk")
+            self.greeting = self.greeting.strip()
         for stage in ("stt", "llm", "tts"):
             setattr(self, stage, Stage.of(getattr(self, stage), stage))
         if self.turns is not None and not isinstance(self.turns, Turns):
@@ -292,6 +314,7 @@ class Agent:
             "turn_detector": detector.ref if detector is not None else None,
             "language": self.language,
             "tools": [t.name for t in self.tools] or None,
+            "greeting_chars": len(self.greeting) if self.greeting else None,
             "profile": self.profile,
         }.items() if v is not None}
 

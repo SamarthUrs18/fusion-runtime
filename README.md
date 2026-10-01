@@ -36,6 +36,7 @@ from fusion_runtime import Agent, LLM, STT, TTS, Turns
 agent = Agent(
     name="shopkart-orders",
     prompt="You are the order line for ShopKart. Keep answers to one short sentence.",
+    greeting="Hi, this is ShopKart. How can I help with your order?",   # said as soon as a caller connects
     stt=STT("whisper-tiny.en"),          # or "whisper-small" for better accuracy
     llm=LLM("qwen2.5-0.5b-q4", max_tokens=256),
     tts=TTS("kokoro-v1.0", voice="af_heart"),

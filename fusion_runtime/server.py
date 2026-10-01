@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from starlette.websockets import WebSocketState
 
 from fusion_runtime import __version__, web
-from fusion_runtime.agent import DEFAULT_PROMPT, Agent, load_agent
+from fusion_runtime.agent import DEFAULT_PROMPT, Agent, greeting_for, load_agent
 from fusion_runtime.config import load_profile
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator
 from fusion_runtime.env import load_env_file
@@ -670,6 +670,8 @@ async def voice_websocket(websocket: WebSocket):
                     barge_in=barge_in,
                     trace=trace,
                     tools=agent.tools if agent is not None else (),
+                    # only when there is one, so an orchestrator written before greetings still fits
+                    **({"greeting": greeting} if (greeting := greeting_for(agent)) else {}),
                 )
                 try:
                     async for chunk in pipeline:
