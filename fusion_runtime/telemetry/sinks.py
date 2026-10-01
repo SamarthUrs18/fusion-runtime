@@ -53,7 +53,9 @@ class ConsoleSink(Sink):
         session = (event.session_id or "-")[:8]
         turn = event.turn_id or "-"
         stage = event.stage or "-"
-        name = event.name[len(stage) + 1:] if event.name.startswith(stage + ".") else event.name
+        # The event's full name when it starts with its stage ("tool.call", not "tool  call"), so
+        # searching the log for the name in the docs finds it; "turn  model.loaded" otherwise.
+        where = f"{event.name:<27}" if event.name.startswith(stage + ".") else f"{stage:<8} {event.name:<18}"
 
         if event.name == "turn.summary":
             return f"{clock}  {session:<8} {turn:<4} {_summary_line(event)}"
@@ -72,7 +74,7 @@ class ConsoleSink(Sink):
         parts.extend(f"{k}={_fmt_value(v)}" for k, v in sorted(attrs.items()) if not isinstance(v, (list, dict)))
         if event.request_id:
             parts.append(f"req={event.request_id[:8]}")
-        line = f"{clock}  {session:<8} {turn:<4} {stage:<8} {name:<18} {' '.join(parts)}".rstrip()
+        line = f"{clock}  {session:<8} {turn:<4} {where} {' '.join(parts)}".rstrip()
 
         if event.error is not None:
             err = event.error

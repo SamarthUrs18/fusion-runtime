@@ -179,7 +179,7 @@ fi
 # ---- 4. fusion's server ---------------------------------------------------------------------
 step "fusion server ($AGENT on port $PORT)"
 if [[ ! -s "$WORKSPACE/key" ]]; then
-  frun key new 2>/dev/null | grep -o -m1 'frun_[A-Za-z0-9_-]*' > "$WORKSPACE/key"
+  frun key new --quiet > "$WORKSPACE/key"
   [[ -s "$WORKSPACE/key" ]] || fail "couldn't generate a key (frun key new)"
   echo "new key in $WORKSPACE/key"
 fi
@@ -222,8 +222,8 @@ step "ready"
 echo "fusion:  http://localhost:$PORT   (log: $WORKSPACE/frun.log)"
 echo "$ENGINE:  http://localhost:$LLM_PORT   (log: $WORKSPACE/$ENGINE.log)"
 if [[ -n "$origin" ]]; then
-  echo "browser: run 'frun token --url http://127.0.0.1:$PORT --key \$(cat $WORKSPACE/key)'"
-  echo "         and open $origin/?token=<the token it prints>"
+  echo "browser: frun token --url http://127.0.0.1:$PORT --key \$(cat $WORKSPACE/key) --public-url $origin"
+  echo "         prints the link to open (once, within a minute)"
 fi
 echo "load test:"
 echo "  python scripts/concurrency_check.py --url ws://127.0.0.1:$PORT --key \$(cat $WORKSPACE/key) \\"

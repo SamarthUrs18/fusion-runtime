@@ -117,9 +117,22 @@ class Authenticator:
         return f"on ({len(self.keys)} key{'s' if len(self.keys) != 1 else ''})"
 
     def authenticate(self, *, client_host: Optional[str], authorization: Optional[str] = None,
-                     token: Optional[str] = None, allow_token: bool = True) -> Principal:
-        """Who is this? Raises Unauthorized if the answer is "nobody we accept"."""
+                     token: Optional[str] = None, allow_token: bool = True, proxied: bool = False) -> Principal:
+        """Who is this? Raises Unauthorized if the answer is "nobody we accept".
+
+        `proxied`: the request carries a proxy's forwarding headers. A reverse proxy on
+        this machine (Caddy, nginx) connects from 127.0.0.1 on behalf of anyone on the
+        internet, so such a request is never "localhost", whatever its socket says.
+        A client can add the headers itself, but that only gets it refused.
+        """
         if not self.enabled:
+            if proxied:
+                raise Unauthorized(
+                    "this server has no keys configured, and this request came through a proxy, so it "
+                    "isn't from this machine",
+                    fix="Generate a key with `frun key new` and set FUSION_ACCEPTED_KEYS before putting "
+                        "a proxy in front of the server.",
+                )
             if is_loopback(client_host):
                 return LOOPBACK
             raise Unauthorized(
@@ -142,11 +155,13 @@ class Authenticator:
         return principal
 
     def secure_enough_to_mint(self, *, scheme: str, client_host: Optional[str],
-                              forwarded_proto: Optional[str] = None, trust_proxy: bool = False) -> bool:
+                              forwarded_proto: Optional[str] = None, trust_proxy: bool = False,
+                              proxied: bool = False) -> bool:
         """A token in a URL over plain http is readable by every hop in between,
         so we hand one out only where the connection is encrypted — or where it
-        never leaves the machine."""
-        if scheme in ("https", "wss") or is_loopback(client_host):
+        never leaves the machine. A request through a proxy on this machine came
+        from further away than its socket says, so it needs the proxy's word."""
+        if scheme in ("https", "wss") or (is_loopback(client_host) and not proxied):
             return True
         return bool(trust_proxy and forwarded_proto and forwarded_proto.split(",")[0].strip() == "https")
 
@@ -175,3 +190,11 @@ class RedactQueryStrings(logging.Filter):
 def scrub_access_logs() -> None:
     for name in ("uvicorn.access", "uvicorn.error"):
         logging.getLogger(name).addFilter(RedactQueryStrings())
+
+
+PROXY_HEADERS = ("forwarded", "x-forwarded-for", "x-real-ip", "x-forwarded-host")
+
+
+def came_through_a_proxy(headers) -> bool:
+    """True when a proxy's forwarding headers are present (Caddy and nginx add them)."""
+    return any(headers.get(name) for name in PROXY_HEADERS)

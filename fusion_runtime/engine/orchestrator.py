@@ -669,6 +669,8 @@ class PipelineOrchestrator:
 
         threshold = getattr(self.vad.config, "threshold", 0.5)
         sample_rate = getattr(self.vad, "sample_rate", 16000)
+        if trace is not None:
+            trace.detector_running()
         chunk_samples = 512  # Silero's expected frame size at 16kHz
         bytes_per_frame = chunk_samples * 2
         frame_ms = chunk_samples / sample_rate * 1000
@@ -726,6 +728,9 @@ class PipelineOrchestrator:
                         turn_state.silence_ms += frame_ms
 
                 if prob >= threshold:
+                    if trace is not None:
+                        trace.speech_heard(chunk_samples / sample_rate,
+                                           at_mono=trace.arrival_time(frame_start_sample))
                     yield frame
 
         if trace is not None and speaking:

@@ -117,8 +117,8 @@ a timeout (`@tool(timeout_s=...)`, 10 s by default); ordinary functions run on a
 a tool that fails tells the model what went wrong rather than ending the call; and talking over
 the wait cancels it. After `max_tool_rounds` calls in one turn (4) the model has to answer.
 
-Tools need an LLM server that can call them — vLLM (`--enable-auto-tool-choice
---tool-call-parser ...`), SGLang, llama-server (`--jinja`) or a hosted API. The in-process
+Tools need an LLM server that can call them — vLLM or SGLang (`frun up` starts them with tool
+calling on), llama-server (`--jinja`) or a hosted API. The in-process
 llama.cpp runtime can't, and `frun up` says so at startup. A runnable version is
 [`examples/tools_agent.py`](examples/tools_agent.py).
 

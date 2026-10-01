@@ -32,6 +32,7 @@ from fusion_runtime.security import (
     ProxyTrust,
     TokenStore,
     Unauthorized,
+    came_through_a_proxy,
     scrub_access_logs,
 )
 from fusion_runtime.security.limits import (
@@ -186,6 +187,7 @@ def _configure_auth(environ=None) -> None:
     telemetry.emit("limits.configured", stage="server", max_sessions=limits.max_sessions,
                    per_key=limits.per_key(len(keys)), idle_timeout_s=limits.idle_timeout_s,
                    max_session_s=limits.max_session_s, max_turn_audio_s=limits.max_turn_audio_s,
+                   max_silence_s=limits.max_silence_s,
                    connections_per_minute=limits.connections_per_minute,
                    tokens_per_minute=limits.tokens_per_minute, trusted_proxy=proxies.enabled,
                    allowed_origins=origins.allowed or "same origin only")
@@ -274,7 +276,7 @@ def require_key(request: Request) -> Principal:
 def _authenticate(request: Request, *, allow_token: bool) -> Principal:
     try:
         principal = auth.authenticate(
-            client_host=_client_host(request),
+            client_host=_client_host(request), proxied=came_through_a_proxy(request.headers),
             authorization=request.headers.get("authorization"),
             token=request.query_params.get("token") if allow_token else None,
             allow_token=allow_token,
@@ -332,7 +334,7 @@ async def create_session(request: Request, principal: Principal = Depends(requir
     if not auth.secure_enough_to_mint(
         scheme=request.url.scheme, client_host=_client_host(request),
         forwarded_proto=request.headers.get("x-forwarded-proto"),
-        trust_proxy=proxies.believes(_client_host(request)),
+        trust_proxy=proxies.believes(_client_host(request)), proxied=came_through_a_proxy(request.headers),
     ):
         behind_a_proxy = request.headers.get("x-forwarded-proto")
         raise Unauthorized(
@@ -510,7 +512,7 @@ async def voice_websocket(websocket: WebSocket):
         # A browser can't set a header here, so it presents a session token in the
         # query string instead; everything else sends the key the usual way.
         principal = auth.authenticate(
-            client_host=_client_host(websocket),
+            client_host=_client_host(websocket), proxied=came_through_a_proxy(websocket.headers),
             authorization=websocket.headers.get("authorization"),
             token=websocket.query_params.get("token"),
         )
@@ -596,6 +598,7 @@ async def voice_websocket(websocket: WebSocket):
                     # goes quiet.
                     playing = bool(msg.get("playing"))
                     barge_in.set_playing(playing)
+                    budget.agent_playing(playing)
                     turn = trace.responding
                     if playing and turn is not None and "playback_started" not in turn.marks:
                         turn.mark("playback_started")
@@ -616,7 +619,7 @@ async def voice_websocket(websocket: WebSocket):
                         if trace.turn_count != turns_seen:  # a turn ended: the budget starts again
                             turns_seen = trace.turn_count
                             budget.turn_ended()
-                        budget.audio(len(data))
+                        budget.audio(len(data), speech_s=trace.speech_s, last_speech=trace.last_speech_mono)
                         await audio_queue.put(data)
                         continue
                     text = message.get("text")
@@ -670,6 +673,7 @@ async def voice_websocket(websocket: WebSocket):
                 )
                 try:
                     async for chunk in pipeline:
+                        budget.agent_spoke()
                         await websocket.send_bytes(chunk)
                 finally:
                     # Close the pipeline now (not whenever it gets garbage collected), so its
