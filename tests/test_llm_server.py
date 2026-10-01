@@ -33,6 +33,10 @@ FAKE_ENGINE = textwrap.dedent('''\
             body = b""
             if self.path == "/v1/models":
                 body = json.dumps({{"data": [{{"id": name}}]}}).encode()
+            elif self.path == "/metrics":
+                body = ('vllm:num_requests_running{{model_name="' + name + '"}} 2.0\\n'
+                        'vllm:num_requests_waiting{{model_name="' + name + '"}} 1.0\\n'
+                        'vllm:kv_cache_usage_perc{{model_name="' + name + '"}} 0.25\\n').encode()
             elif self.path != "/health":
                 self.send_response(404); self.end_headers(); return
             self.send_response(200); self.end_headers(); self.wfile.write(body)
@@ -231,3 +235,118 @@ def test_a_log_file_that_cant_be_written_is_named(tmp_path):
     blocker.write_text("")
     with pytest.raises(LaunchError, match="can't write the LLM server's log"):
         llm_server.LogPrinter(llm_server.ENGINES["vllm"], json_format=False, file=blocker / "vllm.log")
+
+
+def fake_nvidia_smi(cards, apps=""):
+    import subprocess
+
+    def run(args, **kwargs):
+        out = cards if "--query-gpu" in args[1] else apps
+        return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+    return run
+
+
+def test_the_gpu_is_read_with_whatever_holds_memory_on_it():
+    gpu = llm_server.read_gpu({}, run=fake_nvidia_smi(
+        "0, NVIDIA GeForce RTX 3090, 24576, 9216, GPU-aaa\n1, NVIDIA L4, 23034, 23000, GPU-bbb\n",
+        "GPU-aaa, 4242, /root/vllm-env/bin/python3, 14848\nGPU-bbb, 7, other, 10\n"))
+    assert (gpu.index, gpu.name, gpu.total_gb, gpu.free_gb) == (0, "NVIDIA GeForce RTX 3090", 24.0, 9.0)
+    assert gpu.users == ((4242, "/root/vllm-env/bin/python3", 14.5),)
+    second = llm_server.read_gpu({"CUDA_VISIBLE_DEVICES": "1"}, run=fake_nvidia_smi(
+        "0, A, 24576, 1, GPU-aaa\n1, NVIDIA L4, 23034, 23000, GPU-bbb\n"))
+    assert second.name == "NVIDIA L4"
+
+
+def test_a_gpu_already_in_use_stops_the_start_and_says_by_what(engine_env):
+    launch = llm_server.plan(llm_config(LLM("vllm:hf:org/model", engine_env=str(engine_env))), has_tools=False)
+    busy = llm_server.GPU(0, "NVIDIA GeForce RTX 3090", 24.0, 9.0, ((4242, "/root/vllm-env/bin/python3", 14.5),))
+    with pytest.raises(LaunchError, match=r"(?s)vLLM needs 14.4 GB of GPU 0.*only 9.0 GB is free.*pid 4242.*kill <pid>"):
+        llm_server.check_gpu_memory(launch, busy, speech_need_gb=2.5)
+    free = llm_server.GPU(0, "NVIDIA GeForce RTX 3090", 24.0, 23.5)
+    assert llm_server.check_gpu_memory(launch, free, speech_need_gb=2.5) == []
+    assert llm_server.check_gpu_memory(launch, None, speech_need_gb=2.5) == []  # no NVIDIA GPU: nothing to check
+
+
+def test_too_little_left_for_speech_is_a_warning_with_a_number(engine_env):
+    launch = llm_server.plan(llm_config(LLM("vllm:hf:org/model", gpu_memory=0.9, engine_env=str(engine_env))),
+                             has_tools=False)
+    warnings = llm_server.check_gpu_memory(launch, llm_server.GPU(0, "L4", 22.0, 21.8), speech_need_gb=2.5)
+    assert len(warnings) == 1 and "leaving 2.2 GB" in warnings[0] and "lower gpu_memory (to 0.86)" in warnings[0]
+
+
+def test_speech_needs_more_with_a_bigger_whisper_on_the_gpu():
+    from fusion_runtime.config import PROFILES
+
+    on_cpu = llm_server.speech_gb(PROFILES["development"])  # Whisper on the CPU: Kokoro and contexts only
+    on_gpu = llm_server.speech_gb(PROFILES["production"])  # whisper-small on CUDA
+    assert on_cpu == 1.6 and on_gpu == 2.5
+
+
+VLLM_METRICS = """# HELP vllm:num_requests_running Number of requests in model execution batches.
+vllm:num_requests_running{engine="0",model_name="org/model"} 7.0
+vllm:num_requests_waiting{engine="0",model_name="org/model"} 3.0
+vllm:kv_cache_usage_perc{engine="0",model_name="org/model"} 0.62
+vllm:gpu_cache_usage_perc{engine="0",model_name="org/model"} 0.62
+"""
+
+
+def test_the_engines_own_numbers_are_read_from_its_metrics():
+    assert llm_server.parse_engine_metrics(VLLM_METRICS, "vllm") == {"running": 7, "waiting": 3, "kv_cache_used": 0.62}
+    older = "vllm:gpu_cache_usage_perc{model_name=\"m\"} 0.3\n"  # before vLLM renamed it
+    assert llm_server.parse_engine_metrics(older, "vllm") == {"kv_cache_used": 0.3}
+    sglang = "sglang:num_running_reqs{tp_rank=\"0\"} 4\nsglang:num_queue_reqs{tp_rank=\"0\"} 0\nsglang:token_usage{tp_rank=\"0\"} 0.2\n"
+    assert llm_server.parse_engine_metrics(sglang, "sglang") == {"running": 4, "waiting": 0, "kv_cache_used": 0.2}
+    assert "--enable-metrics" in llm_server.ENGINES["sglang"].command("python", "m", 30000)
+
+
+async def test_the_monitor_notices_the_server_going_down_and_coming_back():
+    import httpx
+    from fusion_runtime.telemetry import telemetry
+    from fusion_runtime.telemetry.sinks import ListSink
+
+    up = {"now": True}
+
+    def answer(request):
+        if not up["now"]:
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(200, text=VLLM_METRICS if request.url.path == "/metrics" else "")
+
+    sink = ListSink()
+    telemetry.add_sink(sink)
+    try:
+        monitor = llm_server.EngineMonitor("vLLM", "http://127.0.0.1:8002/v1")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+            await monitor.poll(client)
+            assert monitor.snapshot()["state"] == "up" and monitor.snapshot()["waiting"] == 3
+            assert monitor.turn_fields() == {"llm_server_running": 7, "llm_server_waiting": 3, "kv_cache_used": 0.62}
+            up["now"] = False
+            await monitor.poll(client)
+            assert monitor.snapshot()["state"] == "down" and "waiting" not in monitor.snapshot()
+            up["now"] = True
+            await monitor.poll(client)
+    finally:
+        telemetry.remove_sink(sink)
+    names = [e.name for e in sink.events if e.name in ("llm_server.up", "llm_server.down")]
+    assert names == ["llm_server.down", "llm_server.up"]  # the first healthy check isn't news
+
+
+def test_the_engines_numbers_become_prometheus_gauges():
+    from fusion_runtime.telemetry.events import Event
+    from fusion_runtime.telemetry.metrics import TelemetryMetrics
+    from prometheus_client import generate_latest
+
+    metrics = TelemetryMetrics()
+    metrics.handle(Event(name="llm_server.state", stage="llm",
+                         attrs={"engine": "vllm", "state": "up", "running": 7, "waiting": 3, "kv_cache_used": 0.62}))
+    text = generate_latest(metrics.registry).decode()
+    assert 'fusion_llm_server_up{engine="vllm"} 1.0' in text
+    assert 'fusion_llm_server_requests_waiting{engine="vllm"} 3.0' in text
+    assert 'fusion_llm_server_kv_cache_used{engine="vllm"} 0.62' in text
+
+
+def test_an_engine_that_cant_run_is_an_error_not_a_crash(engine_env):
+    (engine_env / "bin" / "vllm").write_bytes(b"\x00\x01not a program")
+    launch = llm_server.plan(llm_config(LLM("vllm:hf:org/model", url=f"http://127.0.0.1:{free_port()}/v1",
+                                            engine_env=str(engine_env))), has_tools=False)
+    with pytest.raises(LaunchError, match=r"couldn't run .*vllm: .*Reinstall vLLM"):
+        llm_server.LLMServer(launch, lambda level, message: None).start()

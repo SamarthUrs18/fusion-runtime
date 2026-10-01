@@ -67,11 +67,12 @@ agent: Optional["Agent"] = None  # set when the server was started with an agent
 _started_at = time.monotonic()
 _active_sessions: set = set()
 _loop_monitor: Optional[LoopMonitor] = None
+_engine_monitor = None  # llm_server.EngineMonitor, when the LLM is on vLLM, SGLang or llama-server
 
 
 @app.on_event("startup")
 async def startup():
-    global orchestrator, agent, _loop_monitor, _started_at
+    global orchestrator, agent, _loop_monitor, _started_at, _engine_monitor
     _started_at = time.monotonic()
     agent_path = os.getenv("FUSION_AGENT")
     directories = [Path.cwd()] + ([Path(agent_path).expanduser().parent] if agent_path else [])
@@ -105,6 +106,7 @@ async def startup():
     await orchestrator.initialize()
     if agent is not None and agent.tools:
         orchestrator.check_tools(agent.tools)  # an LLM that can't call them fails now, not mid-call
+    _engine_monitor = _watch_llm_server(orchestrator)
     telemetry.emit("server.ready", stage="server", duration_ms=(time.monotonic() - _started_at) * 1000)
 
 
@@ -115,8 +117,24 @@ async def shutdown():
                    active_sessions=len(_active_sessions))
     if _loop_monitor is not None:
         await _loop_monitor.stop()
+    if _engine_monitor is not None:
+        await _engine_monitor.stop()
     if orchestrator:
         await orchestrator.shutdown()
+
+
+def _watch_llm_server(pipeline):
+    """When the LLM is on a model server, ask it how it's doing every few seconds."""
+    from fusion_runtime.llm_server import EngineMonitor
+
+    resolved = getattr(pipeline, "__dict__", {}).get("resolved_models", {}).get("llm")
+    served_by = resolved.metadata.get("served_by") if resolved is not None and resolved.metadata else None
+    if not served_by:
+        return None
+    monitor = EngineMonitor(served_by, resolved.spec.model)
+    pipeline.llm_server_state = monitor.turn_fields  # each turn's llm.request records the server's queue
+    monitor.start()
+    return monitor
 
 
 # ============ Models ============
@@ -154,6 +172,7 @@ class HealthResponse(BaseModel):
     uptime_s: float
     active_sessions: int
     config: dict
+    llm_server: Optional[dict] = None  # the model server's own state, when the LLM is on one
 
 
 def _error_response(e: Exception, request_id: str) -> JSONResponse:
@@ -393,7 +412,8 @@ async def health():
             "stt": orchestrator.config.stt.provider.value if orchestrator else None,
             "llm": orchestrator.config.llm.provider.value if orchestrator else None,
             "tts": orchestrator.config.tts.provider.value if orchestrator else None,
-        }
+        },
+        llm_server=_engine_monitor.snapshot() if _engine_monitor is not None else None,
     )
 
 

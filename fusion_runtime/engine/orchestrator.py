@@ -1048,8 +1048,10 @@ class PipelineOrchestrator:
             }
             if turn is not None:
                 turn.mark("llm_request")
+                server_state = self.__dict__.get("llm_server_state")  # set when the LLM is on vLLM/SGLang
                 trace.event("llm.request", turn=turn, stage="llm", messages=len(messages),
-                            history_turns=conversation.turns, **llm_labels, **telemetry.content(transcript, "prompt"))
+                            history_turns=conversation.turns, **llm_labels,
+                            **(server_state() if server_state else {}), **telemetry.content(transcript, "prompt"))
             finish_reason = None
             # tokens/s is only meaningful when the model decodes while we wait (see Capabilities)
             measure_decode = getattr(getattr(self.llm, "capabilities", None), "decodes_on_demand", True)

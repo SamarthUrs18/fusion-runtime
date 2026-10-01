@@ -196,6 +196,13 @@ def up(
                 typer.echo(f"LLM: {launch.engine.display} is already running at {launch.base_url} "
                            f"with {launch.model_name}; using it as it is")
                 launch = None
+            else:
+                gpu = llm_server.read_gpu()
+                for warning in llm_server.check_gpu_memory(launch, gpu, llm_server.speech_gb(profile)):
+                    typer.echo(f"Warning: {warning}")
+                if gpu is not None:
+                    launch.notes.append(f"GPU {gpu.index}: {gpu.name}, {gpu.free_gb:.1f} of {gpu.total_gb:.1f} GB free; "
+                                        f"{launch.engine.display} takes {launch.gpu_memory:.0%}")
         except llm_server.LaunchError as e:
             typer.echo(f"Error: {e}", err=True)
             raise typer.Exit(1)

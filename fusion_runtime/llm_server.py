@@ -62,8 +62,9 @@ class Engine:
     def command(self, python_or_bin: str, model: str, port: int) -> List[str]:
         if self.name == "vllm":
             return [python_or_bin, "serve", model, "--host", "127.0.0.1", "--port", str(port)]
+        # --enable-metrics: SGLang's /metrics is off otherwise, and fusion reads its queue from it
         return [python_or_bin, "-m", "sglang.launch_server", "--model-path", model,
-                "--host", "127.0.0.1", "--port", str(port)]
+                "--host", "127.0.0.1", "--port", str(port), "--enable-metrics"]
 
     def tool_flags(self, parser: str) -> List[str]:
         if self.name == "vllm":
@@ -88,6 +89,7 @@ class LaunchPlan:
     env: Dict[str, str]
     start_timeout_s: float = START_TIMEOUT_S
     notes: List[str] = field(default_factory=list)  # said once at startup: defaults chosen for the user
+    gpu_memory: float = GPU_MEMORY  # the engine's share of the card
 
     @property
     def health_url(self) -> str:
@@ -143,7 +145,8 @@ def plan(llm, *, has_tools: bool, environ: Optional[Mapping[str, str]] = None) -
     command += ["--served-model-name", model_name]
     if revision:
         command += ["--revision", revision]
-    command += [engine.gpu_memory_flag, str(_number(options, "gpu_memory", GPU_MEMORY, 0.05, 0.95))]
+    gpu_memory = _number(options, "gpu_memory", GPU_MEMORY, 0.05, 0.95)
+    command += [engine.gpu_memory_flag, str(gpu_memory)]
     command += [engine.max_model_len_flag, str(int(_number(options, "max_model_len", MAX_MODEL_LEN, 256, None)))]
     if options.get("max_callers") is not None:
         command += [engine.max_callers_flag, str(int(_number(options, "max_callers", 0, 1, None)))]
@@ -169,7 +172,8 @@ def plan(llm, *, has_tools: bool, environ: Optional[Mapping[str, str]] = None) -
         # Both engines compile kernels on first use and call `ninja` from their own environment
         child_env["PATH"] = bin_dir + os.pathsep + child_env.get("PATH", "")
     timeout = _number(options, "start_timeout_s", START_TIMEOUT_S, 10, None)
-    return LaunchPlan(engine, model_name, f"http://127.0.0.1:{port}/v1", command, child_env, timeout, notes)
+    return LaunchPlan(engine, model_name, f"http://127.0.0.1:{port}/v1", command, child_env, timeout, notes,
+                      gpu_memory)
 
 
 def already_serving(launch: LaunchPlan, timeout_s: float = 2.0) -> bool:
@@ -199,6 +203,95 @@ def already_serving(launch: LaunchPlan, timeout_s: float = 2.0) -> bool:
         raise LaunchError(f"the server on {launch.base_url} serves {', '.join(map(str, served)) or 'no models'}, "
                           f"not {launch.model_name}. Stop it, or move the LLM: LLM(..., url=\"http://localhost:<port>/v1\")")
     return True
+
+
+# -- GPU memory, before starting ------------------------------------------------------------------
+
+# What speech takes on the GPU beside the engine, in GB: rough, measured on a 3090 with
+# CTranslate2 float16 Whisper and Kokoro on onnxruntime-gpu. Used to warn, never to refuse.
+WHISPER_GB = {"tiny": 0.3, "base": 0.4, "small": 0.9, "medium": 2.0, "large": 3.6, "turbo": 2.0, "distil": 1.6}
+KOKORO_GB = 0.8
+CUDA_CONTEXT_GB = 0.8  # each library's CUDA context in fusion's process, together
+
+
+@dataclass(frozen=True)
+class GPU:
+    index: int
+    name: str
+    total_gb: float
+    free_gb: float
+    users: tuple = ()  # (pid, process name, GB) of what holds memory on it now
+
+
+def read_gpu(environ: Optional[Mapping[str, str]] = None, run=subprocess.run) -> Optional[GPU]:
+    """The card the engine will use (the first in CUDA_VISIBLE_DEVICES), or None without nvidia-smi."""
+    env = os.environ if environ is None else environ
+    if shutil.which("nvidia-smi") is None and run is subprocess.run:
+        return None
+    visible = (env.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
+    index = int(visible) if visible.isdigit() else 0
+    try:
+        cards = run(["nvidia-smi", "--query-gpu=index,name,memory.total,memory.free,uuid",
+                     "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10).stdout
+        apps = run(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+                    "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in cards.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 5 or not parts[0].isdigit() or int(parts[0]) != index:
+            continue
+        try:
+            total, free = float(parts[2]) / 1024, float(parts[3]) / 1024
+        except ValueError:
+            return None
+        users = []
+        for app in apps.strip().splitlines():
+            fields = [f.strip() for f in app.split(",")]
+            if len(fields) == 4 and fields[0] == parts[4]:
+                try:
+                    users.append((int(fields[1]), fields[2], round(float(fields[3]) / 1024, 1)))
+                except ValueError:
+                    pass
+        return GPU(index, parts[1], round(total, 1), round(free, 1), tuple(users))
+    return None
+
+
+def speech_gb(config) -> float:
+    """What Whisper and Kokoro take on the GPU, roughly, for this pipeline's settings."""
+    need = 0.0
+    stt = getattr(config, "stt", None)
+    if stt is not None and getattr(stt, "device", "cpu") in ("cuda", "auto"):
+        model = str(getattr(stt, "model", "")).lower()
+        need += next((gb for size, gb in WHISPER_GB.items() if size in model), WHISPER_GB["small"])
+    need += KOKORO_GB  # on the GPU whenever onnxruntime-gpu is installed; small enough to always count
+    return round(need + CUDA_CONTEXT_GB, 1)
+
+
+def check_gpu_memory(launch: LaunchPlan, gpu: Optional[GPU], speech_need_gb: float) -> List[str]:
+    """Refuse a start that can't work; return warnings for one that may not leave speech enough.
+
+    The engine reserves its share of the card's *total* memory at start and fails if that much
+    isn't free, a few minutes in and with a message about KV cache blocks. The usual cause is
+    something left running: an earlier engine, another frun up, a notebook.
+    """
+    if gpu is None:
+        return []
+    engine = launch.engine.display
+    wanted = launch.gpu_memory * gpu.total_gb
+    if gpu.free_gb + 0.3 < wanted:  # a little slack: nvidia-smi rounds, and the engine allows some
+        holders = "\n".join(f"    pid {pid}  {name}  {gb} GB" for pid, name, gb in gpu.users) or "    (nvidia-smi lists none)"
+        raise LaunchError(
+            f"{engine} needs {wanted:.1f} GB of GPU {gpu.index} ({gpu.name}): gpu_memory={launch.gpu_memory} of "
+            f"{gpu.total_gb:.1f} GB, but only {gpu.free_gb:.1f} GB is free. Using it now:\n{holders}\n"
+            f"  Stop what you don't need (an earlier {engine} or frun up is the usual one: kill <pid>), "
+            f"or lower gpu_memory.")
+    left = gpu.total_gb * (1 - launch.gpu_memory)
+    if left < speech_need_gb:
+        return [f"{engine} takes {wanted:.1f} GB, leaving {left:.1f} GB for speech-to-text and text-to-speech, "
+                f"which need about {speech_need_gb:.1f} GB. If they fail to load, lower gpu_memory "
+                f"(to {max(0.1, 1 - (speech_need_gb + 0.5) / gpu.total_gb):.2f}) or use a smaller Whisper."]
+    return []
 
 
 class LLMServer:
@@ -244,7 +337,15 @@ class LLMServer:
     def _spawn(self) -> None:
         self._tail.clear()
         self._log("starting", f"starting {self.name}")
-        self._process = subprocess.Popen(
+        try:
+            self._process = self._popen()
+        except OSError as e:  # the program is there but can't run: wrong platform, a broken venv, permissions
+            raise LaunchError(f"couldn't run {self.launch.command[0]}: {e.strerror or e}. "
+                              f"Reinstall {self.name} in that environment") from None
+        threading.Thread(target=self._pump, args=(self._process,), name="llm-server-log", daemon=True).start()
+
+    def _popen(self) -> subprocess.Popen:
+        return subprocess.Popen(
             self.launch.command, env=self.launch.env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1,
             # Its own process group: Ctrl+C reaches fusion, which then stops the server itself,
@@ -252,7 +353,6 @@ class LLMServer:
             start_new_session=True,
             preexec_fn=_die_with_parent if sys.platform.startswith("linux") else None,
         )
-        threading.Thread(target=self._pump, args=(self._process,), name="llm-server-log", daemon=True).start()
 
     def _pump(self, process: subprocess.Popen) -> None:
         for line in process.stdout:
@@ -319,6 +419,123 @@ class LLMServer:
                 self._log("error", str(e))
             except OSError as e:  # the program went away (environment deleted?): keep trying, say why
                 self._log("error", f"couldn't start {self.name} again: {e}")
+
+
+# -- watching the engine while calls run ---------------------------------------------------------
+
+# Prometheus series each engine publishes, by what fusion calls them. Several names per field:
+# engines rename them between versions (vLLM's gpu_cache_usage_perc became kv_cache_usage_perc).
+ENGINE_SERIES = {
+    "vllm": {"running": ("vllm:num_requests_running",), "waiting": ("vllm:num_requests_waiting",),
+             "kv_cache_used": ("vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc")},
+    "sglang": {"running": ("sglang:num_running_reqs",), "waiting": ("sglang:num_queue_reqs",),
+               "kv_cache_used": ("sglang:token_usage",)},
+}
+SERVED_BY = {"vLLM": "vllm", "SGLang": "sglang", "llama-server": "llama_server"}
+
+
+def parse_engine_metrics(text: str, engine: str) -> Dict[str, float]:
+    """Requests running and waiting, and the share of KV cache in use, from an engine's /metrics.
+
+    Values are summed over label sets (one per model). When an engine publishes a field under
+    two names, the first name in ENGINE_SERIES that appears is used, so it isn't counted twice.
+    """
+    by_name: Dict[str, float] = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        name = line.split("{", 1)[0].split(" ", 1)[0]
+        try:
+            value = float(line.rsplit(" ", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        by_name[name] = by_name.get(name, 0.0) + value
+    found: Dict[str, float] = {}
+    for field_name, names in ENGINE_SERIES.get(engine, {}).items():
+        name = next((n for n in names if n in by_name), None)
+        if name is not None:
+            value = by_name[name]
+            found[field_name] = round(value, 3) if field_name == "kv_cache_used" else int(value)
+    return found
+
+
+class EngineMonitor:
+    """Asks the LLM server how it's doing every few seconds, for /health, /metrics and each turn's log.
+
+    Its own view, not fusion's: how many requests it's decoding, how many wait, and how full
+    its KV cache is. A queue that grows while the cache is full is the sign of too many callers.
+    """
+
+    def __init__(self, served_by: str, base_url: str, interval_s: float = 5.0):
+        self.engine = SERVED_BY.get(served_by, served_by)
+        self.display = served_by
+        parts = urlsplit(base_url)
+        root = f"{parts.scheme}://{parts.netloc}"
+        self.health_url, self.metrics_url = root + "/health", root + "/metrics"
+        self.interval_s = interval_s
+        self.state: Dict[str, Any] = {"engine": self.engine, "url": base_url, "state": "unknown"}
+        self._task = None
+
+    def snapshot(self) -> Dict[str, Any]:
+        return dict(self.state)
+
+    def turn_fields(self) -> Dict[str, Any]:
+        """For a turn's llm.request: what the server was dealing with when this turn asked."""
+        fields = {f"llm_server_{k}": self.state[k] for k in ("running", "waiting") if k in self.state}
+        if "kv_cache_used" in self.state:
+            fields["kv_cache_used"] = self.state["kv_cache_used"]
+        return fields
+
+    async def poll(self, client) -> None:
+        import httpx
+
+        from fusion_runtime.telemetry import telemetry
+
+        before = self.state.get("state")
+        try:
+            healthy = (await client.get(self.health_url, timeout=3.0)).status_code == 200
+        except httpx.HTTPError:
+            healthy = False
+        state: Dict[str, Any] = {"engine": self.engine, "url": self.state["url"], "state": "up" if healthy else "down"}
+        if healthy and self.engine in ENGINE_SERIES:
+            try:
+                response = await client.get(self.metrics_url, timeout=3.0)
+                if response.status_code == 200:
+                    state.update(parse_engine_metrics(response.text, self.engine))
+            except httpx.HTTPError:
+                pass
+        state["checked_at"] = round(time.time(), 1)
+        self.state = state
+        telemetry.emit("llm_server.state", level="debug", stage="llm",
+                       **{k: v for k, v in state.items() if k != "checked_at"})
+        if before != state["state"] and not (before == "unknown" and healthy):
+            telemetry.emit("llm_server.up" if healthy else "llm_server.down",
+                           level="info" if healthy else "error", stage="llm", engine=self.display, url=state["url"],
+                           hint=None if healthy else "replies fail until it's back; frun up restarts a server it started")
+
+    async def run(self) -> None:
+        import asyncio
+
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            while True:
+                await self.poll(client)
+                await asyncio.sleep(self.interval_s)
+
+    def start(self) -> None:
+        import asyncio
+
+        self._task = asyncio.get_running_loop().create_task(self.run())
+
+    async def stop(self) -> None:
+        import asyncio
+        import contextlib
+
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
 
 
 class LogPrinter:
