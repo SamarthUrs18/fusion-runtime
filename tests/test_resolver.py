@@ -334,13 +334,14 @@ def test_a_repo_written_without_the_hf_prefix_says_so(tmp_path):
 
 
 def test_a_served_model_resolves_to_its_server_under_its_repo_id(tmp_path):
-    """vllm:/sglang:/llama_server: in front of a model means "I started that server": talk to it
-    over the OpenAI API at its usual address, asking for the model by the id it was loaded with."""
+    """vllm:/sglang:/llama_server: in front of a model means "served by that server": talk to it
+    over the OpenAI API at its usual address, asking for the model by the id it was loaded with.
+    vLLM's is 8002, not its own default 8000, which is frun up's."""
     from fusion_runtime.agent import LLM
 
     runtime, ref = LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ@main").split()
     vllm = resolve("llm", ref, runtime=runtime, catalog=empty_catalog(), root=tmp_path)
-    assert (vllm.spec.runtime, vllm.spec.model) == ("openai_http", "http://localhost:8000/v1")
+    assert (vllm.spec.runtime, vllm.spec.model) == ("openai_http", "http://127.0.0.1:8002/v1")
     assert vllm.spec.options["model_name"] == "Qwen/Qwen2.5-7B-Instruct-AWQ"
     assert vllm.metadata["served_by"] == "vLLM"
 
@@ -348,7 +349,7 @@ def test_a_served_model_resolves_to_its_server_under_its_repo_id(tmp_path):
                      catalog=empty_catalog(), root=tmp_path)
     assert sglang.spec.model == "http://gpu:30000/v1" and "url" not in sglang.spec.options
     assert resolve("llm", "./model.gguf", runtime="llama_server", catalog=empty_catalog(),
-                   root=tmp_path).spec.model == "http://localhost:8080/v1"
+                   root=tmp_path).spec.model == "http://127.0.0.1:8080/v1"
 
     by_url = resolve("llm", "http://gpu:8000/v1", runtime="vllm", options={"model_name": "m"},
                      catalog=empty_catalog(), root=tmp_path)
@@ -365,7 +366,7 @@ def test_an_agent_names_a_served_model_and_keeps_its_settings(tmp_path, monkeypa
     monkeypatch.delenv("FUSION_LLM_URL", raising=False)
     config = Agent(llm=LLM("sglang:hf:org/model", max_tokens=100, extra_body={"top_k": 20})).config()
     resolved = resolve_stage_config("llm", config.llm, catalog=empty_catalog(), root=tmp_path)
-    assert resolved.spec.model == "http://localhost:30000/v1"
+    assert resolved.spec.model == "http://127.0.0.1:30000/v1"
     assert resolved.spec.options["max_tokens"] == 100 and resolved.spec.options["extra_body"] == {"top_k": 20}
 
 
@@ -383,9 +384,15 @@ def test_unknown_settings_are_refused_with_the_likely_one(tmp_path, monkeypatch)
         resolve_llm(LLM("http://x/v1", model_name="m", n_gpu_layer=20))
     with pytest.raises(InvalidRequest, match="has no setting 'extra_bdy'.*'extra_body'"):
         resolve_llm(LLM("http://x/v1", model_name="m", extra_bdy={}))
-    # Server launch settings get pointed at the server's own flags
-    with pytest.raises(InvalidRequest, match=r"gpu_memory is a setting for starting vLLM.*--gpu-memory-utilization"):
-        resolve_llm(LLM("vllm:hf:org/model", gpu_memory=0.6))
+    # Launch settings: read for the servers frun up starts, kept out of the HTTP client's options
+    launched = resolve_llm(LLM("vllm:hf:org/model", gpu_memory=0.5, max_model_len=8192, extra_args="--seed 1"))
+    assert not {"gpu_memory", "max_model_len", "extra_args"} & set(launched.spec.options)
+    # ...an engine's own flag name points at fusion's name or extra_args
+    with pytest.raises(InvalidRequest, match=r"gpu_memory_utilization.*extra_args=\"--gpu-memory-utilization"):
+        resolve_llm(LLM("vllm:hf:org/model", gpu_memory_utilization=0.6))
+    # ...and llama-server, which you start yourself, says so
+    with pytest.raises(InvalidRequest, match=r"gpu_memory is a setting for starting llama-server.*only for vllm"):
+        resolve_llm(LLM("llama_server:hf:org/model", gpu_memory=0.6))
     whisper = tmp_path / "whisper"
     whisper.mkdir()
     (whisper / "model.bin").write_bytes(b"")

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """A voice agent that looks things up while the caller waits. Run it with:
 
-    vllm serve Qwen/Qwen2.5-7B-Instruct-AWQ --port 8002 --enable-auto-tool-choice --tool-call-parser hermes \\
-        --gpu-memory-utilization 0.6 --max-model-len 4096
-    frun up examples/tools_agent.py      # port 8000, which is why vLLM is on 8002
-    frun talk                            # in another terminal
+    export FUSION_LLM_ENGINE_ENV=~/vllm-env    # where vLLM is installed (see the README)
+    frun up examples/tools_agent.py           # starts vLLM on port 8002, then the agent on 8000
+    frun talk                                 # in another terminal
 
 A tool is an ordinary function. The model sees its name, its docstring and its
 parameters; when it calls one, the function runs and the model answers with
@@ -61,11 +60,9 @@ agent = Agent(
         "Keep every answer to one short sentence."
     ),
     stt=STT("whisper-small"),
-    # The model on the vLLM started above, asked for by the repo id it loaded. vLLM's own
-    # default port is 8000, the same as frun up's, so on one machine it moves to 8002
-    # (not 8001: Runpod's pod images already use that one).
-    llm=LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ", url="http://localhost:8002/v1",
-            max_tokens=200, max_tool_rounds=3),
+    # frun up starts vLLM for this model (port 8002, 60% of the GPU, Qwen's tool-call format,
+    # since the agent has tools) before loading speech, and stops it on exit.
+    llm=LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ", max_tokens=200, max_tool_rounds=3),
     tts=TTS("kokoro-v1.0", voice="af_heart"),
     turns=Turns(wait_ms=500, interrupt_after_ms=300),
     tools=[order_status, change_delivery],
