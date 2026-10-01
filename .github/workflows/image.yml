@@ -15,7 +15,9 @@ env:
 jobs:
   gpu-image:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # A first build, with nothing cached (a release tag's usually is), takes longest.
+    # Free for a public repository; GitHub's own limit is 6 hours.
+    timeout-minutes: 150
     permissions:
       contents: read
       packages: write
@@ -58,7 +60,10 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # min: cache the final image's layers only. max also saved the builder stage (the
+          # CUDA development image, torch, compilers: 10+ GB), and uploading that took most
+          # of the first test build's hour.
+          cache-to: type=gha,mode=min
 
       # The runner has no GPU, so this checks only that the image starts and the
       # package is installed — the part that was broken in the old Dockerfile.

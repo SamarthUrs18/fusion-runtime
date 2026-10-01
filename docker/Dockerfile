@@ -75,6 +75,14 @@ RUN pip install onnxruntime-gpu \
 COPY pyproject.toml README.md ./
 COPY fusion_runtime/ ./fusion_runtime/
 RUN pip install .
+# fusion's package asks for `onnxruntime`, and pip installs the CPU build of it beside
+# onnxruntime-gpu: both own the same module, the CPU one lands last, and Kokoro runs
+# on the CPU without a word (pod test, 25 September). Take it out, put the GPU build
+# back, and fail the build if the CUDA provider isn't compiled in.
+RUN pip uninstall -y onnxruntime \
+    && pip install --force-reinstall --no-deps onnxruntime-gpu \
+        --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/ \
+    && python -c "import onnxruntime as o; p = o.get_available_providers(); assert 'CUDAExecutionProvider' in p, p"
 
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04 AS runtime
 ARG PYTHON_VERSION
