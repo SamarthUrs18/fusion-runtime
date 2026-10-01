@@ -350,3 +350,30 @@ def test_an_engine_that_cant_run_is_an_error_not_a_crash(engine_env):
                                             engine_env=str(engine_env))), has_tools=False)
     with pytest.raises(LaunchError, match=r"couldn't run .*vllm: .*Reinstall vLLM"):
         llm_server.LLMServer(launch, lambda level, message: None).start()
+
+
+def test_a_local_url_without_a_port_is_refused_rather_than_started_elsewhere(engine_env):
+    with pytest.raises(LaunchError, match=r"has no port.*http://127.0.0.1:8002/v1"):
+        llm_server.plan(llm_config(LLM("vllm:hf:org/model", url="http://localhost/v1", engine_env=str(engine_env))),
+                        has_tools=False)
+
+
+def test_stopping_during_a_restart_leaves_no_engine_running(engine_env):
+    """Ctrl+C between a crash and its restart: stop() saw the dead process, so the restart must not start one."""
+    launch = llm_server.plan(llm_config(LLM("vllm:hf:org/model", url=f"http://127.0.0.1:{free_port()}/v1",
+                                            engine_env=str(engine_env))), has_tools=False)
+    server = llm_server.LLMServer(launch, lambda level, message: None)
+    server._stopping.set()
+    with pytest.raises(LaunchError, match="stopped before"):
+        server._spawn()
+    assert server.pid is None  # nothing was started
+
+    # ...and one already spawned when stop() looked is ended by the start wait itself
+    server = llm_server.LLMServer(launch, lambda level, message: None)
+    server._spawn()
+    process = server._process
+    server._stopping.set()  # stop() ran just after the spawn
+    with pytest.raises(LaunchError, match="stopped while"):
+        server._wait_ready(process)
+    process.wait(10)
+    assert process.poll() is not None

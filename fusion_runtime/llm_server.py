@@ -130,7 +130,12 @@ def plan(llm, *, has_tools: bool, environ: Optional[Mapping[str, str]] = None) -
     options = dict(llm.options)
     port = engine.port
     if options.get("url"):
-        port = urlsplit(options["url"]).port or port
+        port = urlsplit(options["url"]).port
+        if port is None:
+            # fusion talks to the url as written (port 80 for http://localhost/v1), so starting the
+            # engine on its usual port instead would leave every reply failing
+            raise LaunchError(f"url={options['url']!r} has no port. Name the one {engine.display} should use, "
+                              f"like http://127.0.0.1:{engine.port}/v1")
     ref = llm.model
     model, revision = ref, None
     if ref.startswith("hf:"):
@@ -335,6 +340,8 @@ class LLMServer:
     # -- internals ---------------------------------------------------------------------------
 
     def _spawn(self) -> None:
+        if self._stopping.is_set():  # stop() came between a crash and its restart: don't start a new one
+            raise LaunchError(f"stopped before {self.name} was restarted")
         self._tail.clear()
         self._log("starting", f"starting {self.name}")
         try:
@@ -368,6 +375,8 @@ class LLMServer:
         next_note = 30.0
         while True:
             if self._stopping.is_set():
+                # stop() may have looked before this process existed, so it's ours to end
+                _signal_group(process, signal.SIGTERM)
                 raise LaunchError(f"stopped while {self.name} was starting")
             code = process.poll()
             if code is not None:
