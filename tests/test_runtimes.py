@@ -195,3 +195,17 @@ async def test_the_threshold_is_a_setting():
     assert (await _transcribe(quiet, no_speech_threshold=0.9)).text == " maybe words"
     assert (await _transcribe(quiet, no_speech_threshold=None)).text == " maybe words"  # off
     assert (await _transcribe(quiet)).text == ""
+
+
+def test_onnxruntime_trouble_is_named_with_its_fix():
+    """Pod test, 25 Sep: the CPU build of onnxruntime overwrote the GPU one, and Kokoro ran on the CPU silently."""
+    from fusion_runtime.runtimes.onnx.kokoro import provider_warnings
+
+    cuda = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    assert provider_warnings(cuda, cuda, ["onnxruntime-gpu"]) == []  # all well
+    assert provider_warnings(["CPUExecutionProvider"], ["CPUExecutionProvider"], ["onnxruntime"]) == []  # a Mac
+    clash = provider_warnings(["CPUExecutionProvider"], ["CPUExecutionProvider"], ["onnxruntime", "onnxruntime-gpu"])
+    assert "both onnxruntime and onnxruntime-gpu" in clash[0][0] and "pip uninstall -y onnxruntime" in clash[0][1]
+    assert "has no CUDA provider" in clash[1][0]
+    fell_back = provider_warnings(cuda, ["CPUExecutionProvider"], ["onnxruntime-gpu"])
+    assert fell_back[0][0] == "text-to-speech is running on the CPU: CUDAExecutionProvider didn't load"

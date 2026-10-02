@@ -34,6 +34,7 @@ class Conversation:
     max_chars: Optional[int] = None  # total prompt budget in characters; None = no limit
     _turns: List[List[Message]] = field(default_factory=list)
     _carried_user_text: str = ""
+    greeting: str = ""  # what the agent said when the call connected
 
     @classmethod
     def for_context(cls, system_prompt: str, n_ctx: Optional[int], reply_tokens: Optional[int],
@@ -47,7 +48,7 @@ class Conversation:
     def messages_for(self, user_text: str) -> List[Message]:
         """The prompt for a new user message: system, the recent turns that fit, the message."""
         user = Message(role="user", content=self._with_carried(user_text))
-        system = Message(role="system", content=self.system_prompt)
+        system = Message(role="system", content=self.instructions)
         used_messages = 0
         used_chars = len(system.content) + len(user.content)
         kept: List[List[Message]] = []
@@ -95,6 +96,19 @@ class Conversation:
         user_text = self._turns.pop()[0].content
         self._carried_user_text = f"{user_text} {self._carried_user_text}".strip()
         return user_text
+
+    @property
+    def instructions(self) -> str:
+        """The system prompt, plus the greeting already spoken.
+
+        The greeting isn't stored as an assistant message: several chat templates
+        (Mistral's, older Llamas') refuse a conversation that starts with the
+        assistant. Told here instead, the model knows it has said hello.
+        """
+        if not self.greeting:
+            return self.system_prompt
+        return (f"{self.system_prompt}\n\nThe call has started and you have already said: "
+                f"\"{self.greeting}\" Don't greet the caller again.")
 
     @property
     def has_carried_text(self) -> bool:

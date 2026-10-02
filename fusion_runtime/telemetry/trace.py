@@ -81,6 +81,10 @@ class SessionTrace:
         self._audio_t0: Optional[float] = None
         self._samples_received = 0
         self._last_arrival: Optional[float] = None
+        # What the voice detector heard, for the session's limits. None until a detector runs:
+        # without one, nothing here can tell speech from silence.
+        self.speech_s: Optional[float] = None
+        self.last_speech_mono: Optional[float] = None
 
     # ---- audio clock --------------------------------------------------------------
 
@@ -108,6 +112,14 @@ class SessionTrace:
         if audio_s < 0.5:
             return True  # too little audio to tell; assume live
         return (self._last_arrival - self._audio_t0) >= audio_s * 0.5
+
+    def detector_running(self) -> None:
+        if self.speech_s is None:
+            self.speech_s = 0.0
+
+    def speech_heard(self, seconds: float, at_mono: Optional[float] = None) -> None:
+        self.speech_s = (self.speech_s or 0.0) + seconds
+        self.last_speech_mono = time.monotonic() if at_mono is None else at_mono
 
     # ---- turns --------------------------------------------------------------------
 

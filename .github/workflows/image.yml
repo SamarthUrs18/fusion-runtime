@@ -1,8 +1,13 @@
 name: Image
 
-# Not on every push: this builds a multi-gigabyte CUDA image, so it runs when
-# asked and when a release is tagged. The tests workflow is the one that guards
-# every commit.
+# Not on every push: these are multi-gigabyte images, so they build when asked and
+# when a release is tagged. The tests workflow is the one that guards every commit.
+#
+#   ghcr.io/<owner>/fusion-runtime:latest, :gpu, :<version>          NVIDIA GPU servers (linux/amd64)
+#   ghcr.io/<owner>/fusion-runtime:cpu, :<version>-cpu               laptops and CPU machines (amd64 + arm64)
+#
+# latest, gpu and cpu move only on a release tag. A manual run on a branch publishes
+# sha-<commit> tags only, so testing a branch never changes what people pull.
 on:
   workflow_dispatch:
   push:
@@ -10,21 +15,21 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ${{ github.repository }}
 
 jobs:
   gpu-image:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # A first build, with nothing cached (a release tag's usually is), takes longest:
+    # 17 minutes in the test of 2 October. GitHub's own limit is 6 hours.
+    timeout-minutes: 150
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
 
-      # A CUDA base, torch and llama.cpp together are larger than a runner's free
-      # disk. The pre-installed toolchains here are worth about 20 GB and nothing
-      # in this build uses them.
+      # A CUDA base and torch together are larger than a runner's free disk. The
+      # pre-installed toolchains here are worth about 20 GB and nothing uses them.
       - name: Make room
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache
@@ -41,14 +46,15 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
           tags: |
             type=ref,event=tag
             type=sha,format=long
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=gpu,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
-      # linux/amd64 only: the GPU builds of torch and llama-cpp-python are
-      # published for that platform, and RunPod's GPUs are x86 anyway.
+      # linux/amd64 only: the CUDA builds of torch are published for that platform,
+      # and rented GPUs are x86 anyway.
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -57,12 +63,119 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=gpu
+          # min: cache the final image's layers only. max also saved the builder stage
+          # (the CUDA development image, torch, compilers: 10+ GB).
+          cache-to: type=gha,mode=min,scope=gpu
 
       # The runner has no GPU, so this checks only that the image starts and the
-      # package is installed — the part that was broken in the old Dockerfile.
+      # package is installed. By the name the build pushed: metadata-action lowercases
+      # the owner, and Docker refuses "SamarthUrs18/..." as github.repository spells it.
       - name: Check the image runs
+        env:
+          IMAGE_REF: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
         run: |
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE }}:sha-${{ github.sha }} version
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE }}:sha-${{ github.sha }} doctor || true
+          docker run --rm "$IMAGE_REF" version
+          docker run --rm "$IMAGE_REF" doctor || true
+
+  # The CPU image, built natively on an Intel and an Arm runner (emulating Arm took far
+  # longer: llama.cpp is compiled), then joined into one name that serves both.
+  cpu-image:
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image name in lowercase
+        run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.cpu
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=cpu-${{ matrix.runner }}
+          cache-to: type=gha,mode=min,scope=cpu-${{ matrix.runner }}
+
+      - name: Keep the digest for the join
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpu-digest-${{ matrix.runner }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  cpu-manifest:
+    needs: cpu-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Image name in lowercase
+        run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: cpu-digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+            suffix=-cpu,onlatest=false
+          tags: |
+            type=ref,event=tag
+            type=sha,format=long
+            type=raw,value=cpu,suffix=,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Join the two platforms under one name
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Check the image runs
+        env:
+          IMAGE_REF: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        run: |
+          docker buildx imagetools inspect "$IMAGE_REF"
+          docker run --rm "$IMAGE_REF" version

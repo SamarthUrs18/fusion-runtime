@@ -22,8 +22,8 @@ Detection by format, never by model name:
 A model served by vLLM, SGLang or llama-server is named with that runtime in
 front ("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ"). It resolves to openai_http at
 the server's usual local address (`url=` for another), and the model name on
-the server defaults to the repo id, which is what those servers use. You
-start the server; fusion-runtime doesn't yet.
+the server defaults to the repo id, which is what those servers use. `frun up`
+starts vLLM and SGLang itself (fusion_runtime.llm_server); llama-server you start.
 
 An explicit `runtime` (a built-in name, a plugin name or "module:Class")
 skips detection; a reference that isn't a local file is then handed to that
@@ -59,11 +59,12 @@ RUNTIME_STAGES: Dict[str, Tuple[str, ...]] = {
 }
 
 # Servers named as a runtime: they speak the OpenAI API, so openai_http talks to them.
-# (display name, the address `<server> serve` listens on by default)
+# (display name, the address fusion expects it at). vLLM's own default is 8000, which is
+# frun up's, so fusion starts it on 8002 and looks for it there.
 SERVED_RUNTIMES: Dict[str, Tuple[str, str]] = {
-    "vllm": ("vLLM", "http://localhost:8000/v1"),
-    "sglang": ("SGLang", "http://localhost:30000/v1"),
-    "llama_server": ("llama-server", "http://localhost:8080/v1"),
+    "vllm": ("vLLM", "http://127.0.0.1:8002/v1"),
+    "sglang": ("SGLang", "http://127.0.0.1:30000/v1"),
+    "llama_server": ("llama-server", "http://127.0.0.1:8080/v1"),
 }
 
 # Where each built-in runtime lists the settings it reads (OPTIONS). Plugins aren't checked.
@@ -73,7 +74,7 @@ _RUNTIME_OPTIONS = {
     "ctranslate2": "fusion_runtime.runtimes.ctranslate2.stt",
     "onnx": "fusion_runtime.runtimes.onnx.tts",
 }
-# Settings for starting an inference server, which fusion-runtime doesn't do yet
+# Engine flags people reach for by their engine name; fusion's own names are in llm_server.LAUNCH_OPTIONS
 _SERVER_LAUNCH_SETTINGS = {
     "gpu_memory": "--gpu-memory-utilization 0.6", "gpu_memory_utilization": "--gpu-memory-utilization 0.6",
     "max_model_len": "--max-model-len 4096", "max_callers": "--max-num-seqs 16", "max_num_seqs": "--max-num-seqs 16",
@@ -205,18 +206,25 @@ def check_options(spec: ModelSpec, given: Mapping[str, Any], config_fields=(), s
     if family_options is not None and spec.family not in family_options:
         return  # a family we don't know may read settings of its own
     runtime_options = set(source.OPTIONS) | set((family_options or {}).get(spec.family, ()))
-    known = runtime_options | set(config_fields) | ({"url"} if served_by else set())
+    from fusion_runtime.llm_server import ENGINES, LAUNCH_OPTIONS
+
+    launched = served_by in ENGINES
+    known = runtime_options | set(config_fields) | ({"url"} if served_by else set()) \
+        | (set(LAUNCH_OPTIONS) if launched else set())
     unknown = [name for name in given if name not in known]
     if not unknown:
         return
     name = unknown[0]
     where = SERVED_RUNTIMES[served_by][0] if served_by else spec.runtime
-    if name in _SERVER_LAUNCH_SETTINGS:
+    if launched and name in _SERVER_LAUNCH_SETTINGS:
+        raise InvalidRequest(
+            f"{where} reads {name} under another name, or not at all: use {', '.join(LAUNCH_OPTIONS[2:6])}, "
+            f"or pass the flag itself with extra_args=\"{_SERVER_LAUNCH_SETTINGS[name]}\"")
+    if name in _SERVER_LAUNCH_SETTINGS or name in LAUNCH_OPTIONS:
         server = SERVED_RUNTIMES[served_by][0] if served_by else "the model server"
         raise InvalidRequest(
-            f"{name} is a setting for starting {server}, and fusion-runtime doesn't start it yet. "
-            f"Pass it when you start the server (vllm serve ... {_SERVER_LAUNCH_SETTINGS[name]}); "
-            "see the README's single-GPU recipe")
+            f"{name} is a setting for starting {server}, which fusion-runtime starts only for vllm: and sglang:. "
+            f"Pass it when you start the server yourself (https://fusion-runtime.dev/docs#llm-servers)")
     close = difflib.get_close_matches(name, sorted(known), n=1)
     hint = f" Did you mean {close[0]!r}?" if close else f" It reads: {', '.join(sorted(runtime_options))}."
     raise InvalidRequest(f"{where} has no setting {name!r}.{hint}")
@@ -406,11 +414,14 @@ def _onnx(stage, path: Path, runtime, family, options, source) -> ResolvedModel:
 
 
 def _served(stage, runtime: str, ref: str, family, options) -> ResolvedModel:
-    """A model on a vLLM / SGLang / llama-server you started: openai_http at its address."""
+    """A model on a vLLM / SGLang / llama-server: openai_http at its address."""
     name, default_url = SERVED_RUNTIMES[runtime]
     if stage != "llm":
         raise UnsupportedModel(f"{name} serves language models, not the {stage} stage")
-    options = dict(options)
+    from fusion_runtime.llm_server import LAUNCH_OPTIONS
+
+    # Launch settings are for starting the server (frun up), not for talking to it
+    options = {k: v for k, v in options.items() if k not in LAUNCH_OPTIONS}
     url = options.pop("url", None)
     if ref.startswith(("http://", "https://")):
         url, model_name = url or ref, options.get("model_name")

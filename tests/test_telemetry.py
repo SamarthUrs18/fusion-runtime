@@ -367,3 +367,17 @@ def test_downloads_read_as_sentences_not_attributes():
     # a download whose size the hub didn't report still says what it is doing
     assert "Downloading the speech-to-text model hf:org/model." in ConsoleSink.format(
         Event(name="model.downloading", stage="stt", attrs={"model": "hf:org/model"}))
+
+
+def test_console_lines_carry_the_event_name_the_docs_use():
+    """Pod test: `grep tool.call` found nothing, because the line read `tool     call`."""
+    from fusion_runtime.telemetry.events import Event
+    from fusion_runtime.telemetry.sinks import ConsoleSink
+
+    tool = ConsoleSink.format(Event(name="tool.call", stage="tool", session_id="s1", turn_id="t2",
+                                    attrs={"tool": "order_status"}))
+    assert " tool.call " in tool
+    loaded = ConsoleSink.format(Event(name="model.loaded", stage="turn", duration_ms=14))
+    assert " turn     model.loaded " in loaded
+    # the columns still line up
+    assert tool.index("tool.call") == loaded.index("turn")

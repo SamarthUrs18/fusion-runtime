@@ -9,6 +9,7 @@ from fusion_runtime.security.auth import (
     RedactQueryStrings,
     Unauthorized,
     bearer,
+    came_through_a_proxy,
     is_loopback,
     scrub_access_logs,
 )
@@ -28,5 +29,5 @@ from fusion_runtime.security.tokens import DEFAULT_TTL_S, Minted, TokenStore
 __all__ = [
     "ALLOWED_ORIGINS_ENV", "Authenticator", "ConfigurationError", "DEFAULT_TTL_S", "KEY_PREFIX", "KeySet",
     "MIN_KEY_LENGTH", "Minted", "OriginRule", "Principal", "ProxyTrust", "RedactQueryStrings", "TokenStore",
-    "Unauthorized", "bearer", "client_key", "fingerprint", "is_loopback", "new_key", "scrub_access_logs",
+    "Unauthorized", "bearer", "came_through_a_proxy", "client_key", "fingerprint", "is_loopback", "new_key", "scrub_access_logs",
 ]

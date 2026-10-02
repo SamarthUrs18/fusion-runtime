@@ -12,8 +12,10 @@ Files: the graph (e.g. tts/onnx/model.onnx) and the voice pack
 voices-v1.0.bin next to it or one folder up (`frun models pull` builds it),
 or the `voices_path` option.
 """
+import importlib.metadata
+import os
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 SAMPLE_RATE = 24000
 STYLE_DIM = 256
@@ -54,7 +56,8 @@ class KokoroFamily:
                 f"Kokoro voice pack (voices-v1.0.bin) not found in: {', '.join(str(c) for c in candidates)}. "
                 "Run: frun models pull"
             )
-        self._kokoro = Kokoro(str(self.model_path), str(voices))
+        session = onnx_session(self.model_path)
+        self._kokoro = Kokoro.from_session(session, str(voices))
 
     @property
     def voices(self) -> Tuple[str, ...]:
@@ -91,3 +94,71 @@ class KokoroFamily:
         })
         audio = outputs[0].ravel()
         return (np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes()
+
+
+GPU_BUILD = "onnxruntime-gpu"
+
+
+def onnx_session(model_path: Path):
+    """The model's onnxruntime session: CUDA when this onnxruntime has it, else the CPU.
+
+    kokoro-onnx asks for every provider the GPU build lists, TensorRT first, and
+    TensorRT then fails to load on most machines with a page of errors before
+    falling back. CUDA is what's wanted, so ask for it, and say plainly when it
+    didn't load rather than let text-to-speech run on the CPU unnoticed (seconds
+    a sentence instead of milliseconds). ONNX_PROVIDER still picks one by name.
+    """
+    import onnxruntime as rt
+
+    available = rt.get_available_providers()
+    named = os.getenv("ONNX_PROVIDER")
+    if named:
+        providers = [named] + (["CPUExecutionProvider"] if named != "CPUExecutionProvider" else [])
+    elif "CUDAExecutionProvider" in available:
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    else:
+        providers = ["CPUExecutionProvider"]
+    options = rt.SessionOptions()
+    options.log_severity_level = 3  # errors only; a provider that didn't load is reported below, once
+    session = rt.InferenceSession(str(model_path), sess_options=options, providers=providers)
+    for warning in provider_warnings(providers, session.get_providers(), _installed_builds()):
+        from fusion_runtime.telemetry import telemetry
+
+        telemetry.emit("tts.on_cpu" if "CPU" in warning[0] else "tts.onnxruntime", level="warning",
+                       stage="tts", hint=warning[0], fix=warning[1])
+    return session
+
+
+def provider_warnings(asked: List[str], got: List[str], builds: List[str]) -> List[Tuple[str, str]]:
+    """(what's wrong, the fix) for an onnxruntime that can't use the GPU it was installed for."""
+    warnings = []
+    if "onnxruntime" in builds and GPU_BUILD in builds:
+        # Both install the same `onnxruntime` module, so whichever went in last wins, usually the
+        # CPU one, pulled in by another package (pod test, 25 Sep).
+        warnings.append((
+            "both onnxruntime and onnxruntime-gpu are installed; they share one module, so the GPU one "
+            "may be overwritten",
+            "pip uninstall -y onnxruntime && pip install --force-reinstall --no-deps onnxruntime-gpu"))
+    wanted_gpu = [p for p in asked if p != "CPUExecutionProvider"]
+    if wanted_gpu and not any(p in got for p in wanted_gpu):
+        warnings.append((
+            f"text-to-speech is running on the CPU: {wanted_gpu[0]} didn't load",
+            "onnxruntime-gpu 1.30+ needs CUDA 13 while torch uses CUDA 12; see "
+            "https://fusion-runtime.dev/docs#gpu"))
+    elif GPU_BUILD in builds and not wanted_gpu:
+        warnings.append((
+            "text-to-speech is running on the CPU: onnxruntime-gpu is installed but this onnxruntime "
+            "has no CUDA provider",
+            "pip uninstall -y onnxruntime && pip install --force-reinstall --no-deps onnxruntime-gpu"))
+    return warnings
+
+
+def _installed_builds() -> List[str]:
+    found = []
+    for name in ("onnxruntime", GPU_BUILD):
+        try:
+            importlib.metadata.distribution(name)
+            found.append(name)
+        except importlib.metadata.PackageNotFoundError:
+            pass
+    return found

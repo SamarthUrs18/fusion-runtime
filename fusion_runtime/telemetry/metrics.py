@@ -116,6 +116,14 @@ class TelemetryMetrics:
         self.scheduler_rejected = Counter("fusion_scheduler_rejected", "Requests refused because a model was at capacity",
                                           ["stage"], registry=r)
         self.errors = Counter("fusion_errors", "Errors by stage and code", ["stage", "code"], registry=r)
+        self.llm_server_up = Gauge("fusion_llm_server_up", "The LLM server answers its health check (1) or not (0)",
+                                   ["engine"], registry=r)
+        self.llm_server_running = Gauge("fusion_llm_server_requests_running", "Replies the LLM server is decoding",
+                                        ["engine"], registry=r)
+        self.llm_server_waiting = Gauge("fusion_llm_server_requests_waiting", "Replies waiting in the LLM server's queue",
+                                        ["engine"], registry=r)
+        self.llm_server_kv = Gauge("fusion_llm_server_kv_cache_used", "Share of the LLM server's KV cache in use (0-1)",
+                                   ["engine"], registry=r)
         self.loop_lag = Gauge("fusion_event_loop_lag_seconds", "Worst event-loop delay in the last window", registry=r)
         self.loop_stalls = Counter("fusion_event_loop_stalls", "Times the event loop was blocked over the stall threshold",
                                    registry=r)
@@ -128,6 +136,14 @@ class TelemetryMetrics:
         if event.error is not None and event.level == "error":
             self.errors.labels(event.error.stage or event.stage or "unknown", event.error.code).inc()
 
+        if name == "llm_server.state":
+            engine = a.get("engine", "?")
+            self.llm_server_up.labels(engine).set(1 if a.get("state") == "up" else 0)
+            for gauge, key in ((self.llm_server_running, "running"), (self.llm_server_waiting, "waiting"),
+                               (self.llm_server_kv, "kv_cache_used")):
+                if key in a:
+                    gauge.labels(engine).set(a[key])
+            return
         if name == "server.start":
             self.build_info.labels(a.get("version", "unknown"), a.get("profile", "unknown")).set(1)
         elif name == "model.loaded":

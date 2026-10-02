@@ -1,50 +1,30 @@
-version: '3.8'
+# fusion-runtime on a laptop or any machine without an NVIDIA GPU (Mac, Windows, Linux).
+# One container: speech and a small LLM (Qwen 0.5B) on the CPU. For a GPU server,
+# use docker-compose.gpu.yml instead.
+#
+#   cd docker
+#   docker compose run --rm fusion key new          # put it in docker/.env as FUSION_ACCEPTED_KEYS=<key>
+#   docker compose run --rm fusion models pull       # once: ~1.5 GB into docker/models
+#   docker compose up
+#
+# Then open http://localhost:8000 and click Talk (frun token prints a link with a token).
+# Without Docker it's simpler still: pip install fusion-runtime && frun up
 
 services:
-  fusion-runtime:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-      target: runtime
-    image: fusion-runtime:latest
-    container_name: fusion-runtime
-    runtime: nvidia
-    environment:
-      - FUSION_CONFIG=production
-      - CUDA_VISIBLE_DEVICES=0
-      - NVIDIA_VISIBLE_DEVICES=all
-    volumes:
-      - ../models:/models:ro
-      - ./logs:/app/logs
-    ports:
-      - "8000:8000"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=5).raise_for_status()"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
-  # For local development with CPU only
-  fusion-runtime-cpu:
+  fusion:
+    image: ghcr.io/samarthurs18/fusion-runtime:cpu
+    # or build it from this checkout: docker compose build
     build:
       context: ..
       dockerfile: docker/Dockerfile.cpu
-    image: fusion-runtime-cpu:latest
-    container_name: fusion-runtime-cpu
+    env_file:
+      - path: .env
+        required: false
     environment:
-      - FUSION_CONFIG=development
+      FUSION_CONFIG: development
     volumes:
-      - ../models:/models:ro
-      - ./logs:/app/logs
+      - ./models:/models
+      # - ./agent.py:/app/agent.py        # your agent, with FUSION_AGENT=/app/agent.py
     ports:
-      - "8001:8000"
+      - "8000:8000"
     restart: unless-stopped

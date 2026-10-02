@@ -246,6 +246,29 @@ def test_development_on_localhost_needs_no_ceremony(open_client):
         assert ws.receive_json()["type"] == "config"
 
 
+def test_a_token_through_a_local_proxy_needs_https():
+    auth = Authenticator(KeySet.from_environment({"FUSION_ACCEPTED_KEYS": f"web:{KEY}"}), TokenStore())
+    assert auth.secure_enough_to_mint(scheme="http", client_host="127.0.0.1")  # frun token on the machine
+    assert not auth.secure_enough_to_mint(scheme="http", client_host="127.0.0.1", proxied=True)
+    assert not auth.secure_enough_to_mint(scheme="http", client_host="127.0.0.1", proxied=True,
+                                          forwarded_proto="http", trust_proxy=True)
+    assert auth.secure_enough_to_mint(scheme="http", client_host="127.0.0.1", proxied=True,
+                                      forwarded_proto="https", trust_proxy=True)
+
+
+def test_a_proxy_on_this_machine_is_not_localhost(open_client):
+    """Caddy or nginx on the same machine connects from 127.0.0.1 for anyone on the internet.
+    Without keys that let everyone in; its forwarding headers now mark the request as not local."""
+    forwarded = {"X-Forwarded-For": "198.51.100.7", "X-Forwarded-Proto": "https"}
+    response = open_client.get("/metrics", headers=forwarded)
+    assert response.status_code == 401 and "came through a proxy" in response.json()["error"]["message"]
+    assert "frun key new" in response.json()["error"]["fix"]
+    assert open_client.get("/metrics", headers={"Forwarded": "for=198.51.100.7"}).status_code == 401
+    with open_client.websocket_connect("/v1/voice/ws", headers=forwarded) as ws:
+        assert ws.receive_json()["code"] == "auth_failed"
+    assert open_client.get("/metrics").status_code == 200  # this machine, directly: unchanged
+
+
 # ---- keeping secrets out of the logs ----------------------------------------------
 
 def test_tokens_are_scrubbed_from_the_access_log():
@@ -339,6 +362,71 @@ def test_a_quiet_socket_and_an_endless_one_both_expire():
     assert budget.expired() is None
     now[0] = 1000
     assert budget.expired().reason == "session_too_long"
+
+
+def test_with_a_voice_detector_silence_is_not_speech():
+    """Pod test, 25 Sep: a caller silent for 90 s was ended as "more than 60 seconds of speech",
+    because every byte counted. With a detector, only what it heard as speech counts."""
+    now = [0.0]
+    budget = AudioBudget(Limits(max_turn_audio_s=10, max_silence_s=0), 16000, clock=lambda: now[0])
+    for second in range(120):  # two minutes of audio in which the detector heard 3 s of speech
+        now[0] = second
+        budget.audio(32000, speech_s=3.0, last_speech=2.0)
+    budget.audio(32000, speech_s=9.5, last_speech=now[0])
+    with pytest.raises(OverLimit, match="speech without a pause"):
+        budget.audio(32000, speech_s=13.5, last_speech=now[0])
+
+
+def test_the_speech_allowance_is_per_turn():
+    budget = AudioBudget(Limits(max_turn_audio_s=10), 16000)
+    budget.audio(32000, speech_s=9.0)
+    budget.turn_ended()
+    budget.audio(32000, speech_s=18.0)  # 9 s in this turn
+
+
+def test_a_line_left_open_ends_with_its_own_reason():
+    now = [0.0]
+    budget = AudioBudget(Limits(max_silence_s=60, idle_timeout_s=600), 16000, clock=lambda: now[0])
+    budget.audio(32000, speech_s=2.0, last_speech=1.0)
+    now[0] = 50
+    budget.audio(32000, speech_s=2.0, last_speech=1.0)  # audio keeps flowing: not idle
+    assert budget.expired() is None
+    now[0] = 62
+    budget.message(10)
+    expired = budget.expired()
+    assert expired.reason == "silence" and "no speech for 60 seconds" in str(expired)
+
+
+def test_the_agent_talking_is_not_silence():
+    now = [0.0]
+    budget = AudioBudget(Limits(max_silence_s=60, idle_timeout_s=600), 16000, clock=lambda: now[0])
+    budget.audio(32000, speech_s=2.0, last_speech=0.0)
+    now[0] = 40
+    budget.agent_spoke()
+    now[0] = 90
+    budget.message(10)
+    assert budget.expired() is None  # 50 s since the agent's last audio
+    budget.agent_playing(True)
+    now[0] = 200
+    budget.message(10)
+    assert budget.expired() is None  # a long reply still playing
+    budget.agent_playing(False)
+    now[0] = 261
+    budget.message(10)
+    assert budget.expired().reason == "silence"
+
+
+def test_without_a_detector_there_is_no_silence_limit_and_bytes_count():
+    """With the detector failed to load, silence can't be told from speech: fall back, don't guess."""
+    now = [0.0]
+    budget = AudioBudget(Limits(max_silence_s=60, max_turn_audio_s=100, idle_timeout_s=600), 16000,
+                         clock=lambda: now[0])
+    for second in range(90):
+        now[0] = second
+        budget.audio(32000)
+    assert budget.expired() is None
+    assert Limits.from_environment({"FUSION_MAX_SILENCE_S": "0"}).max_silence_s == 0
+    assert Limits.from_environment({}).max_silence_s == 60
 
 
 def test_a_full_server_turns_a_caller_away_rather_than_queueing_forever(monkeypatch):

@@ -47,6 +47,9 @@ htmlcov/
 
 # Models (downloaded separately)
 /models/
+# What the compose files download next to them
+/docker/models/
+/docker/hf/
 *.gguf
 *.onnx
 *.bin

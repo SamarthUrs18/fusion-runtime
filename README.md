@@ -36,6 +36,7 @@ from fusion_runtime import Agent, LLM, STT, TTS, Turns
 agent = Agent(
     name="shopkart-orders",
     prompt="You are the order line for ShopKart. Keep answers to one short sentence.",
+    greeting="Hi, this is ShopKart. How can I help with your order?",   # said as soon as a caller connects
     stt=STT("whisper-tiny.en"),          # or "whisper-small" for better accuracy
     llm=LLM("qwen2.5-0.5b-q4", max_tokens=256),
     tts=TTS("kokoro-v1.0", voice="af_heart"),
@@ -80,9 +81,9 @@ URL on a server with keys, the connection closes and the page says the token was
 ### Naming models
 
 A model is a catalog id (`frun models list`), a file path, `hf:owner/repo` for anything on
-Hugging Face, or a URL for an OpenAI-compatible endpoint. A model on a vLLM, SGLang or
-llama-server you started is named with that server in front — `vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ`
-— and found at the server's usual address (`url=` for another).
+Hugging Face, or a URL for an OpenAI-compatible endpoint. A model on vLLM, SGLang or
+llama-server is named with that server in front — `vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ` — and
+found at the server's usual address (`url=` for another). `frun up` starts vLLM and SGLang itself.
 
 Settings are checked against the runtime that runs the model, so a misspelt one fails at startup
 with the name it probably meant instead of being ignored. For llama.cpp that includes
@@ -117,8 +118,8 @@ a timeout (`@tool(timeout_s=...)`, 10 s by default); ordinary functions run on a
 a tool that fails tells the model what went wrong rather than ending the call; and talking over
 the wait cancels it. After `max_tool_rounds` calls in one turn (4) the model has to answer.
 
-Tools need an LLM server that can call them — vLLM (`--enable-auto-tool-choice
---tool-call-parser ...`), SGLang, llama-server (`--jinja`) or a hosted API. The in-process
+Tools need an LLM server that can call them — vLLM or SGLang (`frun up` starts them with tool
+calling on), llama-server (`--jinja`) or a hosted API. The in-process
 llama.cpp runtime can't, and `frun up` says so at startup. A runnable version is
 [`examples/tools_agent.py`](examples/tools_agent.py).
 
@@ -218,44 +219,49 @@ Measured 26 September 2026: Qwen2.5-7B-Instruct-AWQ, `--gpu-memory-utilization 0
 `--max-model-len 4096`, Whisper small and Kokoro on the same card, both servers with default
 settings otherwise. The in-process column is Qwen 7B q4 GGUF on llama.cpp, 21 September.
 
-To run the model on a server and leave speech where it is:
+To run the model on vLLM or SGLang, name it in the agent and `frun up` starts the server for you:
 
 ```python
-llm = LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ", url="http://localhost:8002/v1")
-llm = LLM("llama_server:qwen2.5-7b-instruct")              # llama-server -np N, on :8080
-llm = LLM("http://gpu-box:8000/v1", model_name="...")        # any OpenAI-compatible server
+llm = LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ")     # frun up starts vLLM on :8002
+llm = LLM("sglang:hf:Qwen/Qwen2.5-7B-Instruct-AWQ")   # ...or SGLang on :30000
+llm = LLM("http://gpu-box:8000/v1", model_name="...")  # or any OpenAI-compatible server you run
 ```
 
-**On one 24 GB card** (RTX 3090, L4) the server shares the GPU with Whisper and Kokoro, and vLLM
-reserves 90% of the card by default. Cap it, and start it first:
+Install the engine once, in its own environment (it brings its own torch and CUDA), and tell
+fusion where it is:
 
 ```bash
-vllm serve Qwen/Qwen2.5-7B-Instruct-AWQ --port 8002 \
-  --gpu-memory-utilization 0.6 --max-model-len 4096 --max-num-seqs 16 \
-  --enable-auto-tool-choice --tool-call-parser hermes
-frun up agent.py        # an Agent(profile="production", ...), so Whisper runs on the GPU too
+python3 -m venv ~/vllm-env && ~/vllm-env/bin/pip install vllm
+export FUSION_LLM_ENGINE_ENV=~/vllm-env
+frun up agent.py
 ```
 
-SGLang the same way (its usual port is 30000, and `sglang:` finds it there):
+`frun up` starts the server before loading speech, so it takes its share of the GPU first (60%
+by default, which fits a 4-bit 7B model next to Whisper and Kokoro on a 24 GB card), restarts it
+if it exits, and stops it with Ctrl+C. GPU memory, context length, tool parsing, extra engine
+flags and logs are in [the docs](https://fusion-runtime.dev/docs#llm-servers).
+
+## Docker
+
+| | Image | Compose file |
+|---|---|---|
+| A laptop, or any machine without an NVIDIA GPU | `ghcr.io/samarthurs18/fusion-runtime:cpu` | `docker/docker-compose.yml` |
+| An NVIDIA GPU server | `ghcr.io/samarthurs18/fusion-runtime:latest` | `docker/docker-compose.gpu.yml` (fusion + vLLM) |
 
 ```bash
-python -m sglang.launch_server --model-path Qwen/Qwen2.5-7B-Instruct-AWQ --port 30000 \
-  --mem-fraction-static 0.6 --context-length 4096 --tool-call-parser qwen25
+cd docker
+docker compose run --rm fusion models pull     # once
+docker compose up                              # or: -f docker-compose.gpu.yml
 ```
 
-`0.6` is about 14 GB: the weights plus every caller's context. Voice turns are short, so a 4096
-context fits more callers than the model's maximum would. The tool flags are only needed for
-tools, and the parser depends on the model family. Port 8002, because `frun up` is on 8000 and some hosts (Runpod's pod images) already use 8001.
-
-A 4-bit model (AWQ or GPTQ) leaves room for speech; a 16-bit 7B model needs ~15 GB for its
-weights alone and doesn't. The L4 has about a third of the 3090's memory bandwidth, so expect
-slower tokens there. `nvidia-smi` shows what is actually used.
+On a laptop, `pip install fusion-runtime` is simpler still. Keys, models and your own agent
+file are in [the docs](https://fusion-runtime.dev/docs#deploying).
 
 ## The `frun` CLI
 
 | | |
 |---|---|
-| `frun up [agent.py]` | Starts the server. `--host`, `--port`, `--reload`, `--config` |
+| `frun up [agent.py]` | Starts the server, and vLLM or SGLang if the agent names one. `--host`, `--port`, `--reload`, `--llm-log` |
 | `frun talk` | Talks to it from a terminal, with a latency summary per turn |
 | `frun models list` / `pull` | What's available, and downloading it |
 | `frun key new` / `keys list` / `token` | Keys and browser tokens |

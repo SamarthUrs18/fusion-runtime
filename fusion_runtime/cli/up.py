@@ -1,8 +1,11 @@
 """`frun up`: start the voice server."""
 import os
+import shlex
+import shutil
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 import typer
 
@@ -68,6 +71,10 @@ def up(
     reload: bool = typer.Option(
         False, "--reload", help="Restart when the agent file changes. For development, not production.",
     ),
+    llm_log: Path = typer.Option(
+        None, "--llm-log", help="When frun up starts vLLM or SGLang: write its full log to this file, and keep "
+                                "only its start, warnings and errors in the terminal. Also: FUSION_LLM_LOG.",
+    ),
     llm_api_key_env: str = typer.Option(
         None, "--llm-api-key-env", help="Name of the environment variable holding the endpoint's API key "
                                         "(never the key itself). Also: FUSION_LLM_API_KEY_ENV.",
@@ -123,10 +130,12 @@ def up(
             agent_file = Path(agent).expanduser().resolve()
             loaded = load_agent(agent_file)  # fail here, with a clear message, not inside the server
             profile = loaded.config()
+            has_tools = bool(loaded.tools)
         else:
             from fusion_runtime.cli._common import profile_config
 
             profile = profile_config(config)
+            has_tools = False
         llm = profile.llm
     except ValueError as e:  # AgentError is a ValueError
         typer.echo(f"Error: {e}", err=True)
@@ -170,6 +179,43 @@ def up(
             err=True,
         )
         raise typer.Exit(1)
+
+    # The LLM server fusion starts (vllm:, sglang:), planned now so a missing engine or a
+    # clash with our own port stops the command before anything loads.
+    from fusion_runtime import llm_server
+
+    launch = None
+    if llm_server.launchable(llm):
+        try:
+            launch = llm_server.plan(llm, has_tools=has_tools)
+            if urlsplit(launch.base_url).port == port:
+                raise llm_server.LaunchError(
+                    f"{launch.engine.display} and this server would both use port {port}. "
+                    f"Use another: frun up --port {port + 1}")
+            if llm_server.already_serving(launch):
+                typer.echo(f"LLM: {launch.engine.display} is already running at {launch.base_url} "
+                           f"with {launch.model_name}; using it as it is")
+                launch = None
+            else:
+                gpu = llm_server.read_gpu()
+                for warning in llm_server.check_gpu_memory(launch, gpu, llm_server.speech_gb(profile)):
+                    typer.echo(f"Warning: {warning}")
+                if gpu is not None:
+                    launch.notes.append(f"GPU {gpu.index}: {gpu.name}, {gpu.free_gb:.1f} of {gpu.total_gb:.1f} GB free; "
+                                        f"{launch.engine.display} takes {launch.gpu_memory:.0%}")
+        except llm_server.LaunchError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+    if os.getenv("FUSION_IMAGE") == "gpu" and not shutil.which("nvidia-smi"):
+        # The NVIDIA container toolkit puts nvidia-smi in a container started with a GPU
+        typer.echo("Warning: this is fusion's GPU image, but the container has no NVIDIA GPU, so speech runs\n"
+                   "  slowly on the CPU and the vLLM container can't start. On a GPU machine, start it with\n"
+                   "  --gpus all (or docker/docker-compose.gpu.yml). On a laptop, use the CPU image:\n"
+                   "  ghcr.io/samarthurs18/fusion-runtime:cpu (docker/docker-compose.yml)")
+    if _runs_in_process(llm) and shutil.which("nvidia-smi"):
+        typer.echo("Note: the LLM runs inside this process, which suits about 4 callers at once. For more,\n"
+                   "  run it on vLLM or SGLang: LLM(\"vllm:hf:<org>/<model>\"), and frun up starts it "
+                   "(https://fusion-runtime.dev/docs#callers)")
 
     if host in ("127.0.0.1", "localhost") and port_answers_over_ipv6(port):
         typer.echo(
@@ -218,7 +264,12 @@ def up(
     typer.echo(f"Turn detection: {turns.runtime or 'silence'}, agent answers after {turns.min_silence_ms} ms of silence"
                + (" (shorter or longer when the detector is sure)" if turns.runtime else "")
                + f"; talking over it for {turns.barge_in_min_speech_ms} ms interrupts")
-    if llm.api_base or llm.provider.value == "openai":
+    if launch is not None:
+        typer.echo(f"LLM: {launch.model_name} on {launch.engine.display}, which this command starts "
+                   f"at {launch.base_url} and stops on exit")
+        for note in launch.notes:
+            typer.echo(f"  ({note})")
+    elif llm.api_base or llm.provider.value == "openai":
         typer.echo(f"LLM: {llm.model} at {llm.api_base or 'https://api.openai.com/v1'}"
                    + (f" (key from ${llm.api_key_env})" if llm.api_key_env else ""))
     typer.echo(f"Auth: {auth_state}")
@@ -241,9 +292,42 @@ def up(
 
     from fusion_runtime.security.limits import Limits
 
-    # Refuse an oversized frame in the library, before it is buffered for us.
-    uvicorn.run("fusion_runtime.server:app", host=host, port=port, workers=1,
-                ws_max_size=Limits.from_environment().max_message_bytes,
-                reload=reload, reload_includes=[agent_file.name] if reload and agent_file else None,
-                reload_dirs=[str(agent_file.parent)] if reload and agent_file else None,
-                log_level="warning" if log_format is LogFormat.json else "info")
+    engine = None
+    if launch is not None:
+        # Before speech loads: the engine takes its share of GPU memory first, and speech the rest.
+        typer.echo(f"Starting {launch.engine.display}: {shlex.join(launch.command)}")
+        log_file = llm_log or os.getenv(llm_server.LOG_FILE_ENV) or None
+        try:
+            printer = llm_server.LogPrinter(launch.engine, json_format=log_format is LogFormat.json, file=log_file)
+        except llm_server.LaunchError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        if printer.path:
+            typer.echo(f"{launch.engine.display}'s full log: {short_path(printer.path)}")
+        engine = llm_server.LLMServer(launch, printer)
+        try:
+            engine.start()
+        except llm_server.LaunchError as e:
+            engine.stop()
+            printer.close()
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        except KeyboardInterrupt:
+            engine.stop()
+            printer.close()
+            raise typer.Exit(130)
+    try:
+        # Refuse an oversized frame in the library, before it is buffered for us.
+        uvicorn.run("fusion_runtime.server:app", host=host, port=port, workers=1,
+                    ws_max_size=Limits.from_environment().max_message_bytes,
+                    reload=reload, reload_includes=[agent_file.name] if reload and agent_file else None,
+                    reload_dirs=[str(agent_file.parent)] if reload and agent_file else None,
+                    log_level="warning" if log_format is LogFormat.json else "info")
+    finally:
+        if engine is not None:
+            engine.stop()
+            printer.close()
+
+
+def _runs_in_process(llm) -> bool:
+    return llm.runtime in (None, "llama_cpp") and llm.provider.value == "llama_cpp" and not llm.api_base

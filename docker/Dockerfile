@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 #
-# fusion-runtime on an NVIDIA GPU.
+# fusion-runtime on an NVIDIA GPU: Whisper and Kokoro on CUDA, the LLM on vLLM or
+# SGLang beside it (see docker/docker-compose.yml), llama.cpp for the CPU.
 #
 #   docker build -f docker/Dockerfile -t fusion-runtime .
 #   docker run --gpus all -p 8000:8000 -v /models:/models \
@@ -43,27 +44,51 @@ RUN pip install --upgrade pip setuptools wheel
 # install builds it without CUDA. Prebuilt CUDA wheels are tried first, and
 # failing that it is compiled here, where nvcc exists.
 RUN pip install torch==2.9.1 torchaudio==2.9.1
-# llama-cpp-python has to be compiled with CUDA here: PyPI ships source only, and
-# the prebuilt CUDA wheels everyone links to stopped at 0.2.66 — we use 0.3.x.
+# llama-cpp-python: PyPI ships source only, so it is compiled here either way.
 #
-# What that compile costs is decided entirely by this list. Every real
-# architecture is a full set of kernels, and on a two-core runner four of them
-# ran past 45 minutes. One real plus one virtual is the cheap combination:
-# 89-real is native code for L4, L40S and 4090, the cards this is rented on,
-# and 80-virtual leaves PTX that the driver compiles at load time for anything
-# newer — an A100, an A10, an H100. Slower first load there, but it runs.
+# By default it is built for the CPU. On a GPU the LLM belongs on vLLM or SGLang
+# (LLM("vllm:...")), which serves about three times the callers of in-process
+# llama.cpp, and compiling llama.cpp's CUDA kernels took over 90 minutes on a
+# two-core CI runner, so the image was never published. The CPU build takes a few
+# minutes and stays useful for small models and tests.
+#
+#   docker build --build-arg LLAMA_CUDA=1 -f docker/Dockerfile .   # in-process llama.cpp on the GPU
+#
+# CUDA_ARCHITECTURES then decides the compile cost: 89-real is native code for
+# L4, L40S and 4090; 80-virtual leaves PTX the driver compiles at load time for
+# anything newer (A100, A10, H100). GGML_NATIVE=OFF either way, or the build is
+# tuned to the build machine's CPU and dies with "illegal instruction" elsewhere.
+ARG LLAMA_CUDA=0
 ARG CUDA_ARCHITECTURES="80-virtual;89-real"
-RUN CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}" \
-    pip install --no-cache-dir llama-cpp-python
+RUN if [ "$LLAMA_CUDA" = "1" ]; then \
+        CMAKE_ARGS="-DGGML_CUDA=on -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}" \
+            pip install --no-cache-dir llama-cpp-python; \
+    else \
+        CMAKE_ARGS="-DGGML_CUDA=off -DGGML_NATIVE=OFF" pip install --no-cache-dir llama-cpp-python; \
+    fi
 # From the CUDA 12 feed: PyPI's current onnxruntime-gpu is built for CUDA 13 and
 # cannot load beside torch's 12.8, so it quietly runs on the CPU instead.
 RUN pip install onnxruntime-gpu \
     --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 
 # Only what the install needs, so editing source doesn't invalidate the layers above.
-COPY pyproject.toml README.md ./
+#
+# Its own folder: without a WORKDIR these files landed in /, and `pip install .`
+# then had setuptools look for fusion's packages across the whole filesystem
+# (/proc, /usr, the multi-GB venv). The build sat there for an hour until CI
+# cancelled it. LICENSE and NOTICE go in the package (Apache-2.0 asks for NOTICE).
+WORKDIR /src
+COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY fusion_runtime/ ./fusion_runtime/
 RUN pip install .
+# fusion's package asks for `onnxruntime`, and pip installs the CPU build of it beside
+# onnxruntime-gpu: both own the same module, the CPU one lands last, and Kokoro runs
+# on the CPU without a word (pod test, 25 September). Take it out, put the GPU build
+# back, and fail the build if the CUDA provider isn't compiled in.
+RUN pip uninstall -y onnxruntime \
+    && pip install --force-reinstall --no-deps onnxruntime-gpu \
+        --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/ \
+    && python -c "import onnxruntime as o; p = o.get_available_providers(); assert 'CUDAExecutionProvider' in p, p"
 
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04 AS runtime
 ARG PYTHON_VERSION
@@ -78,7 +103,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/opt/venv/bin:$PATH" \
     LD_LIBRARY_PATH="/opt/venv/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/venv/lib/python3.11/site-packages/nvidia/nccl/lib:${LD_LIBRARY_PATH}" \
     FUSION_MODEL_DIR=/models \
-    FUSION_CONFIG=production \
+    FUSION_AGENT=/app/agent.py \
+    FUSION_IMAGE=gpu \
     FUSION_LOG_FORMAT=json
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -89,6 +115,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
+# The default agent: speech here, the LLM on the vLLM container beside this one
+# (docker/docker-compose.gpu.yml). Mount your own over it: -v ./agent.py:/app/agent.py
+COPY docker/agent.py /app/agent.py
 USER fusion
 
 EXPOSE 8000
@@ -97,8 +126,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
 
-# An agent file is named by FUSION_AGENT (mount it, or bake it in); without one
-# the production profile is used. 0.0.0.0 is refused unless keys are configured,
-# which is the point.
+# The agent is /app/agent.py (FUSION_AGENT): the default above, or yours mounted
+# over it. 0.0.0.0 is refused unless keys are configured, which is the point.
 ENTRYPOINT ["frun"]
 CMD ["up", "--host", "0.0.0.0", "--port", "8000"]

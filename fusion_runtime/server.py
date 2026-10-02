@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from starlette.websockets import WebSocketState
 
 from fusion_runtime import __version__, web
-from fusion_runtime.agent import DEFAULT_PROMPT, Agent, load_agent
+from fusion_runtime.agent import DEFAULT_PROMPT, Agent, greeting_for, load_agent
 from fusion_runtime.config import load_profile
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator
 from fusion_runtime.env import load_env_file
@@ -32,6 +32,7 @@ from fusion_runtime.security import (
     ProxyTrust,
     TokenStore,
     Unauthorized,
+    came_through_a_proxy,
     scrub_access_logs,
 )
 from fusion_runtime.security.limits import (
@@ -66,11 +67,12 @@ agent: Optional["Agent"] = None  # set when the server was started with an agent
 _started_at = time.monotonic()
 _active_sessions: set = set()
 _loop_monitor: Optional[LoopMonitor] = None
+_engine_monitor = None  # llm_server.EngineMonitor, when the LLM is on vLLM, SGLang or llama-server
 
 
 @app.on_event("startup")
 async def startup():
-    global orchestrator, agent, _loop_monitor, _started_at
+    global orchestrator, agent, _loop_monitor, _started_at, _engine_monitor
     _started_at = time.monotonic()
     agent_path = os.getenv("FUSION_AGENT")
     directories = [Path.cwd()] + ([Path(agent_path).expanduser().parent] if agent_path else [])
@@ -104,6 +106,7 @@ async def startup():
     await orchestrator.initialize()
     if agent is not None and agent.tools:
         orchestrator.check_tools(agent.tools)  # an LLM that can't call them fails now, not mid-call
+    _engine_monitor = _watch_llm_server(orchestrator)
     telemetry.emit("server.ready", stage="server", duration_ms=(time.monotonic() - _started_at) * 1000)
 
 
@@ -114,8 +117,24 @@ async def shutdown():
                    active_sessions=len(_active_sessions))
     if _loop_monitor is not None:
         await _loop_monitor.stop()
+    if _engine_monitor is not None:
+        await _engine_monitor.stop()
     if orchestrator:
         await orchestrator.shutdown()
+
+
+def _watch_llm_server(pipeline):
+    """When the LLM is on a model server, ask it how it's doing every few seconds."""
+    from fusion_runtime.llm_server import EngineMonitor
+
+    resolved = getattr(pipeline, "__dict__", {}).get("resolved_models", {}).get("llm")
+    served_by = resolved.metadata.get("served_by") if resolved is not None and resolved.metadata else None
+    if not served_by:
+        return None
+    monitor = EngineMonitor(served_by, resolved.spec.model)
+    pipeline.llm_server_state = monitor.turn_fields  # each turn's llm.request records the server's queue
+    monitor.start()
+    return monitor
 
 
 # ============ Models ============
@@ -153,6 +172,7 @@ class HealthResponse(BaseModel):
     uptime_s: float
     active_sessions: int
     config: dict
+    llm_server: Optional[dict] = None  # the model server's own state, when the LLM is on one
 
 
 def _error_response(e: Exception, request_id: str) -> JSONResponse:
@@ -186,6 +206,7 @@ def _configure_auth(environ=None) -> None:
     telemetry.emit("limits.configured", stage="server", max_sessions=limits.max_sessions,
                    per_key=limits.per_key(len(keys)), idle_timeout_s=limits.idle_timeout_s,
                    max_session_s=limits.max_session_s, max_turn_audio_s=limits.max_turn_audio_s,
+                   max_silence_s=limits.max_silence_s,
                    connections_per_minute=limits.connections_per_minute,
                    tokens_per_minute=limits.tokens_per_minute, trusted_proxy=proxies.enabled,
                    allowed_origins=origins.allowed or "same origin only")
@@ -274,7 +295,7 @@ def require_key(request: Request) -> Principal:
 def _authenticate(request: Request, *, allow_token: bool) -> Principal:
     try:
         principal = auth.authenticate(
-            client_host=_client_host(request),
+            client_host=_client_host(request), proxied=came_through_a_proxy(request.headers),
             authorization=request.headers.get("authorization"),
             token=request.query_params.get("token") if allow_token else None,
             allow_token=allow_token,
@@ -332,7 +353,7 @@ async def create_session(request: Request, principal: Principal = Depends(requir
     if not auth.secure_enough_to_mint(
         scheme=request.url.scheme, client_host=_client_host(request),
         forwarded_proto=request.headers.get("x-forwarded-proto"),
-        trust_proxy=proxies.believes(_client_host(request)),
+        trust_proxy=proxies.believes(_client_host(request)), proxied=came_through_a_proxy(request.headers),
     ):
         behind_a_proxy = request.headers.get("x-forwarded-proto")
         raise Unauthorized(
@@ -391,7 +412,8 @@ async def health():
             "stt": orchestrator.config.stt.provider.value if orchestrator else None,
             "llm": orchestrator.config.llm.provider.value if orchestrator else None,
             "tts": orchestrator.config.tts.provider.value if orchestrator else None,
-        }
+        },
+        llm_server=_engine_monitor.snapshot() if _engine_monitor is not None else None,
     )
 
 
@@ -510,7 +532,7 @@ async def voice_websocket(websocket: WebSocket):
         # A browser can't set a header here, so it presents a session token in the
         # query string instead; everything else sends the key the usual way.
         principal = auth.authenticate(
-            client_host=_client_host(websocket),
+            client_host=_client_host(websocket), proxied=came_through_a_proxy(websocket.headers),
             authorization=websocket.headers.get("authorization"),
             token=websocket.query_params.get("token"),
         )
@@ -596,6 +618,7 @@ async def voice_websocket(websocket: WebSocket):
                     # goes quiet.
                     playing = bool(msg.get("playing"))
                     barge_in.set_playing(playing)
+                    budget.agent_playing(playing)
                     turn = trace.responding
                     if playing and turn is not None and "playback_started" not in turn.marks:
                         turn.mark("playback_started")
@@ -616,7 +639,7 @@ async def voice_websocket(websocket: WebSocket):
                         if trace.turn_count != turns_seen:  # a turn ended: the budget starts again
                             turns_seen = trace.turn_count
                             budget.turn_ended()
-                        budget.audio(len(data))
+                        budget.audio(len(data), speech_s=trace.speech_s, last_speech=trace.last_speech_mono)
                         await audio_queue.put(data)
                         continue
                     text = message.get("text")
@@ -667,9 +690,12 @@ async def voice_websocket(websocket: WebSocket):
                     barge_in=barge_in,
                     trace=trace,
                     tools=agent.tools if agent is not None else (),
+                    # only when there is one, so an orchestrator written before greetings still fits
+                    **({"greeting": greeting} if (greeting := greeting_for(agent)) else {}),
                 )
                 try:
                     async for chunk in pipeline:
+                        budget.agent_spoke()
                         await websocket.send_bytes(chunk)
                 finally:
                     # Close the pipeline now (not whenever it gets garbage collected), so its

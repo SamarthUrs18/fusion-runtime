@@ -501,6 +501,36 @@ def test_key_new_prints_both_sides_of_the_setup():
     assert "Fingerprint:" in result.output
 
 
+def test_key_new_quiet_prints_only_the_key_for_scripts():
+    """`frun key new > key` in a script saved the whole explanation as the key (pod test, 25 Sep)."""
+    bare = runner.invoke(app, ["key", "new", "--quiet"])
+    assert bare.exit_code == 0 and bare.output.count("\n") == 1
+    assert bare.output.startswith("frun_") and " " not in bare.output.strip()
+    named = runner.invoke(app, ["key", "new", "web", "-q"])
+    assert named.output.startswith("web:frun_") and named.output.count("\n") == 1
+
+
+def test_token_prints_the_public_address_people_open(monkeypatch):
+    """On a pod the token is asked for at 127.0.0.1, but the browser opens the proxy's address."""
+    import httpx
+
+    asked = []
+
+    def fake_post(url, headers, timeout):
+        asked.append(url)
+        return httpx.Response(200, json={"token": "tok123", "expires_in": 60},
+                              request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    result = runner.invoke(app, ["token", "--url", "http://127.0.0.1:8888", "--key", "frun_x",
+                                 "--public-url", "https://abc-8888.proxy.runpod.net/"])
+    assert result.exit_code == 0, result.output
+    assert asked == ["http://127.0.0.1:8888/v1/sessions"]
+    assert result.output.splitlines()[0] == "https://abc-8888.proxy.runpod.net/?token=tok123"
+    bad = runner.invoke(app, ["token", "--key", "frun_x", "--public-url", "abc.proxy.runpod.net"])
+    assert bad.exit_code == 1 and "must start with https://" in bad.output
+
+
 def test_token_without_a_key_says_how_to_get_one(monkeypatch):
     monkeypatch.setenv("FUSION_API_KEY", "")  # empty, not absent: a .env would fill it in
     result = runner.invoke(app, ["token"])

@@ -22,7 +22,8 @@ class Limits:
     max_sessions: int = 4  # conversations at once, whole server
     max_sessions_per_key: int = 0  # 0 = derived: see per_key()
     max_message_bytes: int = MEGABYTE  # audio frames are ~1 KB; anything this big is an attack
-    max_turn_audio_s: float = 60.0  # one person talking without ever pausing
+    max_turn_audio_s: float = 60.0  # one person talking without ever pausing (speech, not silence)
+    max_silence_s: float = 60.0  # nobody speaks: the caller walked away with the line open. 0 = no limit
     max_session_s: float = 900.0  # wall clock for one conversation
     idle_timeout_s: float = 60.0  # no audio and no messages: reclaim the slot
     connections_per_minute: int = 30  # per address, before authentication
@@ -46,6 +47,7 @@ class Limits:
             max_sessions_per_key=number("FUSION_MAX_SESSIONS_PER_KEY", cls.max_sessions_per_key),
             max_message_bytes=number("FUSION_MAX_MESSAGE_BYTES", cls.max_message_bytes),
             max_turn_audio_s=number("FUSION_MAX_TURN_AUDIO_S", cls.max_turn_audio_s),
+            max_silence_s=number("FUSION_MAX_SILENCE_S", cls.max_silence_s),
             max_session_s=number("FUSION_MAX_SESSION_S", cls.max_session_s),
             idle_timeout_s=number("FUSION_IDLE_TIMEOUT_S", cls.idle_timeout_s),
             connections_per_minute=number("FUSION_CONNECTIONS_PER_MINUTE", cls.connections_per_minute),
@@ -136,8 +138,16 @@ class SessionSlots:
 class AudioBudget:
     """Bytes and seconds one socket may use.
 
-    A turn that never ends, a session that never ends, and a socket that opened
-    and went quiet are three different ways to hold a slot for free.
+    A turn that never ends, a session that never ends, a socket that opened and
+    went quiet, and a line left open with nobody on it are four different ways to
+    hold a slot for free.
+
+    With a voice detector running, the turn limit counts speech and the silence
+    limit counts the time since anyone last spoke. Counting every byte instead
+    ended a caller who had been silent for 60 seconds as "more than 60 seconds of
+    speech", and raising the limit for long dictation kept abandoned calls open
+    longer too. Without a detector there's no telling speech from silence, so the
+    turn limit counts every byte and there's no silence limit.
     """
 
     def __init__(self, limits: Limits, sample_rate: int, clock=time.monotonic):
@@ -147,6 +157,10 @@ class AudioBudget:
         self.started = clock()
         self.last_activity = self.started
         self.turn_bytes = 0
+        self._speech_s: Optional[float] = None  # seconds of speech heard so far, once a detector reports
+        self._turn_speech_start = 0.0
+        self.last_voice = self.started  # someone spoke: the caller, or the agent
+        self._agent_playing = False
 
     def message(self, size: int) -> None:
         if size > self.limits.max_message_bytes:
@@ -155,16 +169,36 @@ class AudioBudget:
                             close_code=1009)
         self.last_activity = self._clock()
 
-    def audio(self, size: int) -> None:
+    def audio(self, size: int, speech_s: Optional[float] = None, last_speech: Optional[float] = None) -> None:
+        """A chunk arrived. `speech_s`: the detector's running total of speech; `last_speech`: when it last heard some."""
         self.message(size)
         self.turn_bytes += size
-        if self.turn_bytes / self.bytes_per_second > self.limits.max_turn_audio_s:
+        if speech_s is not None:
+            if self._speech_s is None:
+                self._turn_speech_start = 0.0
+            self._speech_s = speech_s
+        if last_speech is not None:
+            self.last_voice = max(self.last_voice, last_speech)
+        heard = (self._speech_s - self._turn_speech_start if self._speech_s is not None
+                 else self.turn_bytes / self.bytes_per_second)
+        if heard > self.limits.max_turn_audio_s:
             raise OverLimit("turn_too_long",
                             f"more than {self.limits.max_turn_audio_s:.0f} seconds of speech without a pause",
                             close_code=1008)
 
     def turn_ended(self) -> None:
         self.turn_bytes = 0
+        if self._speech_s is not None:
+            self._turn_speech_start = self._speech_s
+
+    def agent_spoke(self) -> None:
+        """The agent sent audio: the line isn't silent."""
+        self.last_voice = self._clock()
+
+    def agent_playing(self, playing: bool) -> None:
+        """The client says the agent's audio is (or stopped) coming out of its speaker."""
+        self._agent_playing = playing
+        self.last_voice = self._clock()
 
     def expired(self) -> Optional[OverLimit]:
         now = self._clock()
@@ -175,5 +209,10 @@ class AudioBudget:
         if now - self.last_activity > self.limits.idle_timeout_s:
             return OverLimit("idle",
                              f"nothing received for {self.limits.idle_timeout_s:.0f} seconds",
+                             close_code=1000)
+        if (self._speech_s is not None and self.limits.max_silence_s > 0 and not self._agent_playing
+                and now - self.last_voice > self.limits.max_silence_s):
+            return OverLimit("silence",
+                             f"no speech for {self.limits.max_silence_s:.0f} seconds",
                              close_code=1000)
         return None

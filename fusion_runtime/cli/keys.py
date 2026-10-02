@@ -15,6 +15,11 @@ key_app = typer.Typer(help="Generate a key for a server to accept.", no_args_is_
 def key_new(
     name: str = typer.Argument(None, metavar="[NAME]",
                                help="A label for you, such as web or mobile. It carries no permissions."),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q",
+        help="Print only the key, for scripts: frun key new --quiet > key. With a NAME, name:key, "
+             "which is what FUSION_ACCEPTED_KEYS takes.",
+    ),
 ) -> None:
     """Generate a key. Shown once — the runtime never stores it."""
     from fusion_runtime.config import ACCEPTED_KEYS_ENV, API_KEY_ENV
@@ -22,6 +27,11 @@ def key_new(
 
     entry = new_key(name)
     secret = entry.split(":", 1)[1] if name else entry
+    if quiet:
+        # A script saving the output saved the whole explanation as the key, and every
+        # connection was then refused (pod test, 25 September).
+        typer.echo(entry)
+        return
     typer.echo(entry)
     typer.echo()
     typer.echo("Where the server runs (.env next to your agent, or the pod's environment):")
@@ -64,6 +74,11 @@ def keys_list() -> None:
 def token(
     url: str = typer.Option("http://127.0.0.1:8000", "--url", help="The server to ask."),
     key: str = typer.Option(None, "--key", help="The key to present. Also: FUSION_API_KEY."),
+    public_url: str = typer.Option(
+        None, "--public-url",
+        help="The address people open, when it differs from --url: a pod's proxy or your domain, "
+             "e.g. https://abc123-8888.proxy.runpod.net. The token is still asked for at --url.",
+    ),
 ) -> None:
     """Mint a session token and print a console URL you can open.
 
@@ -94,5 +109,11 @@ def token(
         raise typer.Exit(1)
     response.raise_for_status()
     body = response.json()
-    typer.echo(f"{base}/?token={body['token']}")
+    shown = base
+    if public_url:
+        if not public_url.startswith(("http://", "https://")):
+            typer.echo(f"Error: --public-url must start with https:// (or http://), got {public_url!r}", err=True)
+            raise typer.Exit(1)
+        shown = public_url.rstrip("/")
+    typer.echo(f"{shown}/?token={body['token']}")
     typer.echo(f"\nOpen that in a browser within {body['expires_in']} seconds. It works once.")
