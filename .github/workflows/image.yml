@@ -67,7 +67,11 @@ jobs:
 
       # The runner has no GPU, so this checks only that the image starts and the
       # package is installed — the part that was broken in the old Dockerfile.
+      # The name exactly as the build pushed it: metadata-action lowercases the owner,
+      # and Docker refuses "SamarthUrs18/..." as written in github.repository.
       - name: Check the image runs
+        env:
+          IMAGE_REF: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
         run: |
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE }}:sha-${{ github.sha }} version
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE }}:sha-${{ github.sha }} doctor || true
+          docker run --rm "$IMAGE_REF" version
+          docker run --rm "$IMAGE_REF" doctor || true
