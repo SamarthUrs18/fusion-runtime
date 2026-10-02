@@ -206,7 +206,13 @@ def up(
         except llm_server.LaunchError as e:
             typer.echo(f"Error: {e}", err=True)
             raise typer.Exit(1)
-    elif _runs_in_process(llm) and shutil.which("nvidia-smi"):
+    if os.getenv("FUSION_IMAGE") == "gpu" and not shutil.which("nvidia-smi"):
+        # The NVIDIA container toolkit puts nvidia-smi in a container started with a GPU
+        typer.echo("Warning: this is fusion's GPU image, but the container has no NVIDIA GPU, so speech runs\n"
+                   "  slowly on the CPU and the vLLM container can't start. On a GPU machine, start it with\n"
+                   "  --gpus all (or docker/docker-compose.gpu.yml). On a laptop, use the CPU image:\n"
+                   "  ghcr.io/samarthurs18/fusion-runtime:cpu (docker/docker-compose.yml)")
+    if _runs_in_process(llm) and shutil.which("nvidia-smi"):
         typer.echo("Note: the LLM runs inside this process, which suits about 4 callers at once. For more,\n"
                    "  run it on vLLM or SGLang: LLM(\"vllm:hf:<org>/<model>\"), and frun up starts it "
                    "(https://fusion-runtime.dev/docs#callers)")

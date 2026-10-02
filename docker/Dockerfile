@@ -103,7 +103,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/opt/venv/bin:$PATH" \
     LD_LIBRARY_PATH="/opt/venv/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/venv/lib/python3.11/site-packages/nvidia/nccl/lib:${LD_LIBRARY_PATH}" \
     FUSION_MODEL_DIR=/models \
-    FUSION_CONFIG=production \
+    FUSION_AGENT=/app/agent.py \
+    FUSION_IMAGE=gpu \
     FUSION_LOG_FORMAT=json
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -114,6 +115,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
+# The default agent: speech here, the LLM on the vLLM container beside this one
+# (docker/docker-compose.gpu.yml). Mount your own over it: -v ./agent.py:/app/agent.py
+COPY docker/agent.py /app/agent.py
 USER fusion
 
 EXPOSE 8000
@@ -122,8 +126,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
 
-# An agent file is named by FUSION_AGENT (mount it, or bake it in); without one
-# the production profile is used. 0.0.0.0 is refused unless keys are configured,
-# which is the point.
+# The agent is /app/agent.py (FUSION_AGENT): the default above, or yours mounted
+# over it. 0.0.0.0 is refused unless keys are configured, which is the point.
 ENTRYPOINT ["frun"]
 CMD ["up", "--host", "0.0.0.0", "--port", "8000"]

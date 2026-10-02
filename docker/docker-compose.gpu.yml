@@ -1,0 +1,77 @@
+# fusion-runtime on an NVIDIA GPU server: two containers on one card.
+#
+#   vllm    the LLM, from vLLM's own image, taking 60% of the GPU
+#   fusion  speech-to-text and text-to-speech on the rest, and your agent
+#
+# They are separate because vLLM and fusion pin different torch and CUDA versions.
+# vLLM is only reachable from fusion (it has no keys); callers reach fusion on 8000.
+# Needs the NVIDIA Container Toolkit. On a laptop, use docker-compose.yml instead.
+#
+#   cd docker
+#   docker compose -f docker-compose.gpu.yml run --rm --no-deps fusion key new
+#        # put it in docker/.env as FUSION_ACCEPTED_KEYS=<key>
+#   docker compose -f docker-compose.gpu.yml run --rm --no-deps fusion models pull /app/agent.py
+#   docker compose -f docker-compose.gpu.yml up
+#
+# The first start downloads the LLM (~5 GB into docker/hf) and compiles kernels: a few
+# minutes before fusion starts, which waits for vLLM to answer.
+#
+# To change the model, change --model here and the LLM line of the agent to match
+# (the default agent is docker/agent.py; mount your own below).
+
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    command:
+      - --model=Qwen/Qwen2.5-7B-Instruct-AWQ
+      - --host=0.0.0.0
+      - --port=8002
+      - --gpu-memory-utilization=0.6        # the rest is for Whisper and Kokoro
+      - --max-model-len=4096                # a voice call's context
+      - --enable-auto-tool-choice
+      - --tool-call-parser=hermes           # Qwen 2.5's tool-call format
+    ipc: host                               # vLLM's shared memory between processes
+    volumes:
+      - ./hf:/root/.cache/huggingface       # the model, kept across restarts
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}               # only for gated models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 900s                    # a first start downloads and compiles
+    restart: unless-stopped
+
+  fusion:
+    image: ghcr.io/samarthurs18/fusion-runtime:latest
+    # or build it from this checkout: docker compose -f docker-compose.gpu.yml build
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    depends_on:
+      vllm:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./models:/models                    # Whisper, Kokoro and the voice detector
+      # - ./agent.py:/app/agent.py          # your agent instead of the default
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped

@@ -241,6 +241,22 @@ by default, which fits a 4-bit 7B model next to Whisper and Kokoro on a 24 GB ca
 if it exits, and stops it with Ctrl+C. GPU memory, context length, tool parsing, extra engine
 flags and logs are in [the docs](https://fusion-runtime.dev/docs#llm-servers).
 
+## Docker
+
+| | Image | Compose file |
+|---|---|---|
+| A laptop, or any machine without an NVIDIA GPU | `ghcr.io/samarthurs18/fusion-runtime:cpu` | `docker/docker-compose.yml` |
+| An NVIDIA GPU server | `ghcr.io/samarthurs18/fusion-runtime:latest` | `docker/docker-compose.gpu.yml` (fusion + vLLM) |
+
+```bash
+cd docker
+docker compose run --rm fusion models pull     # once
+docker compose up                              # or: -f docker-compose.gpu.yml
+```
+
+On a laptop, `pip install fusion-runtime` is simpler still. Keys, models and your own agent
+file are in [the docs](https://fusion-runtime.dev/docs#deploying).
+
 ## The `frun` CLI
 
 | | |

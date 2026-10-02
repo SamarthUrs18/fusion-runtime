@@ -231,15 +231,20 @@ def check_acceleration() -> List[CheckResult]:
     except Exception as e:
         return [CheckResult(FAIL, f"Can't query llama.cpp: {type(e).__name__}: {e}")]
     backend = "Metal" if sys.platform == "darwin" else "CUDA"
+    cuda_devices = _cuda_device_count()
     if gpu_offload:
         results.append(CheckResult(OK, f"llama.cpp can use the GPU ({backend})"))
         if DEVELOPMENT_CONFIG.llm.n_gpu_layers == 0:
             results.append(CheckResult(INFO, "The development profile still runs the LLM on CPU (n_gpu_layers=0)"))
-    else:
+    elif cuda_devices:
+        # The GPU image builds llama.cpp for the CPU on purpose: on an NVIDIA card the LLM
+        # belongs on a model server, which serves about three times the callers.
         results.append(CheckResult(INFO, "llama.cpp was built for CPU only",
-                                   "For a GPU build, reinstall llama-cpp-python with the CMAKE_ARGS for your GPU"))
+                                   'On this GPU, run the LLM on vLLM or SGLang: LLM("vllm:hf:<org>/<model>"), '
+                                   "and frun up starts it (https://fusion-runtime.dev/docs#llm-servers)"))
+    else:
+        results.append(CheckResult(INFO, "llama.cpp runs on the CPU"))
 
-    cuda_devices = _cuda_device_count()
     if cuda_devices:
         results.append(CheckResult(OK, f"{cuda_devices} NVIDIA GPU{'s' if cuda_devices > 1 else ''} visible to CUDA"))
     else:
