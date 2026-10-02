@@ -72,7 +72,13 @@ RUN pip install onnxruntime-gpu \
     --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 
 # Only what the install needs, so editing source doesn't invalidate the layers above.
-COPY pyproject.toml README.md ./
+#
+# Its own folder: without a WORKDIR these files landed in /, and `pip install .`
+# then had setuptools look for fusion's packages across the whole filesystem
+# (/proc, /usr, the multi-GB venv). The build sat there for an hour until CI
+# cancelled it. LICENSE and NOTICE go in the package (Apache-2.0 asks for NOTICE).
+WORKDIR /src
+COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY fusion_runtime/ ./fusion_runtime/
 RUN pip install .
 # fusion's package asks for `onnxruntime`, and pip installs the CPU build of it beside
