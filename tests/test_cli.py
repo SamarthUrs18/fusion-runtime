@@ -452,7 +452,8 @@ def test_up_defaults_keep_content_out_of_logs(monkeypatch):
     _record_uvicorn(monkeypatch)
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
     monkeypatch.delenv("FUSION_CONFIG", raising=False)  # not a legal profile name
-    for var in ("FUSION_LOG_FORMAT", "FUSION_LOG_LEVEL", "FUSION_LOG_CONTENT"):
+    monkeypatch.delenv("FUSION_LOG_FORMAT", raising=False)  # an unknown one is an error now (test below)
+    for var in ("FUSION_LOG_LEVEL", "FUSION_LOG_CONTENT"):
         monkeypatch.setenv(var, "unset-before-test")
     runner.invoke(app, ["up"])
     assert (os.environ["FUSION_LOG_FORMAT"], os.environ["FUSION_LOG_CONTENT"]) == ("pretty", "0")
@@ -597,3 +598,28 @@ def test_models_pull_leaves_a_served_model_to_its_server(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert "Qwen2.5-7B-Instruct-AWQ" not in result.output and not any("Qwen" in p for p in pulled)
     assert "kokoro-v1.0" in pulled
+
+
+def test_up_logs_in_the_format_the_environment_asks_for(monkeypatch):
+    """The images set FUSION_LOG_FORMAT=json; the flag's default of pretty used to overwrite it,
+    so containers logged for a terminal instead of for a log collector."""
+    _all_models_installed(monkeypatch)
+    calls = _record_uvicorn(monkeypatch)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    monkeypatch.delenv("FUSION_AGENT", raising=False)
+
+    monkeypatch.setenv("FUSION_LOG_FORMAT", "json")
+    assert runner.invoke(app, ["up"]).exit_code == 0
+    assert os.environ["FUSION_LOG_FORMAT"] == "json" and calls[-1][1]["log_level"] == "warning"
+
+    monkeypatch.setenv("FUSION_LOG_FORMAT", "json")
+    assert runner.invoke(app, ["up", "--log-format", "pretty"]).exit_code == 0  # the flag wins
+    assert os.environ["FUSION_LOG_FORMAT"] == "pretty"
+
+    monkeypatch.delenv("FUSION_LOG_FORMAT")
+    assert runner.invoke(app, ["up"]).exit_code == 0
+    assert os.environ["FUSION_LOG_FORMAT"] == "pretty"  # nothing set: a terminal
+
+    monkeypatch.setenv("FUSION_LOG_FORMAT", "yaml")
+    result = runner.invoke(app, ["up"])
+    assert result.exit_code != 0 and "isn't a log format" in result.output

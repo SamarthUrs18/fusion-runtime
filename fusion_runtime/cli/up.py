@@ -37,9 +37,10 @@ def up(
         None, "--config", "-c",
         help="Which models and devices to use. Defaults to $FUSION_CONFIG, then development.",
     ),
-    log_format: LogFormat = typer.Option(
-        LogFormat.pretty, "--log-format",
-        help="pretty: readable lines for a terminal. json: one JSON object per line, for log collectors and deployments.",
+    log_format: Optional[LogFormat] = typer.Option(
+        None, "--log-format",
+        help="pretty: readable lines for a terminal. json: one JSON object per line, for log collectors and "
+             "deployments. Defaults to $FUSION_LOG_FORMAT, then pretty.",
     ),
     log_level: LogLevel = typer.Option(
         LogLevel.info, "--log-level", help="debug adds every partial transcript, audio chunk and client message.",
@@ -97,6 +98,17 @@ def up(
                 ) from None
         else:
             config = Profile.development
+
+    # Same order as --config: the flag, then the variable. The images set FUSION_LOG_FORMAT=json,
+    # and a flag default of pretty used to overwrite it, so containers logged for a terminal.
+    if log_format is None:
+        wanted = (os.environ.get("FUSION_LOG_FORMAT") or "").strip().lower()
+        try:
+            log_format = LogFormat(wanted) if wanted else LogFormat.pretty
+        except ValueError:
+            raise typer.BadParameter(
+                f"FUSION_LOG_FORMAT={wanted!r} isn't a log format. Use one of: "
+                f"{', '.join(f.value for f in LogFormat)}") from None
 
     from fusion_runtime.cli._checks import missing_models, port_answers_over_ipv6, port_in_use
     from fusion_runtime.config import (

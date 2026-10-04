@@ -28,7 +28,11 @@ WORKDIR /app
 # NOTICE ships with the package (Apache-2.0)
 COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY fusion_runtime/ ./fusion_runtime/
-RUN pip install --upgrade pip && pip install .
+# torch from PyTorch's CPU index: PyPI's x86 wheel bundles ~2.5 GB of NVIDIA libraries this
+# image never uses. 2.9.1+cpu satisfies fusion's torch==2.9.1, so pip install . keeps it.
+RUN pip install --upgrade pip \
+    && pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu \
+    && pip install .
 
 USER fusion
 EXPOSE 8000
