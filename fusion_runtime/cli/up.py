@@ -2,6 +2,7 @@
 import os
 import shlex
 import shutil
+import sys
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -270,24 +271,34 @@ def up(
     if (host, port) not in (("127.0.0.1", 8000), ("localhost", 8000), ("0.0.0.0", 8000)):
         talk_host = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
         talk_hint = f"frun talk --url ws://{talk_host}:{port}/v1/voice/ws"
-    where = f"agent {short_path(agent_file)}" if agent_file else f"{config.value} profile"
-    typer.echo(f"Starting fusion-runtime ({where}) on http://{host}:{port}")
-    turns = profile.turn_detection
-    typer.echo(f"Turn detection: {turns.runtime or 'silence'}, agent answers after {turns.min_silence_ms} ms of silence"
-               + (" (shorter or longer when the detector is sure)" if turns.runtime else "")
-               + f"; talking over it for {turns.barge_in_min_speech_ms} ms interrupts")
-    if launch is not None:
-        typer.echo(f"LLM: {launch.model_name} on {launch.engine.display}, which this command starts "
-                   f"at {launch.base_url} and stops on exit")
-        for note in launch.notes:
-            typer.echo(f"  ({note})")
-    elif llm.api_base or llm.provider.value == "openai":
-        typer.echo(f"LLM: {llm.model} at {llm.api_base or 'https://api.openai.com/v1'}"
-                   + (f" (key from ${llm.api_key_env})" if llm.api_key_env else ""))
-    typer.echo(f"Auth: {auth_state}")
     browser_host = "localhost" if host == "0.0.0.0" else host
-    typer.echo(f"Loading models. Once it says 'Models ready', open http://{browser_host}:{port} in a browser "
-               f"and click Talk\n  (or run `{talk_hint}` in another terminal).\n")
+    from fusion_runtime.cli import banner
+
+    if banner.should_show(sys.stdout, json_logs=log_format is LogFormat.json):
+        from fusion_runtime import __version__
+        from fusion_runtime.agent import greeting_for
+
+        rows, notes = _banner_rows(profile, llm, launch, agent_file, greeting_for(loaded if agent_file else None),
+                                   config, auth_state, browser_host, port, talk_hint)
+        banner.show(__version__, rows, notes)
+    else:
+        where = f"agent {short_path(agent_file)}" if agent_file else f"{config.value} profile"
+        typer.echo(f"Starting fusion-runtime ({where}) on http://{host}:{port}")
+        turns = profile.turn_detection
+        typer.echo(f"Turn detection: {turns.runtime or 'silence'}, agent answers after {turns.min_silence_ms} ms of silence"
+                   + (" (shorter or longer when the detector is sure)" if turns.runtime else "")
+                   + f"; talking over it for {turns.barge_in_min_speech_ms} ms interrupts")
+        if launch is not None:
+            typer.echo(f"LLM: {launch.model_name} on {launch.engine.display}, which this command starts "
+                       f"at {launch.base_url} and stops on exit")
+            for note in launch.notes:
+                typer.echo(f"  ({note})")
+        elif llm.api_base or llm.provider.value == "openai":
+            typer.echo(f"LLM: {llm.model} at {llm.api_base or 'https://api.openai.com/v1'}"
+                       + (f" (key from ${llm.api_key_env})" if llm.api_key_env else ""))
+        typer.echo(f"Auth: {auth_state}")
+        typer.echo(f"Loading models. Once it says 'Models ready', open http://{browser_host}:{port} in a browser "
+                   f"and click Talk\n  (or run `{talk_hint}` in another terminal).\n")
 
     if log_content:
         typer.echo("Note: --log-content writes what users say, and the bot's replies, into the logs.")
@@ -339,6 +350,45 @@ def up(
         if engine is not None:
             engine.stop()
             printer.close()
+
+
+def _banner_rows(profile, llm, launch, agent_file, greeting, config, auth_state, browser_host, port, talk_hint):
+    """What the welcome screen says: the same facts as the plain start-up lines, one row each."""
+    agent = f"{short_path(agent_file)}" if agent_file else f"{config.value} profile (no agent file)"
+    if greeting:
+        agent += " · greets callers"
+    if launch is not None:
+        model = f"{launch.model_name} on {launch.engine.display} · starting it now"
+    elif llm.api_base or llm.provider.value == "openai":
+        model = f"{llm.model} at {llm.api_base or 'https://api.openai.com/v1'}"
+    else:
+        model = f"{_model_name('llm', llm)} · in this process"
+    device = {"cuda": "on the GPU", "cpu": "on the CPU"}.get(getattr(profile.stt, "device", ""), "on the GPU if there is one")
+    turns = profile.turn_detection
+    rows = [
+        ("agent", agent),
+        ("llm", model),
+        ("speech", f"{_model_name('stt', profile.stt)} · {_model_name('tts', profile.tts)} · {device}"),
+        ("turns", (f"{turns.runtime} detector · " if turns.runtime else "")
+                  + f"answers after {turns.min_silence_ms} ms of silence · "
+                  f"{turns.barge_in_min_speech_ms} ms of talking over it interrupts"),
+        ("auth", auth_state),
+        ("talk", f"http://{browser_host}:{port} in a browser · or: {talk_hint}"),
+    ]
+    notes = list(launch.notes) if launch is not None else []
+    notes.append("loading models; the link works once the log says 'Models ready'")
+    return rows, notes
+
+
+def _model_name(stage: str, stage_config) -> str:
+    """The name the log uses for this model (catalog id, the name on its server), not its file path."""
+    try:
+        from fusion_runtime.resolver import resolve_stage_config
+
+        resolved = resolve_stage_config(stage, stage_config)
+        return resolved.catalog_id or resolved.spec.options.get("model_name") or Path(resolved.spec.model).name
+    except Exception:  # the server reports a model it can't find with the full reason; this is only a label
+        return Path(str(stage_config.model)).name
 
 
 def _runs_in_process(llm) -> bool:
