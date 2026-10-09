@@ -186,9 +186,28 @@ class PipelineOrchestrator:
         # Load Silero once now, so sessions only copy it (see _load_vad_frame_model).
         await self._load_vad_frame_model()
         telemetry.emit("models.ready", stage="server", duration_ms=(time.perf_counter() - started) * 1000)
+        degraded = self.degraded()
+        if degraded:
+            # Said once here, and again on every session.start and in /health, so a server running
+            # below strength stays visible hours later (the VAD was once broken for sessions unnoticed)
+            telemetry.emit("server.degraded", level="warning", stage="server", components=sorted(degraded),
+                           **{f"{name}_reason": reason for name, reason in degraded.items()})
 
         if self.config.enable_batching:
             self._batch_task = asyncio.create_task(self._batch_worker())
+
+    def degraded(self) -> Dict[str, str]:
+        """Parts running below strength: {component: why}. Empty when everything is as configured."""
+        found = dict(self.__dict__.get("_degraded", {}))
+        for stage in ("stt", "llm", "tts"):
+            runtime = self.__dict__.get(stage)
+            health = getattr(runtime, "health", None)
+            if callable(health):
+                with contextlib.suppress(Exception):
+                    state = health()
+                    if getattr(state, "status", None) == "degraded":
+                        found[stage] = state.detail or "degraded"
+        return found
 
     async def shutdown(self):
         pool = self.__dict__.pop("_vad_pool", None)
@@ -478,6 +497,8 @@ class PipelineOrchestrator:
                 impact="no speech detection: turns end on a timer and interruptions don't work",
                 hint="run: frun doctor",
             )
+            self.__dict__.setdefault("_degraded", {})["vad"] = (
+                "not loaded: turns end on a timer and interruptions don't work (run: frun doctor)")
             return None
         telemetry.emit("model.loaded", stage="vad", duration_ms=(time.perf_counter() - t0) * 1000,
                        runtime="silero", model="silero-vad")

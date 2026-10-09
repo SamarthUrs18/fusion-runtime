@@ -174,6 +174,7 @@ class HealthResponse(BaseModel):
     active_sessions: int
     config: dict
     llm_server: Optional[dict] = None  # the model server's own state, when the LLM is on one
+    degraded: Optional[dict] = None  # parts running below strength, and why ({} would mean none)
 
 
 def _error_response(e: Exception, request_id: str) -> JSONResponse:
@@ -403,8 +404,10 @@ async def client_script():
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
+    degraded = _degraded()
     return HealthResponse(
-        status="healthy" if orchestrator is not None else "starting",
+        status="starting" if orchestrator is None else ("degraded" if degraded else "healthy"),
+        degraded=degraded or None,
         version=__version__,
         models_loaded=orchestrator is not None and getattr(orchestrator, "ready", False),
         uptime_s=round(time.monotonic() - _started_at, 1),
@@ -416,6 +419,14 @@ async def health():
         },
         llm_server=_engine_monitor.snapshot() if _engine_monitor is not None else None,
     )
+
+
+def _degraded() -> dict:
+    """What's running below strength right now: models that loaded in a weaker mode, a model server down."""
+    found = orchestrator.degraded() if orchestrator is not None and hasattr(orchestrator, "degraded") else {}
+    if _engine_monitor is not None and _engine_monitor.snapshot().get("state") == "down":
+        found["llm_server"] = "not answering: replies fail until it's back"
+    return found
 
 
 @app.post("/v1/voice/chat", response_model=VoiceChatResponse)
@@ -569,10 +580,12 @@ async def voice_websocket(websocket: WebSocket):
 
     with session_scope(session_id):
         client = websocket.client
-        telemetry.emit("session.start", stage="server",
+        degraded = _degraded()
+        telemetry.emit("session.start", level="warning" if degraded else "info", stage="server",
                        client=f"{client.host}:{client.port}" if client else None,
                        key=principal.label, authenticated=principal.via,
-                       profile=os.getenv("FUSION_CONFIG", "development"))
+                       profile=os.getenv("FUSION_CONFIG", "development"),
+                       **({"degraded": ",".join(sorted(degraded))} if degraded else {}))
         receive_task = send_task = clock_task = None
         try:
             # Send config
