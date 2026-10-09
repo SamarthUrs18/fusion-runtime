@@ -113,7 +113,8 @@ def test_sglang_gets_its_own_flag_names(monkeypatch):
     assert launch.command[-2:] == ["--seed", "1"]
 
 
-def test_no_tools_no_parser_and_settings_are_checked(engine_env):
+def test_no_tools_no_parser_and_settings_are_checked(engine_env, monkeypatch):
+    monkeypatch.setattr(llm_server, "_downloaded", lambda repo, revision: True)
     base = dict(engine_env=str(engine_env))
     launch = llm_server.plan(llm_config(LLM("vllm:hf:org/model", url="http://localhost:9100/v1", **base)),
                              has_tools=False)
@@ -123,6 +124,12 @@ def test_no_tools_no_parser_and_settings_are_checked(engine_env):
         llm_server.plan(llm_config(LLM("vllm:hf:org/model", gpu_memory=60, **base)), has_tools=False)
     with pytest.raises(LaunchError, match="extra_args must be"):
         llm_server.plan(llm_config(LLM("vllm:hf:org/model", extra_args={"seed": 1}, **base)), has_tools=False)
+
+
+def test_a_model_not_downloaded_yet_is_said_before_a_long_first_start(engine_env, monkeypatch):
+    monkeypatch.setattr(llm_server, "_downloaded", lambda repo, revision: False)
+    launch = llm_server.plan(llm_config(LLM("vllm:hf:org/model", engine_env=str(engine_env))), has_tools=False)
+    assert any("isn't downloaded yet" in n and "frun models pull" in n for n in launch.notes)
 
 
 def test_fusion_keys_stay_out_of_the_engines_environment(engine_env):

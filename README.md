@@ -259,8 +259,12 @@ fusion where it is:
 ```bash
 python3 -m venv ~/vllm-env && ~/vllm-env/bin/pip install vllm
 export FUSION_LLM_ENGINE_ENV=~/vllm-env
+frun models pull agent.py     # the LLM too (5.6 GB here), where vLLM looks for it
 frun up agent.py
 ```
+
+Without the pull, vLLM downloads the model during its first start, which takes 5–15 minutes and
+looks like nothing is happening.
 
 `frun up` starts the server before loading speech, so it takes its share of the GPU first (60%
 by default, which fits a 4-bit 7B model next to Whisper and Kokoro on a 24 GB card), restarts it

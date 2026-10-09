@@ -45,7 +45,7 @@ def bytes_to_download(entry: ModelEntry, root: Path, force: bool = False) -> int
     return sum(entry.files[n] for n in names)
 
 
-def check_disk_space(needed: int, root: Path) -> None:
+def check_disk_space(needed: int, root: Path, setting: str = "FUSION_MODEL_DIR") -> None:
     probe = root
     while not probe.exists():  # model dir may not exist yet
         probe = probe.parent
@@ -54,7 +54,7 @@ def check_disk_space(needed: int, root: Path) -> None:
         raise NotEnoughDiskSpace(
             f"Need {format_size(needed)} (plus {format_size(DISK_HEADROOM_BYTES)} headroom) "
             f"but only {format_size(free)} is free at {probe}. "
-            "Free up space or set FUSION_MODEL_DIR to a bigger disk."
+            f"Free up space or set {setting} to a bigger disk."
         )
 
 
@@ -189,14 +189,81 @@ def pull_hf(ref: str, root: Path, log: Callable[[str], None] = print, force: boo
     except DownloadError:
         raise
     except Exception as e:
-        name = type(e).__name__
-        if name in ("GatedRepoError", "RepositoryNotFoundError") or "401" in str(e) or "403" in str(e):
-            raise ModelAccessDenied(
-                f"{repo} is gated or private. Accept its terms on huggingface.co/{repo}, then put an access "
-                f"token in ${HF_TOKEN_ENV} (export {HF_TOKEN_ENV}=hf_...)"
-            ) from e
-        raise DownloadError(f"{repo}: download failed: {name}: {e}") from e
+        raise _hub_error(repo, e) from e
     return target
+
+
+def _hub_error(repo: str, e: Exception) -> DownloadError:
+    name = type(e).__name__
+    if name in ("GatedRepoError", "RepositoryNotFoundError") or "401" in str(e) or "403" in str(e):
+        return ModelAccessDenied(
+            f"{repo} is gated or private. Accept its terms on huggingface.co/{repo}, then put an access "
+            f"token in ${HF_TOKEN_ENV} (export {HF_TOKEN_ENV}=hf_...)")
+    return DownloadError(f"{repo}: download failed: {name}: {e}")
+
+
+# ---- models vLLM and SGLang load -------------------------------------------------------------
+#
+# A model on vLLM or SGLang is loaded by the engine, from Hugging Face's own cache (HF_HOME), not
+# from fusion's model directory. Left to the engine, a first `frun up` spends 5-15 minutes
+# downloading inside its start-up, looking hung. `frun models pull agent.py` fetches it into that
+# same cache beforehand, with progress, so the engine finds it there.
+
+# Weights in other formats the engines don't load (a repo may ship several), and training leftovers
+ENGINE_UNWANTED = HF_UNWANTED + ["*.gguf", "*.onnx", "*.onnx_data", "onnx/**", "*.pt"]
+
+
+def engine_files(repo: str, revision: Optional[str] = None, token: Optional[str] = None) -> list:
+    """[(name, size)] of what vLLM or SGLang needs from a repo: weights, configs, tokenizer, chat template."""
+    from huggingface_hub import HfApi
+
+    info = HfApi().repo_info(repo, revision=revision, files_metadata=True, token=token)
+    files = [(f.rfilename, f.size or 0) for f in (info.siblings or [])
+             if not any(Path(f.rfilename).match(p) for p in ENGINE_UNWANTED)]
+    if any(name.endswith(".safetensors") for name, _ in files):
+        files = [f for f in files if not f[0].endswith(".bin")]  # the same weights again, in the older format
+    return files
+
+
+def in_engine_cache(repo: str, filename: str = "config.json", revision: Optional[str] = None) -> bool:
+    """Whether Hugging Face's cache holds this file of the repo. Looks on disk only, never online."""
+    from huggingface_hub import try_to_load_from_cache
+
+    return isinstance(try_to_load_from_cache(repo, filename, revision=revision), str)
+
+
+def engine_cache_dir() -> Path:
+    from huggingface_hub import constants
+
+    return Path(constants.HF_HUB_CACHE)
+
+
+def pull_for_engine(ref: str, log: Callable[[str], None] = print, force: bool = False) -> int:
+    """Download a vLLM/SGLang model into Hugging Face's cache. Returns the bytes fetched (0: all there)."""
+    repo, revision, filename = hf_reference(ref if ref.startswith(HF_PREFIX) else HF_PREFIX + ref)
+    if filename:
+        raise DownloadError(f"vLLM and SGLang load a whole repo; name it as hf:{repo}, without {filename!r}")
+    from huggingface_hub import snapshot_download
+
+    token = os.getenv(HF_TOKEN_ENV)
+    try:
+        files = engine_files(repo, revision, token)
+        if not files:
+            raise DownloadError(f"{repo} has no files vLLM or SGLang can load")
+        missing = files if force else [f for f in files if not in_engine_cache(repo, f[0], revision)]
+        if not missing:
+            return 0
+        needed = sum(size for _, size in missing)
+        cache = engine_cache_dir()
+        check_disk_space(needed, cache, setting="HF_HOME")
+        log(f"  {repo}{'@' + revision if revision else ''} ({format_size(needed)}) → {cache}, where the engine looks")
+        snapshot_download(repo_id=repo, revision=revision, allow_patterns=[name for name, _ in files],
+                          token=token, force_download=force)
+    except DownloadError:
+        raise
+    except Exception as e:
+        raise _hub_error(repo, e) from e
+    return needed
 
 
 def _files_to_fetch(repo: str, revision: Optional[str], filename: Optional[str], token) -> list:

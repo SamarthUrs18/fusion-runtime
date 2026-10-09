@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 
+import pytest
 from fusion_runtime.cli.app import app
 from fusion_runtime.cli.version import package_version
 from typer.testing import CliRunner
@@ -589,9 +590,9 @@ def test_models_pull_takes_an_agent_file(monkeypatch, tmp_path):
     assert "qwen2.5-0.5b-q4" not in pulled
 
 
-def test_models_pull_leaves_a_served_model_to_its_server(monkeypatch, tmp_path):
-    """vllm:hf:org/model is loaded by vLLM from its own cache; pulling it here would
-    download gigabytes of weights nothing in this process reads."""
+def test_models_pull_puts_a_served_model_where_its_engine_looks(monkeypatch, tmp_path):
+    """vllm:hf:org/model is loaded by vLLM from Hugging Face's cache, not fusion's model directory:
+    it's fetched there, so the first frun up doesn't spend 15 minutes downloading inside vLLM."""
     agent = tmp_path / "agent.py"
     agent.write_text(
         "from fusion_runtime import Agent, LLM, STT, TTS\n"
@@ -601,13 +602,28 @@ def test_models_pull_leaves_a_served_model_to_its_server(monkeypatch, tmp_path):
     monkeypatch.setattr("fusion_runtime.catalog.download.pull", lambda entry, root, log=None, force=False:
                         pulled.append(entry.id))
     monkeypatch.setattr("fusion_runtime.catalog.is_installed", lambda entry, root: False)
-    monkeypatch.setattr("fusion_runtime.catalog.download.check_disk_space", lambda needed, root: None)
+    monkeypatch.setattr("fusion_runtime.catalog.download.check_disk_space", lambda needed, root, **kw: None)
+    for_engine = []
+    monkeypatch.setattr("fusion_runtime.catalog.download.pull_for_engine",
+                        lambda ref, log=None, force=False: for_engine.append(ref) or 5_000_000_000)
+    monkeypatch.setattr("fusion_runtime.catalog.pull_hf",
+                        lambda *a, **k: pytest.fail("not into fusion's model directory"))
 
     result = runner.invoke(app, ["models", "pull", str(agent)])
 
     assert result.exit_code == 0, result.output
-    assert "Qwen2.5-7B-Instruct-AWQ" not in result.output and not any("Qwen" in p for p in pulled)
-    assert "kokoro-v1.0" in pulled
+    assert for_engine == ["hf:Qwen/Qwen2.5-7B-Instruct-AWQ"] and not any("Qwen" in p for p in pulled)
+    assert "ready for vLLM / SGLang" in result.output
+    assert "kokoro-v1.0" in pulled  # and the agent's speech models, as before
+
+
+def test_models_pull_takes_an_engine_model_by_name(monkeypatch):
+    for_engine = []
+    monkeypatch.setattr("fusion_runtime.catalog.download.pull_for_engine",
+                        lambda ref, log=None, force=False: for_engine.append(ref) or 0)
+    result = runner.invoke(app, ["models", "pull", "sglang:hf:Qwen/Qwen2.5-7B-Instruct-AWQ"])
+    assert result.exit_code == 0, result.output
+    assert for_engine == ["hf:Qwen/Qwen2.5-7B-Instruct-AWQ"] and "already downloaded" in result.output
 
 
 def test_up_logs_in_the_format_the_environment_asks_for(monkeypatch):

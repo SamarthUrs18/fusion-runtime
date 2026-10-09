@@ -167,6 +167,9 @@ def plan(llm, *, has_tools: bool, environ: Optional[Mapping[str, str]] = None) -
         command += [engine.max_callers_flag, str(int(_number(options, "max_callers", 0, 1, None)))]
 
     notes = []
+    if ref.startswith("hf:") and not _downloaded(model, revision):
+        notes.append(f"{model} isn't downloaded yet, so this first start downloads it inside {engine.display}'s "
+                     "start-up (minutes for a large model); `frun models pull <agent.py>` does it ahead, with progress")
     parser = options.get("tool_parser")
     if parser is None and has_tools:
         parser = engine.tool_parser
@@ -190,6 +193,16 @@ def plan(llm, *, has_tools: bool, environ: Optional[Mapping[str, str]] = None) -
     hung_after = _number(options, "hung_after_s", HUNG_AFTER_S, 10, None)
     return LaunchPlan(engine, model_name, f"http://127.0.0.1:{port}/v1", command, child_env, timeout, notes,
                       gpu_memory, hung_after)
+
+
+def _downloaded(repo: str, revision: Optional[str]) -> bool:
+    """Whether the engine will find the model in Hugging Face's cache. On disk only; True when unsure."""
+    try:
+        from fusion_runtime.catalog.download import in_engine_cache
+
+        return in_engine_cache(repo, revision=revision)
+    except Exception:
+        return True  # only decides whether to print a note
 
 
 def already_serving(launch: LaunchPlan, timeout_s: float = 2.0) -> bool:

@@ -43,11 +43,13 @@ def list_models() -> None:
 @models_app.command("pull")
 def pull(
     ids: Optional[List[str]] = typer.Argument(
-        None, help="An agent file, catalog model IDs (see `frun models list`), or hf:owner/repo for any "
-                   "Hugging Face model. Default: the agent named by FUSION_AGENT, else everything the "
-                   "profile needs.",
+        None, help="An agent file, catalog model IDs (see `frun models list`), hf:owner/repo for any "
+                   "Hugging Face model, or vllm:hf:owner/repo (sglang:...) for one vLLM or SGLang loads. "
+                   "Default: the agent named by FUSION_AGENT, else everything the profile needs.",
     ),
-    config: Profile = typer.Option(Profile.development, "--config", "-c", help="Profile whose models to pull: development (laptops), production (an NVIDIA GPU) or hybrid."),
+    config: Profile = typer.Option(
+        Profile.development, "--config", "-c",
+        help="Profile whose models to pull: development (laptops), production (an NVIDIA GPU) or hybrid."),
     whisper: bool = typer.Option(False, "--whisper", help="Only the profile's speech-to-text model."),
     llm: bool = typer.Option(False, "--llm", help="Only the profile's LLM."),
     kokoro: bool = typer.Option(False, "--kokoro", help="Only the profile's text-to-speech model."),
@@ -68,7 +70,12 @@ def pull(
         load_catalog,
         pull_hf,
     )
-    from fusion_runtime.catalog.download import DownloadError, bytes_to_download, check_disk_space
+    from fusion_runtime.catalog.download import (
+        DownloadError,
+        bytes_to_download,
+        check_disk_space,
+        pull_for_engine,
+    )
     from fusion_runtime.catalog.download import pull as pull_entry
     from fusion_runtime.config import model_dir
 
@@ -96,13 +103,20 @@ def pull(
         typer.echo(f"From {short_path(Path(agent_files[0]))}")
 
     hf_refs = [i for i in ids if i.startswith("hf:")]
+    # vllm:hf:owner/repo, sglang:hf:...: into Hugging Face's cache, where the engine loads it from
+    engine_refs = [i.split(":", 1)[1] for i in ids if i.startswith(("vllm:hf:", "sglang:hf:"))]
+    ids = [i for i in ids if not i.startswith(("vllm:", "sglang:"))]
     if wanted is not None:  # an agent can name Hugging Face models directly
+        from fusion_runtime.llm_server import launchable
         from fusion_runtime.resolver import SERVED_RUNTIMES
 
         stages = [getattr(wanted, stage, None) for stage in ("stt", "llm", "tts")]
-        # A model on vLLM / SGLang / llama-server is that server's to download, not ours
+        # A model on a server is that server's to load: ours to fetch only for one frun up starts
+        # (vLLM, SGLang). llama-server is started by you, with your own model file.
         hf_refs += [s.model for s in stages if s is not None and s.model.startswith("hf:")
                     and getattr(s, "runtime", None) not in SERVED_RUNTIMES]
+        if wanted.llm is not None and (wanted.llm.model or "").startswith("hf:") and launchable(wanted.llm):
+            engine_refs.append(wanted.llm.model)
     try:
         chosen = get_entries([i for i in ids if i not in hf_refs], catalog)
     except UnknownModelError as e:
@@ -112,6 +126,18 @@ def pull(
                 typer.echo(f"\nFor a Hugging Face model, write: frun models pull hf:{given}", err=True)
                 break
         raise typer.Exit(1)
+
+    for ref in engine_refs:
+        try:
+            fetched = pull_for_engine(ref, log=typer.echo, force=force)
+        except (ModelAccessDenied, DownloadError) as e:
+            typer.echo(f"✗ {e}", err=True)
+            if not isinstance(e, ModelAccessDenied):
+                typer.echo("Check your internet connection and run the same command again.", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"✓ {ref} {'ready' if fetched else 'already downloaded'} for vLLM / SGLang")
+    if engine_refs and not ids and not agent_files and not any((whisper, llm, kokoro, vad)):
+        return
 
     stages = {s for s, on in (("stt", whisper), ("llm", llm), ("tts", kokoro), ("vad", vad)) if on}
     if stages or not ids:
