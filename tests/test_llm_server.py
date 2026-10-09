@@ -30,6 +30,10 @@ FAKE_ENGINE = textwrap.dedent('''\
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            hang = os.environ.get("FAKE_ENGINE_HANG_FILE")
+            if hang and os.path.exists(hang):
+                import time
+                time.sleep(3600)  # alive, but answering nothing: a hung engine
             body = b""
             if self.path == "/v1/models":
                 body = json.dumps({{"data": [{{"id": name}}]}}).encode()
@@ -389,3 +393,69 @@ def test_stopping_during_a_restart_leaves_no_engine_running(engine_env):
         server._wait_ready(process)
     process.wait(10)
     assert process.poll() is not None
+
+
+async def test_sglang_is_watched_without_making_it_generate():
+    """SGLang's /health decodes a token; polling it every 5 s kept the 4090 busy forever (5 Oct)."""
+    import httpx
+
+    asked, up = [], {"now": True}
+    sglang = "sglang:num_running_reqs{tp_rank=\"0\"} 2\nsglang:num_queue_reqs{tp_rank=\"0\"} 1\nsglang:token_usage{tp_rank=\"0\"} 0.3\n"
+
+    def answer(request):
+        asked.append(request.url.path)
+        if not up["now"]:
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(200, text=sglang if request.url.path == "/metrics" else "")
+
+    monitor = llm_server.EngineMonitor("SGLang", "http://127.0.0.1:30000/v1")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+        await monitor.poll(client)
+        assert asked == ["/metrics"]  # one request, never /health
+        assert monitor.snapshot()["state"] == "up" and monitor.snapshot()["waiting"] == 1
+        up["now"] = False
+        await monitor.poll(client)
+        assert monitor.snapshot()["state"] == "down"
+    vllm = llm_server.EngineMonitor("vLLM", "http://127.0.0.1:8002/v1")
+    asked.clear()
+    up["now"] = True
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+        await vllm.poll(client)
+    assert asked == ["/health", "/metrics"]  # vLLM's /health is a cheap check: unchanged
+
+
+def test_a_server_that_hangs_with_its_process_up_is_restarted(engine_env, tmp_path, monkeypatch):
+    """Asif Ali's question on the 0.1.2 post: a hung engine stays up, so nothing restarted it."""
+    hang = tmp_path / "hang"
+    monkeypatch.setenv("FAKE_ENGINE_HANG_FILE", str(hang))
+    launch = llm_server.plan(llm_config(LLM("vllm:hf:org/model", url=f"http://127.0.0.1:{free_port()}/v1",
+                                            engine_env=str(engine_env))), has_tools=False)
+    launch.hung_after_s = 1.0
+    lines = []
+    server = llm_server.LLMServer(launch, lambda level, message: lines.append((level, message)))
+    server.first_restart_delay_s = 0.1
+    server.liveness_every_s = 0.2
+    server.start()
+    try:
+        first = server.pid
+        hang.write_text("")  # the engine stops answering; its process stays up
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and server.hung_restarts == 0:
+            time.sleep(0.1)
+        assert server.hung_restarts == 1
+        assert any(level == "error" and "not answering for 1 s (hung)" in m for level, m in lines)
+        hang.unlink()  # the new one answers
+        while time.monotonic() < deadline and not (server.pid != first and llm_server.already_serving(launch)):
+            time.sleep(0.1)
+        assert server.pid != first and server.restarts == 1
+    finally:
+        server.stop()
+
+
+def test_hung_after_is_a_launch_setting(engine_env):
+    launch = llm_server.plan(llm_config(LLM("vllm:hf:org/model", hung_after_s=120, engine_env=str(engine_env))),
+                             has_tools=False)
+    assert launch.hung_after_s == 120 and launch.liveness_url.endswith(":8002/health")
+    with pytest.raises(LaunchError, match="hung_after_s must be at least 10"):
+        llm_server.plan(llm_config(LLM("vllm:hf:org/model", hung_after_s=2, engine_env=str(engine_env))),
+                        has_tools=False)
