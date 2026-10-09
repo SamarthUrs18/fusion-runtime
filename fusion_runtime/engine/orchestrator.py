@@ -5,7 +5,7 @@ import copy
 import difflib
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import AsyncIterator, Dict, List, Optional, Sequence
+from typing import AsyncIterator, Dict, List, Optional, Sequence, Tuple
 
 from fusion_runtime.config import PipelineConfig, TurnDetectionConfig
 from fusion_runtime.contract import (
@@ -32,6 +32,9 @@ from fusion_runtime.vad import TurnState, VADBase, create_vad
 # Silence after which the user's last words are transcribed, ahead of the turn ending
 FINALIZE_AFTER_SILENCE_MS = 150
 
+
+# A lookup cut in on gets this long more to finish, so its result informs the next answer
+INTERRUPTED_TOOL_GRACE_S = 2.0
 
 class PipelineOrchestrator:
     """
@@ -1087,6 +1090,7 @@ class PipelineOrchestrator:
             measure_decode = getattr(getattr(self.llm, "capabilities", None), "decodes_on_demand", True)
             max_tool_rounds = max(0, int(getattr(llm_config, "max_tool_rounds", 4)))
             steps: List[Message] = []  # tool calls this turn with their results, kept in the history
+            answer_dropped = False  # cut in on after a lookup finished: no answer was spoken
             round_text = ""
 
             # One round per model reply. A reply that asks for tools gets them run and the results
@@ -1201,18 +1205,23 @@ class PipelineOrchestrator:
                     response_buffer += " "  # the reply continues after the tools, as a new sentence
                 asked = Message(role="assistant", content=round_text, tool_calls=tool_calls)
                 messages = [*messages, asked]
-                results = await self._run_tools(tool_calls, tools_by_name, barge_in, trace, turn)
-                if results is None:  # the caller talked over the wait: drop the answer that was coming
+                results, cut_off = await self._run_tools(tool_calls, tools_by_name, barge_in, trace, turn)
+                if results is not None:
+                    answered = [Message(role="tool", content=result.content, name=call.name, tool_call_id=call.id)
+                                for call, result in zip(tool_calls, results, strict=True)]
+                    messages = [*messages, *answered]
+                    steps += [asked, *answered]
+                if cut_off:
+                    # The caller talked over the wait: drop the answer that was coming. A lookup that
+                    # finished stays in the conversation, so their next question is answered with it
+                    # instead of a guess; one that didn't is gone, as if never asked.
                     finish_reason = "interrupted"
+                    answer_dropped = results is not None  # the lookup's words already sit in `asked`
                     if emit:
                         emit({"type": "response", "text": response_buffer.strip(), "is_final": True,
                               "interrupted": True})
                     yield REPLY_CUT_OFF
                     break
-                answered = [Message(role="tool", content=result.content, name=call.name, tool_call_id=call.id)
-                            for call, result in zip(tool_calls, results, strict=True)]
-                messages = [*messages, *answered]
-                steps += [asked, *answered]
                 finish_reason = None
             response_buffer = response_buffer.strip()
             if barge_in is not None:
@@ -1235,7 +1244,7 @@ class PipelineOrchestrator:
             last_bot_text = response_buffer
             # A call cut off before its results came back isn't kept: its words ("Let me check.")
             # are the last round's text, stored as the reply.
-            conversation.add_turn(transcript, round_text if steps else response_buffer,
+            conversation.add_turn(transcript, "" if answer_dropped else (round_text if steps else response_buffer),
                                   interrupted=finish_reason == "interrupted", steps=steps)
             response_buffer = ""
             first_token = True
@@ -1353,8 +1362,12 @@ class PipelineOrchestrator:
         )
 
     async def _run_tools(self, calls, tools_by_name: Dict[str, Tool], barge_in: Optional[BargeInState],
-                         trace: Optional[SessionTrace], turn) -> Optional[List[ToolResult]]:
-        """Run the calls the model asked for, together. None if the caller interrupted while they ran.
+                         trace: Optional[SessionTrace], turn) -> Tuple[Optional[List[ToolResult]], bool]:
+        """Run the calls the model asked for, together: (their results, whether the caller cut in).
+
+        Talking over the wait stops the answer, but the lookups get INTERRUPTED_TOOL_GRACE_S more to
+        finish, and a finished lookup's result is returned and kept. Results are None only for
+        lookups cancelled because they were still running.
 
         A tool that fails, times out or doesn't exist gives the model an error to read, never
         an exception here: one broken lookup shouldn't hang up on the caller.
@@ -1381,15 +1394,26 @@ class PipelineOrchestrator:
 
         running = asyncio.ensure_future(asyncio.gather(*(one(call) for call in calls)))
         if barge_in is None:
-            return await running
+            return await running, False
         interrupted = asyncio.ensure_future(barge_in.interrupted.wait())
         try:
             await asyncio.wait({running, interrupted}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             interrupted.cancel()
         if running.done():
-            return running.result()
+            return running.result(), False
         barge_in.interrupted.clear()
+        # Cut in on: stop the answer now, but let a nearly finished lookup land, so its result can
+        # inform the reply to whatever the caller just said (a cough or an echo shouldn't cost the data)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(running), INTERRUPTED_TOOL_GRACE_S)
+        if running.done() and not running.cancelled() and running.exception() is None:
+            if trace is not None and turn is not None:
+                turn.mark("llm_stopped")
+                trace.event("tool.kept", turn=turn, stage="tool", reason="barge_in",
+                            tools=[call.name for call in calls],
+                            hint="the caller cut in during the lookup; its result is kept for the next answer")
+            return running.result(), True
         running.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await running
@@ -1397,7 +1421,7 @@ class PipelineOrchestrator:
             turn.mark("llm_stopped")
             trace.event("tool.cancelled", turn=turn, stage="tool", reason="barge_in",
                         tools=[call.name for call in calls])
-        return None
+        return None, True
 
     async def _tts_stage(
         self,

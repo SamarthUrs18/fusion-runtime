@@ -377,6 +377,47 @@ async def test_talking_over_a_slow_tool_cancels_it_and_drops_the_answer():
     assert conversation.history[-1].content == "One moment."
 
 
+async def test_a_lookup_that_lands_after_the_caller_cuts_in_is_kept_for_the_next_answer():
+    """A cough or an echo during the wait shouldn't cost the data: the answer stops, the result stays."""
+    interrupted = asyncio.Event()
+
+    @tool
+    async def order_status(order_id: str = "1042") -> dict:
+        """Look up an order."""
+        await interrupted.wait()
+        await asyncio.sleep(0.05)  # lands just after the caller cut in
+        return {"status": "shipped", "arriving": "Thursday"}
+
+    llm = ScriptedLLM(
+        [LLMChunk(text="Let me check."), calls("order_status")],
+        [LLMChunk(text="It arrives Thursday."), LLMChunk(finish_reason="stop")],
+    )
+    orch = orchestrator(llm)
+    barge_in = BargeInState()
+    conversation = Conversation("sys")
+
+    async def cut_in():
+        await asyncio.sleep(0.02)
+        barge_in.fire()
+        interrupted.set()
+
+    task = asyncio.create_task(cut_in())
+    tokens = [t async for t in orch._llm_stage(one_turn("where is 1042"), "sys", barge_in=barge_in,
+                                                conversation=conversation, tools=(order_status,))]
+    await task
+    assert tokens[-1] == REPLY_CUT_OFF and len(llm.requests) == 1  # the answer was dropped...
+    roles = [m.role for m in conversation.history]
+    assert roles == ["user", "assistant", "tool"]  # ...but the lookup and its result stay
+    assert "Thursday" in conversation.history[-1].content
+
+    # the next question is answered with the data, not a guess
+    async for _ in orch._llm_stage(one_turn("so when does it come"), "sys", barge_in=BargeInState(),
+                                   conversation=conversation, tools=(order_status,)):
+        pass
+    sent = [m.role for m in llm.requests[-1].messages]
+    assert sent == ["system", "user", "assistant", "tool", "user"]
+
+
 def test_a_runtime_without_tool_support_is_refused_at_startup():
     orch = orchestrator(ScriptedLLM(tools=False))
     orch.check_tools(())  # no tools: fine
