@@ -170,11 +170,13 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     models_loaded: bool
-    uptime_s: float
-    active_sessions: int
     config: dict
+    # Load and details: with a key, or from this machine when no keys are set (see health())
+    uptime_s: Optional[float] = None
+    active_sessions: Optional[int] = None
     llm_server: Optional[dict] = None  # the model server's own state, when the LLM is on one
     degraded: Optional[dict] = None  # parts running below strength, and why ({} would mean none)
+    note: Optional[str] = None
 
 
 def _error_response(e: Exception, request_id: str) -> JSONResponse:
@@ -403,22 +405,40 @@ async def client_script():
 # ============ REST Endpoints ============
 
 @app.get("/health", response_model=HealthResponse)
-async def health():
+async def health(request: Request):
+    """Up or not, for anyone: load balancers, container health checks and the console page ask
+    without a key. How busy the server is (calls, the LLM's queue) and what's running below
+    strength is for its operator: with a key, or from this machine when no keys are set."""
     degraded = _degraded()
-    return HealthResponse(
+    body = HealthResponse(
         status="starting" if orchestrator is None else ("degraded" if degraded else "healthy"),
-        degraded=degraded or None,
         version=__version__,
         models_loaded=orchestrator is not None and getattr(orchestrator, "ready", False),
-        uptime_s=round(time.monotonic() - _started_at, 1),
-        active_sessions=len(_active_sessions),
         config={
             "stt": orchestrator.config.stt.provider.value if orchestrator else None,
             "llm": orchestrator.config.llm.provider.value if orchestrator else None,
             "tts": orchestrator.config.tts.provider.value if orchestrator else None,
         },
-        llm_server=_engine_monitor.snapshot() if _engine_monitor is not None else None,
     )
+    if not _is_operator(request):
+        body.note = "send a key (Authorization: Bearer <key>) for sessions, load and details"
+        return body
+    body.degraded = degraded or None
+    body.uptime_s = round(time.monotonic() - _started_at, 1)
+    body.active_sessions = len(_active_sessions)
+    body.llm_server = _engine_monitor.snapshot() if _engine_monitor is not None else None
+    return body
+
+
+def _is_operator(request: Request) -> bool:
+    """A key, or this machine on a server without keys. Quietly: a health check without a key
+    is normal, so it isn't logged or counted as a failed attempt."""
+    try:
+        auth.authenticate(client_host=_client_host(request), proxied=came_through_a_proxy(request.headers),
+                          authorization=request.headers.get("authorization"), token=None, allow_token=False)
+    except Unauthorized:
+        return False
+    return True
 
 
 def _degraded() -> dict:
@@ -745,8 +765,9 @@ async def voice_websocket(websocket: WebSocket):
                        if greeting and agent is not None and not agent.greeting_interruptible else {}),
                 )
                 try:
+                    reply_bytes_per_s = 2 * orchestrator.config.tts.sample_rate  # 16-bit mono
                     async for chunk in pipeline:
-                        budget.agent_spoke()
+                        budget.agent_spoke(len(chunk) / reply_bytes_per_s)
                         await websocket.send_bytes(chunk)
                 finally:
                     # Close the pipeline now (not whenever it gets garbage collected), so its

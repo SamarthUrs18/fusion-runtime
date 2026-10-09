@@ -174,6 +174,17 @@ def test_health_stays_open_but_metrics_do_not(client):
     assert client.get("/metrics", headers={"Authorization": f"Bearer {KEY}"}).status_code == 200
 
 
+def test_health_says_how_busy_only_to_a_key(client):
+    """Anyone may ask whether it's up; calls in progress and the LLM's load are the operator's."""
+    anonymous = client.get("/health").json()
+    assert anonymous["status"] and anonymous["version"] and "models_loaded" in anonymous
+    assert anonymous["active_sessions"] is None and anonymous["uptime_s"] is None and anonymous["note"]
+    keyed = client.get("/health", headers={"Authorization": f"Bearer {KEY}"}).json()
+    assert keyed["active_sessions"] == 0 and keyed["uptime_s"] >= 0 and keyed["note"] is None
+    # a wrong key is simply anonymous here: not an error, and not counted against the address
+    assert client.get("/health", headers={"Authorization": "Bearer nope"}).json()["active_sessions"] is None
+
+
 def test_the_console_and_its_script_stay_open(client):
     """They contain no secrets, and a page has to load before it can authenticate."""
     assert client.get("/").status_code == 200
@@ -412,6 +423,22 @@ def test_the_agent_talking_is_not_silence():
     assert budget.expired() is None  # a long reply still playing
     budget.agent_playing(False)
     now[0] = 261
+    budget.message(10)
+    assert budget.expired().reason == "silence"
+
+
+def test_a_long_reply_counts_until_it_has_played_without_playback_reports():
+    """A client that never reports playback: 90 s of reply sent in 20 s is still 90 s of talking."""
+    now = [0.0]
+    budget = AudioBudget(Limits(max_silence_s=60, idle_timeout_s=600), 16000, clock=lambda: now[0])
+    budget.audio(32000, speech_s=2.0, last_speech=0.0)
+    for second in range(20):
+        now[0] = 10 + second
+        budget.agent_spoke(4.5)  # made faster than real time
+    now[0] = 140  # the reply finishes playing at about 100 s
+    budget.message(10)
+    assert budget.expired() is None
+    now[0] = 161
     budget.message(10)
     assert budget.expired().reason == "silence"
 

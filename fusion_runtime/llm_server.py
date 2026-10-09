@@ -225,7 +225,11 @@ def already_serving(launch: LaunchPlan, timeout_s: float = 2.0) -> bool:
 
 # What speech takes on the GPU beside the engine, in GB: rough, measured on a 3090 with
 # CTranslate2 float16 Whisper and Kokoro on onnxruntime-gpu. Used to warn, never to refuse.
-WHISPER_GB = {"tiny": 0.3, "base": 0.4, "small": 0.9, "medium": 2.0, "large": 3.6, "turbo": 2.0, "distil": 1.6}
+# Checked in order, the most specific first: "large-v3-turbo" and "distil-large-v3" also contain
+# "large", and matching that first counted them as the full large model.
+WHISPER_GB = (("turbo", 2.0), ("distil-large", 1.6), ("tiny", 0.3), ("base", 0.4), ("small", 0.9),
+              ("medium", 2.0), ("large", 3.6))
+WHISPER_DEFAULT_GB = 0.9  # a model named some other way: as much as small
 KOKORO_GB = 0.8
 CUDA_CONTEXT_GB = 0.8  # each library's CUDA context in fusion's process, together
 
@@ -279,7 +283,7 @@ def speech_gb(config) -> float:
     stt = getattr(config, "stt", None)
     if stt is not None and getattr(stt, "device", "cpu") in ("cuda", "auto"):
         model = str(getattr(stt, "model", "")).lower()
-        need += next((gb for size, gb in WHISPER_GB.items() if size in model), WHISPER_GB["small"])
+        need += next((gb for size, gb in WHISPER_GB if size in model), WHISPER_DEFAULT_GB)
     need += KOKORO_GB  # on the GPU whenever onnxruntime-gpu is installed; small enough to always count
     return round(need + CUDA_CONTEXT_GB, 1)
 

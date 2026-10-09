@@ -125,7 +125,8 @@ def onnx_session(model_path: Path, found: Optional[list] = None):
     options = rt.SessionOptions()
     options.log_severity_level = 3  # errors only; a provider that didn't load is reported below, once
     session = rt.InferenceSession(str(model_path), sess_options=options, providers=providers)
-    warnings = provider_warnings(providers, session.get_providers(), _installed_builds())
+    warnings = provider_warnings(providers, session.get_providers(), _installed_builds(),
+                                 cpu_on_purpose=named == "CPUExecutionProvider")
     if found is not None:
         found.extend(warnings)
     for warning in warnings:
@@ -136,8 +137,13 @@ def onnx_session(model_path: Path, found: Optional[list] = None):
     return session
 
 
-def provider_warnings(asked: List[str], got: List[str], builds: List[str]) -> List[Tuple[str, str]]:
-    """(what's wrong, the fix) for an onnxruntime that can't use the GPU it was installed for."""
+def provider_warnings(asked: List[str], got: List[str], builds: List[str],
+                      cpu_on_purpose: bool = False) -> List[Tuple[str, str]]:
+    """(what's wrong, the fix) for an onnxruntime that can't use the GPU it was installed for.
+
+    ONNX_PROVIDER=CPUExecutionProvider on a GPU machine is a choice (leaving the GPU to the LLM),
+    not a broken install, so it isn't reported as one.
+    """
     warnings = []
     if "onnxruntime" in builds and GPU_BUILD in builds:
         # Both install the same `onnxruntime` module, so whichever went in last wins, usually the
@@ -152,7 +158,7 @@ def provider_warnings(asked: List[str], got: List[str], builds: List[str]) -> Li
             f"text-to-speech is running on the CPU: {wanted_gpu[0]} didn't load",
             "onnxruntime-gpu 1.30+ needs CUDA 13 while torch uses CUDA 12; see "
             "https://fusion-runtime.dev/docs#gpu"))
-    elif GPU_BUILD in builds and not wanted_gpu:
+    elif GPU_BUILD in builds and not wanted_gpu and not cpu_on_purpose:
         warnings.append((
             "text-to-speech is running on the CPU: onnxruntime-gpu is installed but this onnxruntime "
             "has no CUDA provider",

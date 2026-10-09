@@ -298,6 +298,19 @@ def test_speech_needs_more_with_a_bigger_whisper_on_the_gpu():
     assert on_cpu == 1.6 and on_gpu == 2.5
 
 
+def test_turbo_and_distil_whisper_arent_counted_as_large():
+    from types import SimpleNamespace
+
+    def need(model):  # Kokoro 0.8 and CUDA contexts 0.8 come with every one
+        return round(llm_server.speech_gb(SimpleNamespace(stt=SimpleNamespace(model=model, device="cuda"))) - 1.6, 1)
+
+    assert need("large-v3") == 3.6
+    assert need("large-v3-turbo") == 2.0
+    assert need("distil-large-v3") == 1.6
+    assert need("distil-small.en") == 0.9
+    assert need("my-finetune") == 0.9
+
+
 VLLM_METRICS = """# HELP vllm:num_requests_running Number of requests in model execution batches.
 vllm:num_requests_running{engine="0",model_name="org/model"} 7.0
 vllm:num_requests_waiting{engine="0",model_name="org/model"} 3.0

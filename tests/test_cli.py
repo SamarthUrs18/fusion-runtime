@@ -539,6 +539,7 @@ def test_token_prints_the_public_address_people_open(monkeypatch):
     assert result.output.splitlines()[0] == "https://abc-8888.proxy.runpod.net/?token=tok123"
     bad = runner.invoke(app, ["token", "--key", "frun_x", "--public-url", "abc.proxy.runpod.net"])
     assert bad.exit_code == 1 and "must start with https://" in bad.output
+    assert len(asked) == 1  # refused before a token was spent on a link that can't open
 
 
 def test_token_without_a_key_says_how_to_get_one(monkeypatch):
