@@ -24,6 +24,7 @@ class Limits:
     max_message_bytes: int = MEGABYTE  # audio frames are ~1 KB; anything this big is an attack
     max_turn_audio_s: float = 60.0  # one person talking without ever pausing (speech, not silence)
     max_silence_s: float = 60.0  # nobody speaks: the caller walked away with the line open. 0 = no limit
+    dead_audio_s: float = 3.0  # no frames, or only exact zeros, this long: tell the caller. 0 = off
     max_session_s: float = 900.0  # wall clock for one conversation
     idle_timeout_s: float = 60.0  # no audio and no messages: reclaim the slot
     connections_per_minute: int = 30  # per address, before authentication
@@ -48,6 +49,7 @@ class Limits:
             max_message_bytes=number("FUSION_MAX_MESSAGE_BYTES", cls.max_message_bytes),
             max_turn_audio_s=number("FUSION_MAX_TURN_AUDIO_S", cls.max_turn_audio_s),
             max_silence_s=number("FUSION_MAX_SILENCE_S", cls.max_silence_s),
+            dead_audio_s=number("FUSION_DEAD_AUDIO_S", cls.dead_audio_s),
             max_session_s=number("FUSION_MAX_SESSION_S", cls.max_session_s),
             idle_timeout_s=number("FUSION_IDLE_TIMEOUT_S", cls.idle_timeout_s),
             connections_per_minute=number("FUSION_CONNECTIONS_PER_MINUTE", cls.connections_per_minute),

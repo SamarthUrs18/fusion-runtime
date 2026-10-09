@@ -159,6 +159,8 @@
   session.on("interrupted", function () { say("You interrupted — the agent stopped."); });
   session.on("turn_resumed", function () { say("You kept talking, so both parts are answered together."); });
   session.on("echo_discarded", function () { say("That was the agent's own voice coming back, so it was ignored."); });
+  session.on("audio_problem", function (msg) { say(msg.message, true); });
+  session.on("audio_ok", function () { say("Hearing you again."); });
 
   session.on("trace", function (msg) {
     var s = msg.summary || {};

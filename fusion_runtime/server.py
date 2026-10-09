@@ -206,7 +206,7 @@ def _configure_auth(environ=None) -> None:
     telemetry.emit("limits.configured", stage="server", max_sessions=limits.max_sessions,
                    per_key=limits.per_key(len(keys)), idle_timeout_s=limits.idle_timeout_s,
                    max_session_s=limits.max_session_s, max_turn_audio_s=limits.max_turn_audio_s,
-                   max_silence_s=limits.max_silence_s,
+                   max_silence_s=limits.max_silence_s, dead_audio_s=limits.dead_audio_s,
                    connections_per_minute=limits.connections_per_minute,
                    tokens_per_minute=limits.tokens_per_minute, trusted_proxy=proxies.enabled,
                    allowed_origins=origins.allowed or "same origin only")
@@ -627,6 +627,22 @@ async def voice_websocket(websocket: WebSocket):
                     trace.event("client.unknown_message", level="debug", stage="server", message_type=msg.get("type"))
 
             budget = AudioBudget(limits, orchestrator.config.sample_rate)
+            from fusion_runtime.engine.audio_watch import AudioWatch
+
+            hearing = AudioWatch(limits.dead_audio_s)
+
+            def report_audio(change):
+                """The caller's audio stopped, went digitally silent, or came back: log it, tell the client."""
+                if change is None:
+                    return
+                if change["event"] == "audio.problem":
+                    trace.event("audio.problem", level="warning", stage="audio", problem=change["problem"],
+                                seconds=change["seconds"], hint=change["message"])
+                    _dispatch_event(websocket, {"type": "audio_problem", "problem": change["problem"],
+                                                "message": change["message"]})
+                else:
+                    trace.event("audio.ok", stage="audio", problem=change["problem"], lasted_s=change["lasted_s"])
+                    _dispatch_event(websocket, {"type": "audio_ok"})
 
             async def receive_audio():
                 turns_seen = trace.turn_count
@@ -640,6 +656,7 @@ async def voice_websocket(websocket: WebSocket):
                             turns_seen = trace.turn_count
                             budget.turn_ended()
                         budget.audio(len(data), speech_s=trace.speech_s, last_speech=trace.last_speech_mono)
+                        report_audio(hearing.frame(data))
                         await audio_queue.put(data)
                         continue
                     text = message.get("text")
@@ -649,12 +666,17 @@ async def voice_websocket(websocket: WebSocket):
 
             async def watch_the_clock():
                 """A socket that opened and went quiet, or a conversation that never
-                ends, holds a slot nobody else can use."""
+                ends, holds a slot nobody else can use. Twice a second it also checks
+                that caller audio is still arriving at all."""
+                ticks = 0
                 while True:
-                    await asyncio.sleep(5)
-                    expired = budget.expired()
-                    if expired is not None:
-                        raise expired
+                    await asyncio.sleep(0.5)
+                    report_audio(hearing.check())
+                    ticks += 1
+                    if ticks % 10 == 0:
+                        expired = budget.expired()
+                        if expired is not None:
+                            raise expired
 
             async def audio_stream():
                 # asyncio.Queue has no __aiter__ — wrap it
