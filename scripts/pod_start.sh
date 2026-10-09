@@ -226,5 +226,5 @@ if [[ -n "$origin" ]]; then
   echo "         prints the link to open (once, within a minute)"
 fi
 echo "load test:"
-echo "  python scripts/concurrency_check.py --url ws://127.0.0.1:$PORT --key \$(cat $WORKSPACE/key) \\"
-echo "      --audio tests/fixtures/order_1042.wav --callers 1,4,8,12,16 --turns 3"
+echo "  frun bench --url ws://127.0.0.1:$PORT --key \$(cat $WORKSPACE/key) \\"
+echo "      --audio order --callers 1,4,8,12,16 --turns 3 --target-ms 1500"

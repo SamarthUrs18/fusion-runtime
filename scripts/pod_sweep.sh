@@ -101,7 +101,7 @@ if ! curl -fs http://127.0.0.1:8000/health > /dev/null 2>&1; then
 fi
 
 { echo; echo "--- concurrency: in-process llama.cpp"; } >> "$RESULTS"
-python3 scripts/concurrency_check.py --callers 1,2,4 --turns 3 \
+frun bench --callers 1,2,4 --turns 3 \
   --label "in-process llama.cpp on this GPU" 2>&1 | tee -a "$RESULTS"
 
 # The comparison that makes the claim real. vLLM and llama-server both speak the
@@ -121,7 +121,7 @@ if [ -n "${LLM_URL:-}" ]; then
     sleep 1
   done
   { echo; echo "--- concurrency: LLM at $LLM_URL"; } >> "$RESULTS"
-  python3 scripts/concurrency_check.py --callers 1,2,4 --turns 3 \
+  frun bench --callers 1,2,4 --turns 3 \
     --label "LLM served at $LLM_URL" 2>&1 | tee -a "$RESULTS"
 else
   echo

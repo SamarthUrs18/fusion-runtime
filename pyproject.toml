@@ -100,7 +100,7 @@ where = ["."]
 include = ["fusion_runtime*"]
 
 [tool.setuptools.package-data]
-fusion_runtime = ["catalog/*.toml", "web/*.html", "web/*.js"]
+fusion_runtime = ["catalog/*.toml", "web/*.html", "web/*.js", "cli/bench_audio/*.wav"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

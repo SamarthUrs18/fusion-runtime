@@ -187,7 +187,7 @@ console), so you can reproduce them rather than trusting ours. Barge-in fired on
 ## Several callers at once
 
 Measured on the same 3090, real WebSocket sessions, three turns each
-([`scripts/concurrency_check.py`](scripts/concurrency_check.py)). Response is the server's own
+(`frun bench`). Response is the server's own
 figure: the turn ends, audio comes back.
 
 | Callers | In-process llama.cpp | vLLM | SGLang |
