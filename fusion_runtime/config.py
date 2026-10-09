@@ -261,6 +261,19 @@ HYBRID_CONFIG = PipelineConfig(
 )
 
 PROFILES = {"development": DEVELOPMENT_CONFIG, "production": PRODUCTION_CONFIG, "hybrid": HYBRID_CONFIG}
+# What each profile is for, said wherever one is named: "development" and "production" read as stages
+# of a project, but the difference is the machine (a laptop's CPU, or an NVIDIA GPU).
+PROFILE_FOR = {"development": "laptops, on the CPU", "production": "an NVIDIA GPU",
+               "hybrid": "speech here, the LLM from a server"}
+
+
+def profile_label(name: str) -> str:
+    """e.g. "development profile (for laptops, on the CPU)"."""
+    return f"{name} profile (for {PROFILE_FOR[name]})" if name in PROFILE_FOR else f"{name} profile"
+
+
+def profile_choices() -> str:
+    return ", ".join(f"{name} ({PROFILE_FOR[name]})" for name in PROFILES)
 
 # Environment variables that point any profile's LLM at an OpenAI-compatible endpoint
 LLM_URL_ENV, LLM_MODEL_ENV, LLM_KEY_ENV_ENV = "FUSION_LLM_URL", "FUSION_LLM_MODEL", "FUSION_LLM_API_KEY_ENV"
@@ -357,5 +370,5 @@ def _with_turn_overrides(config: PipelineConfig, env) -> PipelineConfig:
 
 def load_profile(name: str, environ=None) -> PipelineConfig:
     if name not in PROFILES:
-        raise ValueError(f"unknown profile {name!r}; choose one of: {', '.join(PROFILES)}")
+        raise ValueError(f"unknown profile {name!r}; choose one of: {profile_choices()}")
     return with_env_overrides(PROFILES[name], environ)

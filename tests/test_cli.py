@@ -30,7 +30,7 @@ def test_no_args_shows_help():
 def test_config_falls_back_to_the_environment(monkeypatch):
     """FUSION_CONFIG was read by the server and then overwritten by this command,
     so a container started with it quietly ran development: a 0.5B on CPU."""
-    monkeypatch.setattr("uvicorn.run", lambda *a, **k: None)
+    monkeypatch.setattr("fusion_runtime.cli.up._serve", lambda *a, **k: None)
     monkeypatch.setattr("fusion_runtime.cli._checks.missing_models", lambda *a, **k: [])
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
 
@@ -198,8 +198,6 @@ def test_models_pull_refuses_without_disk_space(tmp_path, monkeypatch):
 
 import socket
 
-import uvicorn
-
 
 def _all_models_installed(monkeypatch):
     monkeypatch.setattr(catalog_pkg, "is_installed", lambda entry, root: True)
@@ -207,7 +205,7 @@ def _all_models_installed(monkeypatch):
 
 def _record_uvicorn(monkeypatch):
     calls = []
-    monkeypatch.setattr(uvicorn, "run", lambda app_path, **kw: calls.append((app_path, kw)))
+    monkeypatch.setattr("fusion_runtime.cli.up._serve", lambda app_path, on_abort, **kw: calls.append((app_path, kw)))
     return calls
 
 
@@ -226,8 +224,7 @@ def test_up_starts_server_with_chosen_profile(monkeypatch):
     assert result.exit_code == 0, result.output
     assert calls == [("fusion_runtime.server:app",
                       {"host": "127.0.0.1", "port": port, "workers": 1, "log_level": "info",
-                       "ws_max_size": 1024 * 1024,  # oversized frames refused before buffering
-                       "reload": False, "reload_includes": None, "reload_dirs": None})]
+                       "ws_max_size": 1024 * 1024})]  # oversized frames refused before buffering
     assert os.environ["FUSION_CONFIG"] == "production"
     assert f"frun talk --url ws://localhost:{port}/v1/voice/ws" in result.output
 
@@ -440,11 +437,23 @@ def test_up_passes_log_settings_to_the_server(monkeypatch):
     monkeypatch.delenv("FUSION_CONFIG", raising=False)  # not a legal profile name
     for var in ("FUSION_LOG_FORMAT", "FUSION_LOG_LEVEL", "FUSION_LOG_CONTENT"):
         monkeypatch.setenv(var, "unset-before-test")
-    result = runner.invoke(app, ["up", "--log-format", "json", "--log-level", "debug", "--log-content"])
+    from fusion_runtime.telemetry import ListSink, telemetry
+
+    sink = ListSink()
+    telemetry.add_sink(sink)
+    try:
+        result = runner.invoke(app, ["up", "--log-format", "json", "--log-level", "debug", "--log-content"])
+    finally:
+        telemetry.remove_sink(sink)
     assert result.exit_code == 0, result.output
     assert (os.environ["FUSION_LOG_FORMAT"], os.environ["FUSION_LOG_LEVEL"], os.environ["FUSION_LOG_CONTENT"]) == ("json", "debug", "1")
-    assert "writes what users say" in result.output
     assert calls[0][1]["log_level"] == "warning"  # JSON mode keeps uvicorn's own text logs quiet
+    # No plain lines, so a container's log is all JSON; the start-up facts are events instead,
+    # and the content warning is still said
+    assert all(json.loads(line) for line in result.output.splitlines() if line.strip())
+    assert [e.name for e in sink.events] == ["frun.up", "logs.content_on"]
+    assert sink.events[0].attrs["log_content"] is True and sink.events[1].level == "warning"
+    assert "writes what users say" in sink.events[1].attrs["hint"]
 
 
 def test_up_defaults_keep_content_out_of_logs(monkeypatch):

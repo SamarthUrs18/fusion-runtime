@@ -14,7 +14,7 @@ models_app = typer.Typer(help="Download and inspect models.", no_args_is_help=Tr
 def list_models() -> None:
     """Show catalog models, whether they're installed, and which profile uses them."""
     from fusion_runtime.catalog import entries_for_profile, format_size, is_installed, load_catalog
-    from fusion_runtime.config import model_dir, model_dir_source
+    from fusion_runtime.config import model_dir, model_dir_source, profile_label
 
     root = model_dir()
     catalog = load_catalog()
@@ -37,7 +37,7 @@ def list_models() -> None:
                    if not is_installed(e, root)]
         if missing:
             flag = "" if profile is Profile.development else f" --config {profile.value}"
-            typer.echo(f"\n{profile.value} is missing {', '.join(missing)}. Run: frun models pull{flag}")
+            typer.echo(f"\n{profile_label(profile.value)} is missing {', '.join(missing)}. Run: frun models pull{flag}")
 
 
 @models_app.command("pull")
@@ -47,7 +47,7 @@ def pull(
                    "Hugging Face model. Default: the agent named by FUSION_AGENT, else everything the "
                    "profile needs.",
     ),
-    config: Profile = typer.Option(Profile.development, "--config", "-c", help="Profile whose models to pull."),
+    config: Profile = typer.Option(Profile.development, "--config", "-c", help="Profile whose models to pull: development (laptops), production (an NVIDIA GPU) or hybrid."),
     whisper: bool = typer.Option(False, "--whisper", help="Only the profile's speech-to-text model."),
     llm: bool = typer.Option(False, "--llm", help="Only the profile's LLM."),
     kokoro: bool = typer.Option(False, "--kokoro", help="Only the profile's text-to-speech model."),

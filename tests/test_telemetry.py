@@ -19,6 +19,7 @@ from fusion_runtime.telemetry import (
     tag_stage,
 )
 from fusion_runtime.telemetry.metrics import TelemetryMetrics
+from fusion_runtime.telemetry.trace import TurnTrace
 
 
 @pytest.fixture
@@ -381,3 +382,16 @@ def test_console_lines_carry_the_event_name_the_docs_use():
     assert " turn     model.loaded " in loaded
     # the columns still line up
     assert tool.index("tool.call") == loaded.index("turn")
+
+
+def test_a_turn_end_that_got_no_reply_is_replaced_when_the_caller_speaks_again():
+    turn = TurnTrace(turn_id="t1")
+    assert turn.awaiting_turn_end()
+    turn.mark("speech_end", at_mono=10.0)
+    turn.mark("turn_end_detected", at_mono=10.5)
+    assert not turn.awaiting_turn_end()  # once per turn
+    # No reply came (a failed request). The caller talks again and stops 15 s later:
+    turn.mark("speech_end", at_mono=25.5, overwrite=True)
+    assert turn.awaiting_turn_end()
+    turn.mark("turn_end_detected", at_mono=26.0, overwrite=True)
+    assert turn.between_ms("speech_end", "turn_end_detected") == 500  # not -15000

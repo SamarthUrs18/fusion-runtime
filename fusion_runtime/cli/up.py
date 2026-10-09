@@ -5,13 +5,14 @@ import shutil
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 from urllib.parse import urlsplit
 
 import typer
 
 from fusion_runtime.cli._common import Profile, short_path
 
+PUBLIC_URL_ENV = "FUSION_PUBLIC_URL"  # the address people open, when it isn't this machine's (a proxy, a domain)
 
 class LogFormat(str, Enum):
     pretty = "pretty"
@@ -36,7 +37,8 @@ def up(
     port: int = typer.Option(8000, help="Port to listen on."),
     config: Optional[Profile] = typer.Option(
         None, "--config", "-c",
-        help="Which models and devices to use. Defaults to $FUSION_CONFIG, then development.",
+        help="Which models and devices to use: development (laptops, on the CPU), production (an NVIDIA GPU) "
+             "or hybrid (speech here, the LLM from a server). Defaults to $FUSION_CONFIG, then development.",
     ),
     log_format: Optional[LogFormat] = typer.Option(
         None, "--log-format",
@@ -123,6 +125,7 @@ def up(
         TURN_DETECTOR_ENV,
         TURN_WAIT_ENV,
         model_dir,
+        profile_label,
     )
 
     for variable, value in ((LLM_URL_ENV, llm_url), (LLM_MODEL_ENV, llm_model), (LLM_KEY_ENV_ENV, llm_api_key_env),
@@ -171,7 +174,7 @@ def up(
             needs, pull = f"{short_path(agent_file)} needs", f"frun models pull {short_path(agent_file)}"
         else:
             flag = "" if config is Profile.development else f" --config {config.value}"
-            needs, pull = f"the {config.value} profile needs", f"frun models pull{flag}"
+            needs, pull = f"the {profile_label(config.value)} needs", f"frun models pull{flag}"
         typer.echo(
             f"Error: {needs} models that aren't installed: {', '.join(missing)}\n"
             f"  (model directory: {short_path(model_dir())})\n"
@@ -272,6 +275,7 @@ def up(
         talk_host = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
         talk_hint = f"frun talk --url ws://{talk_host}:{port}/v1/voice/ws"
     browser_host = "localhost" if host == "0.0.0.0" else host
+    public = public_url(host, port)
     from fusion_runtime.cli import banner
 
     if banner.should_show(sys.stdout, json_logs=log_format is LogFormat.json):
@@ -279,10 +283,25 @@ def up(
         from fusion_runtime.agent import greeting_for
 
         rows, notes = _banner_rows(profile, llm, launch, agent_file, greeting_for(loaded if agent_file else None),
-                                   config, auth_state, browser_host, port, talk_hint)
+                                   config, auth_state, browser_host, port, talk_hint, public)
         banner.show(__version__, rows, notes)
+    elif log_format is LogFormat.json:
+        # A container's log is read by a machine: the same facts as one event, so every line is JSON.
+        turns = profile.turn_detection
+        if launch is not None:
+            llm_where = {"llm_server": launch.engine.display, "llm_url": launch.base_url, "llm_started_here": True}
+        elif llm.api_base or llm.provider.value == "openai":
+            llm_where = {"llm_url": llm.api_base or "https://api.openai.com/v1"}
+        else:
+            llm_where = {"llm_in_process": True}
+        _json_event("frun.up", level=log_level.value, agent=short_path(agent_file) if agent_file else None,
+                    profile=None if agent_file else config.value, url=f"http://{host}:{port}", public_url=public,
+                    llm=launch.model_name if launch is not None else llm.model, **llm_where,
+                    llm_notes=list(launch.notes) if launch is not None and launch.notes else None,
+                    turn_detector=turns.runtime or "silence", silence_ms=turns.min_silence_ms,
+                    interrupt_after_ms=turns.barge_in_min_speech_ms, auth=auth_state, log_content=log_content)
     else:
-        where = f"agent {short_path(agent_file)}" if agent_file else f"{config.value} profile"
+        where = f"agent {short_path(agent_file)}" if agent_file else profile_label(config.value)
         typer.echo(f"Starting fusion-runtime ({where}) on http://{host}:{port}")
         turns = profile.turn_detection
         typer.echo(f"Turn detection: {turns.runtime or 'silence'}, agent answers after {turns.min_silence_ms} ms of silence"
@@ -297,11 +316,19 @@ def up(
             typer.echo(f"LLM: {llm.model} at {llm.api_base or 'https://api.openai.com/v1'}"
                        + (f" (key from ${llm.api_key_env})" if llm.api_key_env else ""))
         typer.echo(f"Auth: {auth_state}")
-        typer.echo(f"Loading models. Once it says 'Models ready', open http://{browser_host}:{port} in a browser "
-                   f"and click Talk\n  (or run `{talk_hint}` in another terminal).\n")
+        if public:
+            typer.echo(f"Loading models. Once it says 'Models ready', get a browser link for {public} with\n"
+                       f"  {_link_command(port, public)}\n  (or run `{talk_hint}` on this machine).\n")
+        else:
+            typer.echo(f"Loading models. Once it says 'Models ready', open http://{browser_host}:{port} in a browser "
+                       f"and click Talk\n  (or run `{talk_hint}` in another terminal).\n")
 
     if log_content:
-        typer.echo("Note: --log-content writes what users say, and the bot's replies, into the logs.")
+        note = "--log-content writes what users say, and the bot's replies, into the logs"
+        if log_format is LogFormat.json:
+            _json_event("logs.content_on", level=log_level.value, severity="warning", hint=note)
+        else:
+            typer.echo(f"Note: {note}.")
     # read by the server at startup
     os.environ["FUSION_CONFIG"] = config.value
     if agent_file:
@@ -311,22 +338,24 @@ def up(
     os.environ["FUSION_LOG_FORMAT"] = log_format.value
     os.environ["FUSION_LOG_LEVEL"] = log_level.value
     os.environ["FUSION_LOG_CONTENT"] = "1" if log_content else "0"
-    import uvicorn
-
     from fusion_runtime.security.limits import Limits
 
     engine = None
     if launch is not None:
         # Before speech loads: the engine takes its share of GPU memory first, and speech the rest.
-        typer.echo(f"Starting {launch.engine.display}: {shlex.join(launch.command)}")
         log_file = llm_log or os.getenv(llm_server.LOG_FILE_ENV) or None
         try:
             printer = llm_server.LogPrinter(launch.engine, json_format=log_format is LogFormat.json, file=log_file)
         except llm_server.LaunchError as e:
             typer.echo(f"Error: {e}", err=True)
             raise typer.Exit(1)
-        if printer.path:
-            typer.echo(f"{launch.engine.display}'s full log: {short_path(printer.path)}")
+        if log_format is LogFormat.json:
+            _json_event("llm_server.starting", level=log_level.value, server=launch.engine.display,
+                        command=shlex.join(launch.command), log_file=short_path(printer.path) if printer.path else None)
+        else:
+            typer.echo(f"Starting {launch.engine.display}: {shlex.join(launch.command)}")
+            if printer.path:
+                typer.echo(f"{launch.engine.display}'s full log: {short_path(printer.path)}")
         engine = llm_server.LLMServer(launch, printer)
         try:
             engine.start()
@@ -339,22 +368,85 @@ def up(
             engine.stop()
             printer.close()
             raise typer.Exit(130)
-    try:
-        # Refuse an oversized frame in the library, before it is buffered for us.
-        uvicorn.run("fusion_runtime.server:app", host=host, port=port, workers=1,
-                    ws_max_size=Limits.from_environment().max_message_bytes,
-                    reload=reload, reload_includes=[agent_file.name] if reload and agent_file else None,
-                    reload_dirs=[str(agent_file.parent)] if reload and agent_file else None,
-                    log_level="warning" if log_format is LogFormat.json else "info")
-    finally:
+    def stop_engine() -> None:
         if engine is not None:
             engine.stop()
             printer.close()
 
+    # Refuse an oversized frame in the library, before it is buffered for us.
+    settings = {"host": host, "port": port, "workers": 1, "ws_max_size": Limits.from_environment().max_message_bytes,
+                "log_level": "warning" if log_format is LogFormat.json else "info"}
+    if reload:
+        settings.update(reload=True, reload_includes=[agent_file.name] if agent_file else None,
+                        reload_dirs=[str(agent_file.parent)] if agent_file else None)
+    try:
+        _serve("fusion_runtime.server:app", on_abort=stop_engine, **settings)
+    finally:
+        stop_engine()
 
-def _banner_rows(profile, llm, launch, agent_file, greeting, config, auth_state, browser_host, port, talk_hint):
+
+def _json_event(name: str, level: str, severity: str = "info", **fields) -> None:
+    """One start-up event in the server's own JSON format, before the server has configured logging."""
+    from fusion_runtime.telemetry import telemetry
+
+    telemetry.configure(format="json", level=level)
+    telemetry.emit(name, level=severity, stage="server", **fields)
+
+
+def _serve(app_path: str, on_abort, **settings) -> None:
+    """uvicorn.run, except that Ctrl+C while the models load stops at once.
+
+    uvicorn only acts on Ctrl+C once start-up has finished, so pressing it while models load
+    (minutes, the first time) did nothing until they were ready, then shut down with a traceback.
+    Nothing is serving yet, so there's nothing to finish: stop the LLM server if we started one,
+    say so in one line, and exit. os._exit, because the loading threads can't be interrupted and
+    a normal exit would wait for them.
+    """
+    import uvicorn
+
+    if settings.get("reload"):  # the reloader runs the server in a child process it restarts itself
+        uvicorn.run(app_path, **settings)
+        return
+
+    class Server(uvicorn.Server):
+        def handle_exit(self, sig, frame):
+            if self.started:
+                return super().handle_exit(sig, frame)
+            os.write(2, b"\nStopped while the models were loading.\n")  # not sys.stderr: os._exit won't flush it
+            try:
+                on_abort()
+            finally:
+                os._exit(130)
+
+    Server(uvicorn.Config(app_path, **settings)).run()
+
+
+def public_url(host: str, port: int, environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    """Where people outside reach this server, when that can be known: FUSION_PUBLIC_URL (a domain
+    behind Caddy, any proxy), or a Runpod pod's proxy. On a pod, localhost is the pod itself, so a
+    localhost link can't be opened from a laptop.
+
+    The pod's address is only guessed for a server listening on every interface: Runpod's proxy
+    can't reach one bound to 127.0.0.1.
+    """
+    environ = os.environ if environ is None else environ
+    if environ.get(PUBLIC_URL_ENV, "").strip():
+        return environ[PUBLIC_URL_ENV].strip().rstrip("/")
+    if host in ("0.0.0.0", "::") and environ.get("RUNPOD_POD_ID"):
+        return f"https://{environ['RUNPOD_POD_ID']}-{port}.proxy.runpod.net"
+    return None
+
+
+def _link_command(port: int, public: str) -> str:
+    return f"frun token --url http://127.0.0.1:{port} --public-url {public}"
+
+
+def _banner_rows(profile, llm, launch, agent_file, greeting, config, auth_state, browser_host, port, talk_hint,
+                 public=None):
     """What the welcome screen says: the same facts as the plain start-up lines, one row each."""
-    agent = f"{short_path(agent_file)}" if agent_file else f"{config.value} profile (no agent file)"
+    from fusion_runtime.config import profile_label
+
+    agent = f"{short_path(agent_file)}" if agent_file else f"{profile_label(config.value)}, no agent file"
     if greeting:
         agent += " · greets callers"
     if launch is not None:
@@ -373,7 +465,8 @@ def _banner_rows(profile, llm, launch, agent_file, greeting, config, auth_state,
                   + f"answers after {turns.min_silence_ms} ms of silence · "
                   f"{turns.barge_in_min_speech_ms} ms of talking over it interrupts"),
         ("auth", auth_state),
-        ("talk", f"http://{browser_host}:{port} in a browser · or: {talk_hint}"),
+        ("talk", f"{public} · a one-time browser link: {_link_command(port, public)}" if public
+                 else f"http://{browser_host}:{port} in a browser · or: {talk_hint}"),
     ]
     notes = list(launch.notes) if launch is not None else []
     notes.append("loading models; the link works once the log says 'Models ready'")

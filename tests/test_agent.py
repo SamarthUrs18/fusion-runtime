@@ -180,7 +180,7 @@ def test_an_agent_can_import_files_next_to_it(tmp_path):
 
 def _no_server(monkeypatch):
     calls = {}
-    monkeypatch.setattr("uvicorn.run", lambda *a, **k: calls.update(k))
+    monkeypatch.setattr("fusion_runtime.cli.up._serve", lambda *a, **k: calls.update(k))
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
     monkeypatch.setattr("fusion_runtime.catalog.is_installed", lambda entry, root: True)
     return calls

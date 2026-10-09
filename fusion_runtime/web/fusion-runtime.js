@@ -309,7 +309,7 @@
         // Kept so onclose can use it. The server refuses a socket by accepting it,
         // saying why, and then closing — without this the close handler overwrites
         // "this server needs a token" with a bare "code 1008".
-        this._refusal = msg.fix ? msg.message + " " + msg.fix : msg.message;
+        this._refusal = msg.fix ? msg.message + ". " + msg.fix : msg.message;
         this.emit("error", { message: msg.message, server: msg });
         break;
       default:

@@ -68,5 +68,5 @@ agent = Agent(
     turns=Turns(wait_ms=500, interrupt_after_ms=300),
     tools=[order_status, change_delivery],
     greeting="Hi, this is ShopKart. Which order can I help you with?",
-    profile="production",  # speech on the GPU; the development profile keeps Whisper on the CPU
+    profile="production",  # speech on the GPU; the development profile (for laptops) keeps Whisper on the CPU
 )

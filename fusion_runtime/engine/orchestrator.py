@@ -937,9 +937,9 @@ class PipelineOrchestrator:
             if trace is None:
                 return
             turn = trace.listening_turn()
-            if "turn_end_detected" in turn.marks:
+            if not turn.awaiting_turn_end():
                 return
-            turn.mark("turn_end_detected")
+            turn.mark("turn_end_detected", overwrite=True)
             turn.info["turn_end_reason"] = reason
             if p is not None:
                 turn.info["end_of_turn_probability"] = round(p, 3)
@@ -1073,8 +1073,7 @@ class PipelineOrchestrator:
             last_turn_started = time.monotonic()
             turn = None
             if trace is not None:
-                if "turn_end_detected" not in trace.listening_turn().marks:
-                    record_turn_end("audio_ended", 0, transcript)
+                record_turn_end("audio_ended", 0, transcript)  # only if no turn end was recorded since speech
                 turn = trace.start_responding()
                 turn.info["language"] = turn_language()
                 trace.event("stt.final", turn=turn, stage="stt", language=turn_language(), **telemetry.content(transcript))

@@ -211,7 +211,7 @@ cli = CliRunner()
 
 def test_up_refuses_a_missing_key_before_starting(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr("uvicorn.run", lambda *a, **k: pytest.fail("server must not start"))
+    monkeypatch.setattr("fusion_runtime.cli.up._serve", lambda *a, **k: pytest.fail("server must not start"))
     monkeypatch.setattr("fusion_runtime.cli._checks.missing_models", lambda *a, **k: [])
     result = cli.invoke(app, ["up", "--config", "hybrid"])
     assert result.exit_code == 1 and "export OPENAI_API_KEY" in result.output
@@ -222,7 +222,7 @@ def test_up_llm_flags_set_the_endpoint_for_the_server(monkeypatch):
         monkeypatch.setenv(name, "")  # restored after the test
     monkeypatch.delenv("FUSION_CONFIG", raising=False)
     calls = []
-    monkeypatch.setattr("uvicorn.run", lambda *a, **k: calls.append(k))
+    monkeypatch.setattr("fusion_runtime.cli.up._serve", lambda *a, **k: calls.append(k))
     monkeypatch.setattr("fusion_runtime.cli._checks.missing_models", lambda *a, **k: [])
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
     result = cli.invoke(app, ["up", "--llm-url", "http://localhost:8080/v1", "--llm-model", "qwen-local"])
@@ -235,7 +235,7 @@ def test_up_turn_flags_reach_the_server(monkeypatch):
     for name in LLM_ENV + ("FUSION_TURN_DETECTOR", "FUSION_TURN_WAIT_MS", "FUSION_INTERRUPT_AFTER_MS"):
         monkeypatch.setenv(name, "")
     monkeypatch.delenv("FUSION_CONFIG", raising=False)
-    monkeypatch.setattr("uvicorn.run", lambda *a, **k: None)
+    monkeypatch.setattr("fusion_runtime.cli.up._serve", lambda *a, **k: None)
     monkeypatch.setattr("fusion_runtime.cli._checks.missing_models", lambda *a, **k: [])
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
     result = cli.invoke(app, ["up", "--turn-wait-ms", "1200", "--turn-detector", "my_pkg.turns:Model",
