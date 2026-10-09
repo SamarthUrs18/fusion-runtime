@@ -584,8 +584,8 @@ class PipelineOrchestrator:
                 results = await self.stt.transcribe([request])
             return raise_if_error(results[0])
 
-        # Apply VAD filter
-        vad_filtered = self._apply_vad(audio_stream, turn_state, trace)
+        # Apply VAD filter, then keep digital silence away from the recogniser whatever the VAD did
+        vad_filtered = self._drop_digital_silence(self._apply_vad(audio_stream, turn_state, trace), trace)
         detector = self.__dict__.get("turn_detector")
         if turn_state is not None and getattr(detector, "uses_audio", False):
             vad_filtered = self._keep_turn_audio(vad_filtered, turn_state)
@@ -635,6 +635,31 @@ class PipelineOrchestrator:
                 raise tag_stage(e, "stt")
             note(result)
             yield result
+
+    @staticmethod
+    async def _drop_digital_silence(chunks: AsyncIterator[bytes], trace: Optional[SessionTrace] = None
+                                    ) -> AsyncIterator[bytes]:
+        """Never hand speech-to-text audio that is exactly zero.
+
+        A muted mic or a dead connection sends digital silence, and recognisers can write fluent
+        sentences from it: in Asif Ali's vendor benchmark one did on 15 of 15 probes, and on 0 of 4 of
+        real room tone. The VAD normally keeps zeros away, but when it fails to load every chunk passes
+        through. Room tone, however quiet, isn't exactly zero, so this drops nothing a person said.
+        """
+        dropped = 0
+        async for chunk in chunks:
+            if chunk and chunk.count(0) == len(chunk):  # every byte zero: every sample is 0
+                dropped += 1
+                if trace is not None:
+                    turn = trace.listening_turn() if trace.listening is not None else None
+                    if turn is not None:
+                        turn.add("stt_zero_chunks_dropped")
+                    if dropped == 1:
+                        trace.event("stt.digital_silence_dropped", turn=turn, level="debug", stage="stt",
+                                    bytes=len(chunk),
+                                    hint="exact-zero audio (a muted mic or dead connection) isn't transcribed")
+                continue
+            yield chunk
 
     async def _keep_turn_audio(self, chunks: AsyncIterator[bytes], turn_state: TurnState) -> AsyncIterator[bytes]:
         """Keep the latest seconds of this turn's speech for a turn detector that uses audio."""
