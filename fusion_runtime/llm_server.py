@@ -401,6 +401,25 @@ class LLMServer:
                 next_note += 60.0
             time.sleep(1.0)
 
+    def warm_up(self) -> bool:
+        """One tiny request, so compiling on the first request happens now. True when it answered."""
+        import httpx
+
+        started = time.monotonic()
+        body = {"model": self.launch.model_name, "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 1, "temperature": 0}
+        try:
+            response = httpx.post(self.launch.base_url.rstrip("/") + "/chat/completions", json=body,
+                                  timeout=self.launch.start_timeout_s)
+            ok = response.status_code == 200
+        except httpx.HTTPError:
+            ok = False
+        if ok:
+            self._log("info", f"{self.name} warmed in {time.monotonic() - started:.1f} s")
+        else:
+            self._log("warning", f"{self.name} didn't answer a warm-up request; the next call may be slow")
+        return ok
+
     @property
     def pid(self) -> Optional[int]:
         return self._process.pid if self._process else None
@@ -424,6 +443,7 @@ class LLMServer:
             try:
                 self._spawn()
                 self._wait_ready(self._process)
+                self.warm_up()  # a restarted server is cold again: its first-request work isn't a caller's
             except LaunchError as e:
                 self._log("error", str(e))
             except OSError as e:  # the program went away (environment deleted?): keep trying, say why

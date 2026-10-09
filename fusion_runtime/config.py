@@ -307,9 +307,17 @@ def with_env_overrides(config: PipelineConfig, environ=None) -> PipelineConfig:
         "provider": Provider.OPENAI, "runtime": None, "api_base": url, "model": model,
         "api_key_env": env.get(LLM_KEY_ENV_ENV) or None,
         # Settings for the runtime this replaces (flash_attn for llama.cpp, say) don't apply to an endpoint
-        "options": {k: v for k, v in config.llm.options.items() if k in ENDPOINT_OPTIONS},
+        "options": {**_moved_server_defaults(config.llm),
+                    **{k: v for k, v in config.llm.options.items() if k in ENDPOINT_OPTIONS}},
     })
     return config.model_copy(update={"llm": llm})
+
+
+def _moved_server_defaults(llm: "LLMConfig") -> dict:
+    """A vllm:/sglang: model moved elsewhere with FUSION_LLM_URL is still a model server: keep its warm-up."""
+    from fusion_runtime.resolver import SERVED_RUNTIMES
+
+    return {"warmup": True} if llm.runtime in SERVED_RUNTIMES else {}
 
 
 def _served_name(llm: "LLMConfig") -> Optional[str]:

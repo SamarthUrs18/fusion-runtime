@@ -41,6 +41,14 @@ FAKE_ENGINE = textwrap.dedent('''\
                 self.send_response(404); self.end_headers(); return
             self.send_response(200); self.end_headers(); self.wfile.write(body)
 
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            if self.path != "/v1/chat/completions":
+                self.send_response(404); self.end_headers(); return
+            body = json.dumps({{"choices": [{{"message": {{"role": "assistant", "content": "Hi"}}}}]}}).encode()
+            self.send_response(200); self.end_headers(); self.wfile.write(body)
+
         def log_message(self, *args):
             pass
 
@@ -166,6 +174,10 @@ def test_the_server_starts_restarts_after_a_crash_and_stops(engine_env):
             time.sleep(0.1)
         assert server.restarts == 1 and server.pid != first
         assert any(level == "error" and "exited" in message for level, message in lines)
+        deadline = time.monotonic() + 10  # the restarted server is warmed before calls reach it
+        while time.monotonic() < deadline and not any("warmed in" in m for _, m in lines):
+            time.sleep(0.1)
+        assert any(level == "info" and "vLLM warmed in" in message for level, message in lines)
     finally:
         server.stop()
     assert llm_server.already_serving(launch) is False
