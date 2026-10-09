@@ -123,6 +123,32 @@ calling on), llama-server (`--jinja`) or a hosted API. The in-process
 llama.cpp runtime can't, and `frun up` says so at startup. A runnable version is
 [`examples/tools_agent.py`](examples/tools_agent.py).
 
+### Answering from your own documents
+
+Retrieval is a tool like any other: a function that takes the caller's question and returns a few
+short passages, which the model answers from.
+
+```python
+@tool(timeout_s=3)
+def search_help(question: str) -> dict:
+    """Search the shop's help articles: returns, refunds, delivery, cancelling orders.
+
+    Args:
+        question: What the caller wants to know, in their words.
+    """
+    return {"passages": my_search(question, limit=3)}
+```
+
+`my_search` is yours: a vector database, Elasticsearch, your help centre's API.
+[`examples/knowledge_agent.py`](examples/knowledge_agent.py) is a runnable version with a small
+keyword search over the Markdown files in [`examples/knowledge/`](examples/knowledge/), in plain
+Python with nothing to install.
+
+On a call, two things matter more than in a chat window. A lookup costs a second model round
+before the caller hears anything, so if your knowledge fits in a page or two, put it in the prompt
+instead: that's faster than any search. And passages go into the prompt, so keep them short (a few
+sentences each, a few per search): long ones slow the model's first word.
+
 ## On your own site
 
 ```html
@@ -187,7 +213,7 @@ console), so you can reproduce them rather than trusting ours. Barge-in fired on
 ## Several callers at once
 
 Measured on the same 3090, real WebSocket sessions, three turns each
-([`scripts/concurrency_check.py`](scripts/concurrency_check.py)). Response is the server's own
+(`frun bench`). Response is the server's own
 figure: the turn ends, audio comes back.
 
 | Callers | In-process llama.cpp | vLLM | SGLang |
@@ -233,8 +259,12 @@ fusion where it is:
 ```bash
 python3 -m venv ~/vllm-env && ~/vllm-env/bin/pip install vllm
 export FUSION_LLM_ENGINE_ENV=~/vllm-env
+frun models pull agent.py     # the LLM too (5.6 GB here), where vLLM looks for it
 frun up agent.py
 ```
+
+Without the pull, vLLM downloads the model during its first start, which takes 5–15 minutes and
+looks like nothing is happening.
 
 `frun up` starts the server before loading speech, so it takes its share of the GPU first (60%
 by default, which fits a 4-bit 7B model next to Whisper and Kokoro on a 24 GB card), restarts it

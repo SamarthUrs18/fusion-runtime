@@ -126,12 +126,15 @@
 
   function ms(value) { return value === null || value === undefined ? "–" : Math.round(value) + " ms"; }
 
+  var linkRefused = false;  // said once, in plain words; the close that follows mustn't replace it
+
   session.on("state", function (event) {
-    if (event.state === "live") say("Listening. Speak whenever you like.");
-    else if (event.state === "connecting") say("Connecting…");
+    if (event.state === "connecting") { linkRefused = false; say("Connecting…"); }
+    else if (event.state === "idle") { meter.style.width = "0"; if (!linkRefused) say(""); }
+    else if (linkRefused) return;
+    else if (event.state === "live") say("Listening. Speak whenever you like.");
     else if (event.state === "closed") say("The server closed the connection" +
       (event.detail ? " (" + event.detail + ")" : "") + ".", true);
-    else if (event.state === "idle") { say(""); meter.style.width = "0"; }
   });
 
   session.on("level", function (level) {
@@ -159,6 +162,9 @@
   session.on("interrupted", function () { say("You interrupted — the agent stopped."); });
   session.on("turn_resumed", function () { say("You kept talking, so both parts are answered together."); });
   session.on("echo_discarded", function () { say("That was the agent's own voice coming back, so it was ignored."); });
+  session.on("audio_problem", function (msg) { say(msg.message, true); });
+  session.on("audio_ok", function () { say("Hearing you again."); });
+  session.on("warning", function (msg) { say(msg.message, true); });
 
   session.on("trace", function (msg) {
     var s = msg.summary || {};
@@ -186,6 +192,15 @@
   });
 
   session.on("error", function (event) {
+    // Whoever opens a link they were sent wants to know what to do, not which header to send.
+    // The server is vague about why a token failed on purpose; for a link, the why is nearly always this.
+    if (token && event.server && event.server.code === "auth_failed") {
+      linkRefused = true;
+      say("This link has expired or was already used: each one works once, within about a minute. " +
+          "Ask for a new one (frun token makes it).", true);
+      return;
+    }
+    if (linkRefused) return;
     say(event.message + (event.server && event.server.fix ? " → " + event.server.fix : ""), true);
   });
 

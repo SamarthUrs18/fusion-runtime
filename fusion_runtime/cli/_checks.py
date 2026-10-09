@@ -235,7 +235,7 @@ def check_acceleration() -> List[CheckResult]:
     if gpu_offload:
         results.append(CheckResult(OK, f"llama.cpp can use the GPU ({backend})"))
         if DEVELOPMENT_CONFIG.llm.n_gpu_layers == 0:
-            results.append(CheckResult(INFO, "The development profile still runs the LLM on CPU (n_gpu_layers=0)"))
+            results.append(CheckResult(INFO, "The development profile is for laptops: it runs the LLM on the CPU (n_gpu_layers=0); production uses the GPU"))
     elif cuda_devices:
         # The GPU image builds llama.cpp for the CPU on purpose: on an NVIDIA card the LLM
         # belongs on a model server, which serves about three times the callers.
@@ -259,20 +259,27 @@ def check_models() -> List[CheckResult]:
     from fusion_runtime.config import model_dir, model_dir_source
 
     results = [CheckResult(INFO, f"Model directory: {short_path(model_dir())} ({model_dir_source()})")]
+    # Each profile's missing models count only on the machine that profile is for: on a GPU server,
+    # the laptop profile's CPU models aren't a problem, and the reverse.
+    gpu = bool(_cuda_device_count())
     dev_missing = missing_models(Profile.development, apply_env=False)
     if dev_missing:
-        results.append(CheckResult(FAIL, f"development profile is missing {', '.join(dev_missing)}",
-                                   "frun models pull"))
+        results.append(CheckResult(
+            INFO if gpu else FAIL,
+            f"development profile (laptops) is missing {', '.join(dev_missing)}"
+            + (" (only for --config development)" if gpu else ""),
+            "frun models pull",
+        ))
     else:
-        results.append(CheckResult(OK, "development profile: all models installed"))
+        results.append(CheckResult(OK, "development profile (laptops): all models installed"))
 
     prod_missing = missing_models(Profile.production, apply_env=False)
     if not prod_missing:
-        results.append(CheckResult(OK, "production profile: all models installed"))
+        results.append(CheckResult(OK, "production profile (NVIDIA GPU): all models installed"))
     else:
         results.append(CheckResult(
-            WARN if _cuda_device_count() else INFO,
-            f"production profile is missing {', '.join(prod_missing)}",
+            WARN if gpu else INFO,
+            f"production profile (NVIDIA GPU) is missing {', '.join(prod_missing)}",
             "frun models pull --config production",
         ))
     return results

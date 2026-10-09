@@ -16,6 +16,10 @@ Options:
     max_concurrency  requests in flight at once (default 16)
     extra_body    extra fields merged into every request body, for server-specific
                   sampling settings (vLLM's top_k or repetition_penalty, for example)
+    warmup        send one tiny request while loading, so the first caller doesn't pay for the
+                  server's first-request work (SGLang compiles on it: 70 s on a 4090). On by default
+                  for vLLM, SGLang and llama-server; off for a URL, where it may cost money
+    warmup_timeout_s  how long the warm-up may take (default 300)
 
 Tool calling uses the OpenAI format: tools go out as `tools`, and the calls
 stream back in pieces (`delta.tool_calls`), which are joined here and handed
@@ -48,7 +52,9 @@ from fusion_runtime.contract import (
 )
 
 # Settings this runtime reads, besides the LLM config's own fields
-OPTIONS = ("model_name", "api_key_env", "timeout_s", "verify", "max_concurrency", "extra_body")
+OPTIONS = ("model_name", "api_key_env", "timeout_s", "verify", "max_concurrency", "extra_body",
+           "warmup", "warmup_timeout_s")
+WARMUP_TIMEOUT_S = 300.0
 
 
 @dataclass
@@ -139,6 +145,37 @@ class OpenAIHTTPLLM(LLMRuntime):
                                hint="check model_name if requests fail with model_not_found")
         self.client = _client(self.spec.model, self.api_key_env, timeout, self.transport)
         self._health = Health("ok")
+        if self.spec.options.get("warmup", False):
+            await self._warm_up(float(self.spec.options.get("warmup_timeout_s", WARMUP_TIMEOUT_S)))
+
+    async def _warm_up(self, timeout_s: float) -> None:
+        """One tiny request before callers arrive. A slow one is reported; a failed one doesn't stop loading.
+
+        A server that can't answer this either will fail the first call too, with its own error, so
+        refusing to start here would only hide which call that was.
+        """
+        import time
+
+        from fusion_runtime.telemetry import telemetry
+
+        body = {**(self.spec.options.get("extra_body") or {}), "model": self.model_name,
+                "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 1, "temperature": 0}
+        started = time.perf_counter()
+        try:
+            response = await self.client.post("/chat/completions", json=body, timeout=timeout_s)
+            if not response.is_success:
+                raise _status_error(response, self.spec.model)
+        except AdapterError as e:
+            telemetry.emit("llm.warmup_failed", level="warning", stage="llm", url=self.spec.model,
+                           error=str(e), hint="the first call may be slow or fail; check the server's log")
+            return
+        except httpx.HTTPError as e:
+            telemetry.emit("llm.warmup_failed", level="warning", stage="llm", url=self.spec.model,
+                           error=f"{type(e).__name__}: {e}" if str(e) else type(e).__name__,
+                           hint=f"no answer within {timeout_s:.0f} s; raise warmup_timeout_s, or check the server")
+            return
+        telemetry.emit("llm.warmed", stage="llm", duration_ms=(time.perf_counter() - started) * 1000,
+                       model=self.model_name)
 
     async def close(self) -> None:
         client, self.client = self.client, None

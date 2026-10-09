@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 
+import pytest
 from fusion_runtime.cli.app import app
 from fusion_runtime.cli.version import package_version
 from typer.testing import CliRunner
@@ -30,7 +31,7 @@ def test_no_args_shows_help():
 def test_config_falls_back_to_the_environment(monkeypatch):
     """FUSION_CONFIG was read by the server and then overwritten by this command,
     so a container started with it quietly ran development: a 0.5B on CPU."""
-    monkeypatch.setattr("uvicorn.run", lambda *a, **k: None)
+    monkeypatch.setattr("fusion_runtime.cli.up._serve", lambda *a, **k: None)
     monkeypatch.setattr("fusion_runtime.cli._checks.missing_models", lambda *a, **k: [])
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
 
@@ -198,8 +199,6 @@ def test_models_pull_refuses_without_disk_space(tmp_path, monkeypatch):
 
 import socket
 
-import uvicorn
-
 
 def _all_models_installed(monkeypatch):
     monkeypatch.setattr(catalog_pkg, "is_installed", lambda entry, root: True)
@@ -207,7 +206,7 @@ def _all_models_installed(monkeypatch):
 
 def _record_uvicorn(monkeypatch):
     calls = []
-    monkeypatch.setattr(uvicorn, "run", lambda app_path, **kw: calls.append((app_path, kw)))
+    monkeypatch.setattr("fusion_runtime.cli.up._serve", lambda app_path, on_abort, **kw: calls.append((app_path, kw)))
     return calls
 
 
@@ -226,8 +225,7 @@ def test_up_starts_server_with_chosen_profile(monkeypatch):
     assert result.exit_code == 0, result.output
     assert calls == [("fusion_runtime.server:app",
                       {"host": "127.0.0.1", "port": port, "workers": 1, "log_level": "info",
-                       "ws_max_size": 1024 * 1024,  # oversized frames refused before buffering
-                       "reload": False, "reload_includes": None, "reload_dirs": None})]
+                       "ws_max_size": 1024 * 1024})]  # oversized frames refused before buffering
     assert os.environ["FUSION_CONFIG"] == "production"
     assert f"frun talk --url ws://localhost:{port}/v1/voice/ws" in result.output
 
@@ -440,11 +438,23 @@ def test_up_passes_log_settings_to_the_server(monkeypatch):
     monkeypatch.delenv("FUSION_CONFIG", raising=False)  # not a legal profile name
     for var in ("FUSION_LOG_FORMAT", "FUSION_LOG_LEVEL", "FUSION_LOG_CONTENT"):
         monkeypatch.setenv(var, "unset-before-test")
-    result = runner.invoke(app, ["up", "--log-format", "json", "--log-level", "debug", "--log-content"])
+    from fusion_runtime.telemetry import ListSink, telemetry
+
+    sink = ListSink()
+    telemetry.add_sink(sink)
+    try:
+        result = runner.invoke(app, ["up", "--log-format", "json", "--log-level", "debug", "--log-content"])
+    finally:
+        telemetry.remove_sink(sink)
     assert result.exit_code == 0, result.output
     assert (os.environ["FUSION_LOG_FORMAT"], os.environ["FUSION_LOG_LEVEL"], os.environ["FUSION_LOG_CONTENT"]) == ("json", "debug", "1")
-    assert "writes what users say" in result.output
     assert calls[0][1]["log_level"] == "warning"  # JSON mode keeps uvicorn's own text logs quiet
+    # No plain lines, so a container's log is all JSON; the start-up facts are events instead,
+    # and the content warning is still said
+    assert all(json.loads(line) for line in result.output.splitlines() if line.strip())
+    assert [e.name for e in sink.events] == ["frun.up", "logs.content_on"]
+    assert sink.events[0].attrs["log_content"] is True and sink.events[1].level == "warning"
+    assert "writes what users say" in sink.events[1].attrs["hint"]
 
 
 def test_up_defaults_keep_content_out_of_logs(monkeypatch):
@@ -530,6 +540,7 @@ def test_token_prints_the_public_address_people_open(monkeypatch):
     assert result.output.splitlines()[0] == "https://abc-8888.proxy.runpod.net/?token=tok123"
     bad = runner.invoke(app, ["token", "--key", "frun_x", "--public-url", "abc.proxy.runpod.net"])
     assert bad.exit_code == 1 and "must start with https://" in bad.output
+    assert len(asked) == 1  # refused before a token was spent on a link that can't open
 
 
 def test_token_without_a_key_says_how_to_get_one(monkeypatch):
@@ -579,9 +590,9 @@ def test_models_pull_takes_an_agent_file(monkeypatch, tmp_path):
     assert "qwen2.5-0.5b-q4" not in pulled
 
 
-def test_models_pull_leaves_a_served_model_to_its_server(monkeypatch, tmp_path):
-    """vllm:hf:org/model is loaded by vLLM from its own cache; pulling it here would
-    download gigabytes of weights nothing in this process reads."""
+def test_models_pull_puts_a_served_model_where_its_engine_looks(monkeypatch, tmp_path):
+    """vllm:hf:org/model is loaded by vLLM from Hugging Face's cache, not fusion's model directory:
+    it's fetched there, so the first frun up doesn't spend 15 minutes downloading inside vLLM."""
     agent = tmp_path / "agent.py"
     agent.write_text(
         "from fusion_runtime import Agent, LLM, STT, TTS\n"
@@ -591,13 +602,28 @@ def test_models_pull_leaves_a_served_model_to_its_server(monkeypatch, tmp_path):
     monkeypatch.setattr("fusion_runtime.catalog.download.pull", lambda entry, root, log=None, force=False:
                         pulled.append(entry.id))
     monkeypatch.setattr("fusion_runtime.catalog.is_installed", lambda entry, root: False)
-    monkeypatch.setattr("fusion_runtime.catalog.download.check_disk_space", lambda needed, root: None)
+    monkeypatch.setattr("fusion_runtime.catalog.download.check_disk_space", lambda needed, root, **kw: None)
+    for_engine = []
+    monkeypatch.setattr("fusion_runtime.catalog.download.pull_for_engine",
+                        lambda ref, log=None, force=False: for_engine.append(ref) or 5_000_000_000)
+    monkeypatch.setattr("fusion_runtime.catalog.pull_hf",
+                        lambda *a, **k: pytest.fail("not into fusion's model directory"))
 
     result = runner.invoke(app, ["models", "pull", str(agent)])
 
     assert result.exit_code == 0, result.output
-    assert "Qwen2.5-7B-Instruct-AWQ" not in result.output and not any("Qwen" in p for p in pulled)
-    assert "kokoro-v1.0" in pulled
+    assert for_engine == ["hf:Qwen/Qwen2.5-7B-Instruct-AWQ"] and not any("Qwen" in p for p in pulled)
+    assert "ready for vLLM / SGLang" in result.output
+    assert "kokoro-v1.0" in pulled  # and the agent's speech models, as before
+
+
+def test_models_pull_takes_an_engine_model_by_name(monkeypatch):
+    for_engine = []
+    monkeypatch.setattr("fusion_runtime.catalog.download.pull_for_engine",
+                        lambda ref, log=None, force=False: for_engine.append(ref) or 0)
+    result = runner.invoke(app, ["models", "pull", "sglang:hf:Qwen/Qwen2.5-7B-Instruct-AWQ"])
+    assert result.exit_code == 0, result.output
+    assert for_engine == ["hf:Qwen/Qwen2.5-7B-Instruct-AWQ"] and "already downloaded" in result.output
 
 
 def test_up_logs_in_the_format_the_environment_asks_for(monkeypatch):

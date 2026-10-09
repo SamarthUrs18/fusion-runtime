@@ -209,3 +209,12 @@ def test_onnxruntime_trouble_is_named_with_its_fix():
     assert "has no CUDA provider" in clash[1][0]
     fell_back = provider_warnings(cuda, ["CPUExecutionProvider"], ["onnxruntime-gpu"])
     assert fell_back[0][0] == "text-to-speech is running on the CPU: CUDAExecutionProvider didn't load"
+
+
+def test_tts_on_the_cpu_by_choice_isnt_a_warning():
+    """ONNX_PROVIDER=CPUExecutionProvider on a GPU machine leaves the GPU to the LLM; that's not a broken install."""
+    from fusion_runtime.runtimes.onnx.kokoro import provider_warnings
+
+    cpu = ["CPUExecutionProvider"]
+    assert provider_warnings(cpu, cpu, ["onnxruntime-gpu"], cpu_on_purpose=True) == []
+    assert "has no CUDA provider" in provider_warnings(cpu, cpu, ["onnxruntime-gpu"])[0][0]  # not chosen: said

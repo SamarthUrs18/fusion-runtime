@@ -21,6 +21,7 @@ from fusion_runtime import __version__, web
 from fusion_runtime.agent import DEFAULT_PROMPT, Agent, greeting_for, load_agent
 from fusion_runtime.config import load_profile
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator
+from fusion_runtime.engine.audio_format import BadAudioFormat
 from fusion_runtime.env import load_env_file
 from fusion_runtime.security import (
     ALLOWED_ORIGINS_ENV,
@@ -169,10 +170,13 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     models_loaded: bool
-    uptime_s: float
-    active_sessions: int
     config: dict
+    # Load and details: with a key, or from this machine when no keys are set (see health())
+    uptime_s: Optional[float] = None
+    active_sessions: Optional[int] = None
     llm_server: Optional[dict] = None  # the model server's own state, when the LLM is on one
+    degraded: Optional[dict] = None  # parts running below strength, and why ({} would mean none)
+    note: Optional[str] = None
 
 
 def _error_response(e: Exception, request_id: str) -> JSONResponse:
@@ -206,7 +210,7 @@ def _configure_auth(environ=None) -> None:
     telemetry.emit("limits.configured", stage="server", max_sessions=limits.max_sessions,
                    per_key=limits.per_key(len(keys)), idle_timeout_s=limits.idle_timeout_s,
                    max_session_s=limits.max_session_s, max_turn_audio_s=limits.max_turn_audio_s,
-                   max_silence_s=limits.max_silence_s,
+                   max_silence_s=limits.max_silence_s, dead_audio_s=limits.dead_audio_s,
                    connections_per_minute=limits.connections_per_minute,
                    tokens_per_minute=limits.tokens_per_minute, trusted_proxy=proxies.enabled,
                    allowed_origins=origins.allowed or "same origin only")
@@ -401,20 +405,48 @@ async def client_script():
 # ============ REST Endpoints ============
 
 @app.get("/health", response_model=HealthResponse)
-async def health():
-    return HealthResponse(
-        status="healthy" if orchestrator is not None else "starting",
+async def health(request: Request):
+    """Up or not, for anyone: load balancers, container health checks and the console page ask
+    without a key. How busy the server is (calls, the LLM's queue) and what's running below
+    strength is for its operator: with a key, or from this machine when no keys are set."""
+    degraded = _degraded()
+    body = HealthResponse(
+        status="starting" if orchestrator is None else ("degraded" if degraded else "healthy"),
         version=__version__,
         models_loaded=orchestrator is not None and getattr(orchestrator, "ready", False),
-        uptime_s=round(time.monotonic() - _started_at, 1),
-        active_sessions=len(_active_sessions),
         config={
             "stt": orchestrator.config.stt.provider.value if orchestrator else None,
             "llm": orchestrator.config.llm.provider.value if orchestrator else None,
             "tts": orchestrator.config.tts.provider.value if orchestrator else None,
         },
-        llm_server=_engine_monitor.snapshot() if _engine_monitor is not None else None,
     )
+    if not _is_operator(request):
+        body.note = "send a key (Authorization: Bearer <key>) for sessions, load and details"
+        return body
+    body.degraded = degraded or None
+    body.uptime_s = round(time.monotonic() - _started_at, 1)
+    body.active_sessions = len(_active_sessions)
+    body.llm_server = _engine_monitor.snapshot() if _engine_monitor is not None else None
+    return body
+
+
+def _is_operator(request: Request) -> bool:
+    """A key, or this machine on a server without keys. Quietly: a health check without a key
+    is normal, so it isn't logged or counted as a failed attempt."""
+    try:
+        auth.authenticate(client_host=_client_host(request), proxied=came_through_a_proxy(request.headers),
+                          authorization=request.headers.get("authorization"), token=None, allow_token=False)
+    except Unauthorized:
+        return False
+    return True
+
+
+def _degraded() -> dict:
+    """What's running below strength right now: models that loaded in a weaker mode, a model server down."""
+    found = orchestrator.degraded() if orchestrator is not None and hasattr(orchestrator, "degraded") else {}
+    if _engine_monitor is not None and _engine_monitor.snapshot().get("state") == "down":
+        found["llm_server"] = "not answering: replies fail until it's back"
+    return found
 
 
 @app.post("/v1/voice/chat", response_model=VoiceChatResponse)
@@ -568,10 +600,12 @@ async def voice_websocket(websocket: WebSocket):
 
     with session_scope(session_id):
         client = websocket.client
-        telemetry.emit("session.start", stage="server",
+        degraded = _degraded()
+        telemetry.emit("session.start", level="warning" if degraded else "info", stage="server",
                        client=f"{client.host}:{client.port}" if client else None,
                        key=principal.label, authenticated=principal.via,
-                       profile=os.getenv("FUSION_CONFIG", "development"))
+                       profile=os.getenv("FUSION_CONFIG", "development"),
+                       **({"degraded": ",".join(sorted(degraded))} if degraded else {}))
         receive_task = send_task = clock_task = None
         try:
             # Send config
@@ -606,6 +640,10 @@ async def voice_websocket(websocket: WebSocket):
                     # A client that detects interruptions itself, and has already
                     # stopped its own playback. Cancel generation so we stop
                     # producing a reply nobody is listening to any more.
+                    if barge_in.protected or not orchestrator.config.turn_detection.interruptible:
+                        trace.event("barge_in.ignored", stage="barge_in", source="client",
+                                    reason="protected" if barge_in.protected else "not_interruptible")
+                        return
                     barge_in.fire()
                     turn = trace.responding
                     if turn is not None:
@@ -627,6 +665,25 @@ async def voice_websocket(websocket: WebSocket):
                     trace.event("client.unknown_message", level="debug", stage="server", message_type=msg.get("type"))
 
             budget = AudioBudget(limits, orchestrator.config.sample_rate)
+            from fusion_runtime.engine.audio_watch import AudioWatch
+
+            hearing = AudioWatch(limits.dead_audio_s)
+            from fusion_runtime.engine.audio_format import Intake
+
+            intake = Intake(orchestrator.config.sample_rate)
+
+            def report_audio(change):
+                """The caller's audio stopped, went digitally silent, or came back: log it, tell the client."""
+                if change is None:
+                    return
+                if change["event"] == "audio.problem":
+                    trace.event("audio.problem", level="warning", stage="audio", problem=change["problem"],
+                                seconds=change["seconds"], hint=change["message"])
+                    _dispatch_event(websocket, {"type": "audio_problem", "problem": change["problem"],
+                                                "message": change["message"]})
+                else:
+                    trace.event("audio.ok", stage="audio", problem=change["problem"], lasted_s=change["lasted_s"])
+                    _dispatch_event(websocket, {"type": "audio_ok"})
 
             async def receive_audio():
                 turns_seen = trace.turn_count
@@ -640,7 +697,14 @@ async def voice_websocket(websocket: WebSocket):
                             turns_seen = trace.turn_count
                             budget.turn_ended()
                         budget.audio(len(data), speech_s=trace.speech_s, last_speech=trace.last_speech_mono)
-                        await audio_queue.put(data)
+                        data = intake.accept(data)  # whole samples; a WAV header gone; BadAudioFormat otherwise
+                        if intake.note:
+                            trace.event("audio.format_fixed", level="warning", stage="audio", hint=intake.note)
+                            _dispatch_event(websocket, {"type": "warning", "code": "wav_header", "message": intake.note})
+                            intake.note = None
+                        report_audio(hearing.frame(data))
+                        if data:
+                            await audio_queue.put(data)
                         continue
                     text = message.get("text")
                     if text is not None:
@@ -649,12 +713,17 @@ async def voice_websocket(websocket: WebSocket):
 
             async def watch_the_clock():
                 """A socket that opened and went quiet, or a conversation that never
-                ends, holds a slot nobody else can use."""
+                ends, holds a slot nobody else can use. Twice a second it also checks
+                that caller audio is still arriving at all."""
+                ticks = 0
                 while True:
-                    await asyncio.sleep(5)
-                    expired = budget.expired()
-                    if expired is not None:
-                        raise expired
+                    await asyncio.sleep(0.5)
+                    report_audio(hearing.check())
+                    ticks += 1
+                    if ticks % 10 == 0:
+                        expired = budget.expired()
+                        if expired is not None:
+                            raise expired
 
             async def audio_stream():
                 # asyncio.Queue has no __aiter__ — wrap it
@@ -692,10 +761,13 @@ async def voice_websocket(websocket: WebSocket):
                     tools=agent.tools if agent is not None else (),
                     # only when there is one, so an orchestrator written before greetings still fits
                     **({"greeting": greeting} if (greeting := greeting_for(agent)) else {}),
+                    **({"greeting_interruptible": False}
+                       if greeting and agent is not None and not agent.greeting_interruptible else {}),
                 )
                 try:
+                    reply_bytes_per_s = 2 * orchestrator.config.tts.sample_rate  # 16-bit mono
                     async for chunk in pipeline:
-                        budget.agent_spoke()
+                        budget.agent_spoke(len(chunk) / reply_bytes_per_s)
                         await websocket.send_bytes(chunk)
                 finally:
                     # Close the pipeline now (not whenever it gets garbage collected), so its
@@ -715,6 +787,14 @@ async def voice_websocket(websocket: WebSocket):
                 if exc is not None and not _client_gone(websocket, exc):
                     raise exc
 
+        except BadAudioFormat as e:
+            end_reason, error_code = "bad_audio_format", "bad_audio_format"
+            telemetry.emit("session.bad_audio", level="warning", stage="audio", key=principal.label, detail=str(e))
+            with contextlib.suppress(Exception):
+                await websocket.send_json({"type": "error", "code": "bad_audio_format", "message": str(e),
+                                           "retryable": False})
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1003)  # unsupported data
         except OverLimit as e:
             end_reason, error_code = e.reason, e.reason
             telemetry.emit("session.limited", level="warning", stage="server", reason=e.reason,

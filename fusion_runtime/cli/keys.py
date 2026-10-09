@@ -90,6 +90,9 @@ def token(
     from fusion_runtime.config import API_KEY_ENV
     from fusion_runtime.security import client_key
 
+    if public_url and not public_url.startswith(("http://", "https://")):  # before a token is spent on it
+        typer.echo(f"Error: --public-url must start with https:// (or http://), got {public_url!r}", err=True)
+        raise typer.Exit(1)
     key = key or client_key(url)
     if not key:
         typer.echo(f"Error: no key given. Pass --key, or set {API_KEY_ENV} (a .env file works).\n"
@@ -109,11 +112,6 @@ def token(
         raise typer.Exit(1)
     response.raise_for_status()
     body = response.json()
-    shown = base
-    if public_url:
-        if not public_url.startswith(("http://", "https://")):
-            typer.echo(f"Error: --public-url must start with https:// (or http://), got {public_url!r}", err=True)
-            raise typer.Exit(1)
-        shown = public_url.rstrip("/")
+    shown = public_url.rstrip("/") if public_url else base
     typer.echo(f"{shown}/?token={body['token']}")
     typer.echo(f"\nOpen that in a browser within {body['expires_in']} seconds. It works once.")

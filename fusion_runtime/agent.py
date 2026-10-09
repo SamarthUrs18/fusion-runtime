@@ -220,7 +220,8 @@ class Agent:
     vad: Optional[VAD] = None
     tools: Sequence[Any] = ()  # functions the model can call; plain functions become tools
     greeting: Optional[str] = None  # said when a caller connects, before they speak; None = wait for them
-    profile: str = "development"  # the defaults everything above is applied to
+    greeting_interruptible: bool = True  # False: always heard in full ("this call may be recorded")
+    profile: str = "development"  # the defaults everything above is applied to: development (laptops), production (GPU)
     source: Optional[Path] = None  # the file it was loaded from, when it came from one
 
     def __post_init__(self) -> None:
@@ -248,10 +249,10 @@ class Agent:
 
     def config(self, environ: Optional[Mapping[str, str]] = None):
         """This agent as a PipelineConfig: profile defaults, the agent on top, then the environment."""
-        from fusion_runtime.config import PROFILES, with_env_overrides
+        from fusion_runtime.config import PROFILES, profile_choices, with_env_overrides
 
         if self.profile not in PROFILES:
-            raise AgentError(f"unknown profile {self.profile!r}; choose one of: {', '.join(PROFILES)}")
+            raise AgentError(f"unknown profile {self.profile!r}; choose one of: {profile_choices()}")
         config = PROFILES[self.profile]
         parts: Dict[str, Any] = {}
 

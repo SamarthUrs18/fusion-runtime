@@ -178,6 +178,9 @@ class TurnDetectionConfig(BaseModel):
     # Shorter stops sooner; longer ignores coughs, "mm-hm" and leftover echo of
     # the agent's own voice. Measured as sustained speech by Silero VAD.
     barge_in_min_speech_ms: int = 300
+    # False: the agent always finishes what it's saying; talking over it is heard and answered after.
+    # Turns(interruptible=False) in an agent file.
+    interruptible: bool = True
     # Text-domain self-echo rejection: a candidate "user" turn is discarded
     # (never sent to the LLM) if a long enough run of its words appears
     # verbatim, in order, inside the text the bot itself most recently
@@ -258,6 +261,19 @@ HYBRID_CONFIG = PipelineConfig(
 )
 
 PROFILES = {"development": DEVELOPMENT_CONFIG, "production": PRODUCTION_CONFIG, "hybrid": HYBRID_CONFIG}
+# What each profile is for, said wherever one is named: "development" and "production" read as stages
+# of a project, but the difference is the machine (a laptop's CPU, or an NVIDIA GPU).
+PROFILE_FOR = {"development": "laptops, on the CPU", "production": "an NVIDIA GPU",
+               "hybrid": "speech here, the LLM from a server"}
+
+
+def profile_label(name: str) -> str:
+    """e.g. "development profile (for laptops, on the CPU)"."""
+    return f"{name} profile (for {PROFILE_FOR[name]})" if name in PROFILE_FOR else f"{name} profile"
+
+
+def profile_choices() -> str:
+    return ", ".join(f"{name} ({PROFILE_FOR[name]})" for name in PROFILES)
 
 # Environment variables that point any profile's LLM at an OpenAI-compatible endpoint
 LLM_URL_ENV, LLM_MODEL_ENV, LLM_KEY_ENV_ENV = "FUSION_LLM_URL", "FUSION_LLM_MODEL", "FUSION_LLM_API_KEY_ENV"
@@ -307,9 +323,17 @@ def with_env_overrides(config: PipelineConfig, environ=None) -> PipelineConfig:
         "provider": Provider.OPENAI, "runtime": None, "api_base": url, "model": model,
         "api_key_env": env.get(LLM_KEY_ENV_ENV) or None,
         # Settings for the runtime this replaces (flash_attn for llama.cpp, say) don't apply to an endpoint
-        "options": {k: v for k, v in config.llm.options.items() if k in ENDPOINT_OPTIONS},
+        "options": {**_moved_server_defaults(config.llm),
+                    **{k: v for k, v in config.llm.options.items() if k in ENDPOINT_OPTIONS}},
     })
     return config.model_copy(update={"llm": llm})
+
+
+def _moved_server_defaults(llm: "LLMConfig") -> dict:
+    """A vllm:/sglang: model moved elsewhere with FUSION_LLM_URL is still a model server: keep its warm-up."""
+    from fusion_runtime.resolver import SERVED_RUNTIMES
+
+    return {"warmup": True} if llm.runtime in SERVED_RUNTIMES else {}
 
 
 def _served_name(llm: "LLMConfig") -> Optional[str]:
@@ -346,5 +370,5 @@ def _with_turn_overrides(config: PipelineConfig, env) -> PipelineConfig:
 
 def load_profile(name: str, environ=None) -> PipelineConfig:
     if name not in PROFILES:
-        raise ValueError(f"unknown profile {name!r}; choose one of: {', '.join(PROFILES)}")
+        raise ValueError(f"unknown profile {name!r}; choose one of: {profile_choices()}")
     return with_env_overrides(PROFILES[name], environ)

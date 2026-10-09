@@ -5,7 +5,7 @@ import copy
 import difflib
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import AsyncIterator, Dict, List, Optional, Sequence
+from typing import AsyncIterator, Dict, List, Optional, Sequence, Tuple
 
 from fusion_runtime.config import PipelineConfig, TurnDetectionConfig
 from fusion_runtime.contract import (
@@ -32,6 +32,9 @@ from fusion_runtime.vad import TurnState, VADBase, create_vad
 # Silence after which the user's last words are transcribed, ahead of the turn ending
 FINALIZE_AFTER_SILENCE_MS = 150
 
+
+# A lookup cut in on gets this long more to finish, so its result informs the next answer
+INTERRUPTED_TOOL_GRACE_S = 2.0
 
 class PipelineOrchestrator:
     """
@@ -183,9 +186,28 @@ class PipelineOrchestrator:
         # Load Silero once now, so sessions only copy it (see _load_vad_frame_model).
         await self._load_vad_frame_model()
         telemetry.emit("models.ready", stage="server", duration_ms=(time.perf_counter() - started) * 1000)
+        degraded = self.degraded()
+        if degraded:
+            # Said once here, and again on every session.start and in /health, so a server running
+            # below strength stays visible hours later (the VAD was once broken for sessions unnoticed)
+            telemetry.emit("server.degraded", level="warning", stage="server", components=sorted(degraded),
+                           **{f"{name}_reason": reason for name, reason in degraded.items()})
 
         if self.config.enable_batching:
             self._batch_task = asyncio.create_task(self._batch_worker())
+
+    def degraded(self) -> Dict[str, str]:
+        """Parts running below strength: {component: why}. Empty when everything is as configured."""
+        found = dict(self.__dict__.get("_degraded", {}))
+        for stage in ("stt", "llm", "tts"):
+            runtime = self.__dict__.get(stage)
+            health = getattr(runtime, "health", None)
+            if callable(health):
+                with contextlib.suppress(Exception):
+                    state = health()
+                    if getattr(state, "status", None) == "degraded":
+                        found[stage] = state.detail or "degraded"
+        return found
 
     async def shutdown(self):
         pool = self.__dict__.pop("_vad_pool", None)
@@ -213,6 +235,7 @@ class PipelineOrchestrator:
         trace: Optional[SessionTrace] = None,
         tools: Sequence[Tool] = (),
         greeting: Optional[str] = None,
+        greeting_interruptible: bool = True,
     ) -> AsyncIterator[bytes]:
         """
         Main pipeline: Audio → STT → LLM → TTS → Audio
@@ -222,6 +245,7 @@ class PipelineOrchestrator:
         the LLM runtime must support tool calling (see check_tools).
 
         greeting — said as soon as the pipeline starts, before the caller speaks.
+        greeting_interruptible — False: talking over the greeting doesn't stop it.
 
         on_event(dict) — optional callback receiving live events:
           {"type": "transcript", "text": ..., "is_final": bool}
@@ -277,7 +301,7 @@ class PipelineOrchestrator:
             # Stage 2: LLM Streaming (consumes STT partials)
             llm_stream = self._llm_stage(
                 stt_stream, system_prompt, emit, turn_state, stt_reset, barge_in, trace, tools=tools,
-                greeting=greeting,
+                greeting=greeting, greeting_interruptible=greeting_interruptible,
             )
 
             # Stage 3: TTS Streaming (consumes LLM tokens)
@@ -473,6 +497,8 @@ class PipelineOrchestrator:
                 impact="no speech detection: turns end on a timer and interruptions don't work",
                 hint="run: frun doctor",
             )
+            self.__dict__.setdefault("_degraded", {})["vad"] = (
+                "not loaded: turns end on a timer and interruptions don't work (run: frun doctor)")
             return None
         telemetry.emit("model.loaded", stage="vad", duration_ms=(time.perf_counter() - t0) * 1000,
                        runtime="silero", model="silero-vad")
@@ -499,6 +525,8 @@ class PipelineOrchestrator:
         residual echo of the bot's own voice as readily as on a real user.
         """
 
+        if not getattr(self.config.turn_detection, "interruptible", True):
+            return  # Turns(interruptible=False): the agent always finishes; the caller is answered after
         model = await self._load_vad_frame_model()
         if model is None:
             return  # no VAD available — can't detect barge-in at all
@@ -524,9 +552,9 @@ class PipelineOrchestrator:
             if not frames:
                 continue
 
-            if not barge_in.speaking:
+            if not barge_in.can_interrupt:
                 speech_run_ms = 0.0
-                continue  # nothing to interrupt right now
+                continue  # nothing to interrupt right now (or it's protected: a greeting heard in full)
             watched = []
             for frame, frame_start_sample in frames:
                 arrived = trace.arrival_time(frame_start_sample) if trace is not None else None
@@ -539,7 +567,7 @@ class PipelineOrchestrator:
             probs = await self._vad_probabilities(model, watched, sample_rate)
 
             for prob in probs:
-                if not barge_in.speaking:
+                if not barge_in.can_interrupt:
                     break  # fired (or the reply ended) while these frames were being checked
 
                 if prob >= threshold:
@@ -584,8 +612,8 @@ class PipelineOrchestrator:
                 results = await self.stt.transcribe([request])
             return raise_if_error(results[0])
 
-        # Apply VAD filter
-        vad_filtered = self._apply_vad(audio_stream, turn_state, trace)
+        # Apply VAD filter, then keep digital silence away from the recogniser whatever the VAD did
+        vad_filtered = self._drop_digital_silence(self._apply_vad(audio_stream, turn_state, trace), trace)
         detector = self.__dict__.get("turn_detector")
         if turn_state is not None and getattr(detector, "uses_audio", False):
             vad_filtered = self._keep_turn_audio(vad_filtered, turn_state)
@@ -635,6 +663,31 @@ class PipelineOrchestrator:
                 raise tag_stage(e, "stt")
             note(result)
             yield result
+
+    @staticmethod
+    async def _drop_digital_silence(chunks: AsyncIterator[bytes], trace: Optional[SessionTrace] = None
+                                    ) -> AsyncIterator[bytes]:
+        """Never hand speech-to-text audio that is exactly zero.
+
+        A muted mic or a dead connection sends digital silence, and recognisers can write fluent
+        sentences from it: in Asif Ali's vendor benchmark one did on 15 of 15 probes, and on 0 of 4 of
+        real room tone. The VAD normally keeps zeros away, but when it fails to load every chunk passes
+        through. Room tone, however quiet, isn't exactly zero, so this drops nothing a person said.
+        """
+        dropped = 0
+        async for chunk in chunks:
+            if chunk and chunk.count(0) == len(chunk):  # every byte zero: every sample is 0
+                dropped += 1
+                if trace is not None:
+                    turn = trace.listening_turn() if trace.listening is not None else None
+                    if turn is not None:
+                        turn.add("stt_zero_chunks_dropped")
+                    if dropped == 1:
+                        trace.event("stt.digital_silence_dropped", turn=turn, level="debug", stage="stt",
+                                    bytes=len(chunk),
+                                    hint="exact-zero audio (a muted mic or dead connection) isn't transcribed")
+                continue
+            yield chunk
 
     async def _keep_turn_audio(self, chunks: AsyncIterator[bytes], turn_state: TurnState) -> AsyncIterator[bytes]:
         """Keep the latest seconds of this turn's speech for a turn detector that uses audio."""
@@ -757,6 +810,7 @@ class PipelineOrchestrator:
         conversation: Optional[Conversation] = None,
         tools: Sequence[Tool] = (),
         greeting: Optional[str] = None,
+        greeting_interruptible: bool = True,
     ) -> AsyncIterator[str]:
         """LLM streaming, gated by real (forward-measured) silence rather
         than reacting only when new STT text happens to arrive.
@@ -883,9 +937,9 @@ class PipelineOrchestrator:
             if trace is None:
                 return
             turn = trace.listening_turn()
-            if "turn_end_detected" in turn.marks:
+            if not turn.awaiting_turn_end():
                 return
-            turn.mark("turn_end_detected")
+            turn.mark("turn_end_detected", overwrite=True)
             turn.info["turn_end_reason"] = reason
             if p is not None:
                 turn.info["end_of_turn_probability"] = round(p, 3)
@@ -1019,8 +1073,7 @@ class PipelineOrchestrator:
             last_turn_started = time.monotonic()
             turn = None
             if trace is not None:
-                if "turn_end_detected" not in trace.listening_turn().marks:
-                    record_turn_end("audio_ended", 0, transcript)
+                record_turn_end("audio_ended", 0, transcript)  # only if no turn end was recorded since speech
                 turn = trace.start_responding()
                 turn.info["language"] = turn_language()
                 trace.event("stt.final", turn=turn, stage="stt", language=turn_language(), **telemetry.content(transcript))
@@ -1057,6 +1110,7 @@ class PipelineOrchestrator:
             measure_decode = getattr(getattr(self.llm, "capabilities", None), "decodes_on_demand", True)
             max_tool_rounds = max(0, int(getattr(llm_config, "max_tool_rounds", 4)))
             steps: List[Message] = []  # tool calls this turn with their results, kept in the history
+            answer_dropped = False  # cut in on after a lookup finished: no answer was spoken
             round_text = ""
 
             # One round per model reply. A reply that asks for tools gets them run and the results
@@ -1171,18 +1225,23 @@ class PipelineOrchestrator:
                     response_buffer += " "  # the reply continues after the tools, as a new sentence
                 asked = Message(role="assistant", content=round_text, tool_calls=tool_calls)
                 messages = [*messages, asked]
-                results = await self._run_tools(tool_calls, tools_by_name, barge_in, trace, turn)
-                if results is None:  # the caller talked over the wait: drop the answer that was coming
+                results, cut_off = await self._run_tools(tool_calls, tools_by_name, barge_in, trace, turn)
+                if results is not None:
+                    answered = [Message(role="tool", content=result.content, name=call.name, tool_call_id=call.id)
+                                for call, result in zip(tool_calls, results, strict=True)]
+                    messages = [*messages, *answered]
+                    steps += [asked, *answered]
+                if cut_off:
+                    # The caller talked over the wait: drop the answer that was coming. A lookup that
+                    # finished stays in the conversation, so their next question is answered with it
+                    # instead of a guess; one that didn't is gone, as if never asked.
                     finish_reason = "interrupted"
+                    answer_dropped = results is not None  # the lookup's words already sit in `asked`
                     if emit:
                         emit({"type": "response", "text": response_buffer.strip(), "is_final": True,
                               "interrupted": True})
                     yield REPLY_CUT_OFF
                     break
-                answered = [Message(role="tool", content=result.content, name=call.name, tool_call_id=call.id)
-                            for call, result in zip(tool_calls, results, strict=True)]
-                messages = [*messages, *answered]
-                steps += [asked, *answered]
                 finish_reason = None
             response_buffer = response_buffer.strip()
             if barge_in is not None:
@@ -1205,7 +1264,7 @@ class PipelineOrchestrator:
             last_bot_text = response_buffer
             # A call cut off before its results came back isn't kept: its words ("Let me check.")
             # are the last round's text, stored as the reply.
-            conversation.add_turn(transcript, round_text if steps else response_buffer,
+            conversation.add_turn(transcript, "" if answer_dropped else (round_text if steps else response_buffer),
                                   interrupted=finish_reason == "interrupted", steps=steps)
             response_buffer = ""
             first_token = True
@@ -1221,8 +1280,11 @@ class PipelineOrchestrator:
             last_bot_text = text
             if barge_in is not None:
                 barge_in.mark_speaking()
+                if not greeting_interruptible:
+                    barge_in.protect()
             if trace is not None:
-                trace.event("greeting.spoken", stage="tts", chars=len(text), **telemetry.content(text, "reply"))
+                trace.event("greeting.spoken", stage="tts", chars=len(text), interruptible=greeting_interruptible,
+                            **telemetry.content(text, "reply"))
             if emit:
                 emit({"type": "response", "text": text, "is_final": True, "greeting": True})
             for sentence in _sentences(text):
@@ -1320,8 +1382,12 @@ class PipelineOrchestrator:
         )
 
     async def _run_tools(self, calls, tools_by_name: Dict[str, Tool], barge_in: Optional[BargeInState],
-                         trace: Optional[SessionTrace], turn) -> Optional[List[ToolResult]]:
-        """Run the calls the model asked for, together. None if the caller interrupted while they ran.
+                         trace: Optional[SessionTrace], turn) -> Tuple[Optional[List[ToolResult]], bool]:
+        """Run the calls the model asked for, together: (their results, whether the caller cut in).
+
+        Talking over the wait stops the answer, but the lookups get INTERRUPTED_TOOL_GRACE_S more to
+        finish, and a finished lookup's result is returned and kept. Results are None only for
+        lookups cancelled because they were still running.
 
         A tool that fails, times out or doesn't exist gives the model an error to read, never
         an exception here: one broken lookup shouldn't hang up on the caller.
@@ -1348,15 +1414,26 @@ class PipelineOrchestrator:
 
         running = asyncio.ensure_future(asyncio.gather(*(one(call) for call in calls)))
         if barge_in is None:
-            return await running
+            return await running, False
         interrupted = asyncio.ensure_future(barge_in.interrupted.wait())
         try:
             await asyncio.wait({running, interrupted}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             interrupted.cancel()
         if running.done():
-            return running.result()
+            return running.result(), False
         barge_in.interrupted.clear()
+        # Cut in on: stop the answer now, but let a nearly finished lookup land, so its result can
+        # inform the reply to whatever the caller just said (a cough or an echo shouldn't cost the data)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(running), INTERRUPTED_TOOL_GRACE_S)
+        if running.done() and not running.cancelled() and running.exception() is None:
+            if trace is not None and turn is not None:
+                turn.mark("llm_stopped")
+                trace.event("tool.kept", turn=turn, stage="tool", reason="barge_in",
+                            tools=[call.name for call in calls],
+                            hint="the caller cut in during the lookup; its result is kept for the next answer")
+            return running.result(), True
         running.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await running
@@ -1364,7 +1441,7 @@ class PipelineOrchestrator:
             turn.mark("llm_stopped")
             trace.event("tool.cancelled", turn=turn, stage="tool", reason="barge_in",
                         tools=[call.name for call in calls])
-        return None
+        return None, True
 
     async def _tts_stage(
         self,

@@ -92,6 +92,13 @@ def test_missing_development_models_fail(monkeypatch, tmp_path):
     assert dev.status == FAIL and dev.fix == "frun models pull"
 
 
+def test_a_gpu_server_isnt_failed_for_the_laptop_profiles_models(monkeypatch, tmp_path):
+    _no_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(_checks, "_cuda_device_count", lambda: 1)
+    dev = next(r for r in _checks.check_models() if r.message.startswith("development profile"))
+    assert dev.status == INFO and "only for --config development" in dev.message
+
+
 def test_missing_production_models_only_matter_with_a_gpu(monkeypatch, tmp_path):
     _no_models(monkeypatch, tmp_path)
     monkeypatch.setattr(_checks, "_cuda_device_count", lambda: 0)

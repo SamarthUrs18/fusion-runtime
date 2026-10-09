@@ -50,3 +50,19 @@ def test_a_terminal_that_cant_draw_the_dots_gets_bars_or_nothing():
     assert banner.wave_for(None, {}) == ""
     text = banner.render("0.1.2", ROWS, width=100, color=False, wave="")
     assert "r u n t i m e" in text and banner.WAVES[0] not in text
+
+
+def test_a_pod_shows_its_public_link_not_localhost():
+    from fusion_runtime.cli.up import public_url
+
+    pod = {"RUNPOD_POD_ID": "abc123"}
+    assert public_url("0.0.0.0", 8000, pod) == "https://abc123-8000.proxy.runpod.net"
+    # Set by hand (a domain, another provider's proxy), it wins
+    assert public_url("0.0.0.0", 8000, {**pod, "FUSION_PUBLIC_URL": "https://voice.shopkart.example/"}) == \
+        "https://voice.shopkart.example"
+    # Bound to this machine only, Runpod's proxy can't reach it: no public link to guess
+    assert public_url("127.0.0.1", 8000, pod) is None
+    # ...but behind a proxy on this machine (Caddy), the address you set is the one people open
+    assert public_url("127.0.0.1", 8000, {"FUSION_PUBLIC_URL": "https://voice.example.com"}) == \
+        "https://voice.example.com"
+    assert public_url("0.0.0.0", 8000, {}) is None

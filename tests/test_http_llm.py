@@ -211,7 +211,7 @@ cli = CliRunner()
 
 def test_up_refuses_a_missing_key_before_starting(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr("uvicorn.run", lambda *a, **k: pytest.fail("server must not start"))
+    monkeypatch.setattr("fusion_runtime.cli.up._serve", lambda *a, **k: pytest.fail("server must not start"))
     monkeypatch.setattr("fusion_runtime.cli._checks.missing_models", lambda *a, **k: [])
     result = cli.invoke(app, ["up", "--config", "hybrid"])
     assert result.exit_code == 1 and "export OPENAI_API_KEY" in result.output
@@ -222,7 +222,7 @@ def test_up_llm_flags_set_the_endpoint_for_the_server(monkeypatch):
         monkeypatch.setenv(name, "")  # restored after the test
     monkeypatch.delenv("FUSION_CONFIG", raising=False)
     calls = []
-    monkeypatch.setattr("uvicorn.run", lambda *a, **k: calls.append(k))
+    monkeypatch.setattr("fusion_runtime.cli.up._serve", lambda *a, **k: calls.append(k))
     monkeypatch.setattr("fusion_runtime.cli._checks.missing_models", lambda *a, **k: [])
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
     result = cli.invoke(app, ["up", "--llm-url", "http://localhost:8080/v1", "--llm-model", "qwen-local"])
@@ -235,7 +235,7 @@ def test_up_turn_flags_reach_the_server(monkeypatch):
     for name in LLM_ENV + ("FUSION_TURN_DETECTOR", "FUSION_TURN_WAIT_MS", "FUSION_INTERRUPT_AFTER_MS"):
         monkeypatch.setenv(name, "")
     monkeypatch.delenv("FUSION_CONFIG", raising=False)
-    monkeypatch.setattr("uvicorn.run", lambda *a, **k: None)
+    monkeypatch.setattr("fusion_runtime.cli.up._serve", lambda *a, **k: None)
     monkeypatch.setattr("fusion_runtime.cli._checks.missing_models", lambda *a, **k: [])
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
     result = cli.invoke(app, ["up", "--turn-wait-ms", "1200", "--turn-detector", "my_pkg.turns:Model",
@@ -282,3 +282,68 @@ def test_doctor_fails_an_unreachable_configured_endpoint(monkeypatch):
     monkeypatch.setenv("FUSION_LLM_MODEL", "qwen-local")
     _fake_probe(monkeypatch, reachable=False, error=RuntimeFailure("can't reach it; is the server running?"))
     assert _checks.check_llm_endpoint()[-1].status == FAIL
+
+
+# ---- warm-up -----------------------------------------------------------------------------
+
+async def test_a_model_server_is_warmed_while_loading():
+    """SGLang compiled on its first request (70 s on a 4090), so the first caller timed out."""
+    from fusion_runtime.telemetry import telemetry
+    from fusion_runtime.telemetry.sinks import ListSink
+
+    sink = ListSink()
+    telemetry.add_sink(sink)
+    try:
+        server = FakeServer()
+        rt = runtime(server, warmup=True)
+        await rt.load()
+        await rt.close()
+    finally:
+        telemetry.remove_sink(sink)
+    warm = server.bodies[0]
+    assert warm["max_tokens"] == 1 and warm["messages"] == [{"role": "user", "content": "Hi"}]
+    assert [e.name for e in sink.events if e.name.startswith("llm.warm")] == ["llm.warmed"]
+
+
+async def test_no_warm_up_unless_asked():
+    server = FakeServer()
+    rt = runtime(server)
+    await rt.load()
+    await rt.close()
+    assert server.bodies == []  # a bare URL may be a paid API: nothing sent until a caller speaks
+
+
+async def test_a_failed_warm_up_is_reported_and_loading_carries_on():
+    from fusion_runtime.telemetry import telemetry
+    from fusion_runtime.telemetry.sinks import ListSink
+
+    class SlowWarmup(FakeServer):
+        def handler(self, request):
+            if request.url.path.endswith("/chat/completions"):
+                raise httpx.ReadTimeout("timed out", request=request)
+            return super().handler(request)
+
+    sink = ListSink()
+    telemetry.add_sink(sink)
+    try:
+        rt = runtime(SlowWarmup(), warmup=True, warmup_timeout_s=1)
+        await rt.load()
+        assert rt.health().ok
+        await rt.close()
+    finally:
+        telemetry.remove_sink(sink)
+    failed = [e for e in sink.events if e.name == "llm.warmup_failed"]
+    assert failed and failed[0].level == "warning" and "raise warmup_timeout_s" in failed[0].attrs["hint"]
+
+
+def test_served_models_warm_by_default_and_urls_do_not():
+    from fusion_runtime.agent import LLM, Agent
+
+    served = resolve_stage_config("llm", Agent(llm=LLM("vllm:hf:org/model")).config({}).llm)
+    assert served.spec.options["warmup"] is True
+    url = resolve_stage_config("llm", Agent(llm=LLM(URL, model_name="m")).config({}).llm)
+    assert "warmup" not in url.spec.options
+    off = resolve_stage_config("llm", Agent(llm=LLM("sglang:hf:org/model", warmup=False)).config({}).llm)
+    assert off.spec.options["warmup"] is False
+    moved = Agent(llm=LLM("vllm:hf:org/model")).config({"FUSION_LLM_URL": "http://gpu:8002/v1"}).llm
+    assert moved.options.get("warmup") is True  # still a model server, just elsewhere

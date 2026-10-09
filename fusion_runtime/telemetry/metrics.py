@@ -124,6 +124,8 @@ class TelemetryMetrics:
                                         ["engine"], registry=r)
         self.llm_server_kv = Gauge("fusion_llm_server_kv_cache_used", "Share of the LLM server's KV cache in use (0-1)",
                                    ["engine"], registry=r)
+        self.degraded = Gauge("fusion_degraded", "A component running below strength (1) since start-up",
+                              ["component"], registry=r)
         self.loop_lag = Gauge("fusion_event_loop_lag_seconds", "Worst event-loop delay in the last window", registry=r)
         self.loop_stalls = Counter("fusion_event_loop_stalls", "Times the event loop was blocked over the stall threshold",
                                    registry=r)
@@ -136,6 +138,10 @@ class TelemetryMetrics:
         if event.error is not None and event.level == "error":
             self.errors.labels(event.error.stage or event.stage or "unknown", event.error.code).inc()
 
+        if name == "server.degraded":
+            for component in a.get("components", ()):
+                self.degraded.labels(component).set(1)
+            return
         if name == "llm_server.state":
             engine = a.get("engine", "?")
             self.llm_server_up.labels(engine).set(1 if a.get("state") == "up" else 0)

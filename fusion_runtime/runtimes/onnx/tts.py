@@ -55,7 +55,10 @@ class OnnxTTS(TTSRuntime):
         )
 
     def health(self) -> Health:
-        return Health("ok") if self._loaded else Health("down", "model not loaded")
+        if not self._loaded:
+            return Health("down", "model not loaded")
+        degraded = getattr(self.family, "degraded", None)
+        return Health("degraded", degraded) if degraded else Health("ok")
 
     @property
     def default_voice(self) -> str:

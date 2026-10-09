@@ -35,12 +35,14 @@ LOG_FILE_ENV = "FUSION_LLM_LOG"  # a file for the server's full log; the termina
 
 # Settings read here, when fusion starts the server. Everything else goes to the HTTP client.
 LAUNCH_OPTIONS = ("launch", "engine_env", "gpu_memory", "max_model_len", "max_callers",
-                  "tool_parser", "extra_args", "start_timeout_s")
+                  "tool_parser", "extra_args", "start_timeout_s", "hung_after_s")
 
 GPU_MEMORY = 0.6  # the LLM's share of the card; speech-to-text and text-to-speech use the rest
 MAX_MODEL_LEN = 4096  # a voice call's context; longer reserves memory a call never uses
 START_TIMEOUT_S = 900.0  # a first start downloads the model and compiles kernels: SGLang took ~10 min
 LOG_TAIL = 40  # lines kept to show when the server fails to start
+HUNG_AFTER_S = 60.0  # running but not answering this long: restart it, as if it had crashed
+LIVENESS_EVERY_S = 5.0
 
 
 class LaunchError(RuntimeError):
@@ -90,6 +92,7 @@ class LaunchPlan:
     start_timeout_s: float = START_TIMEOUT_S
     notes: List[str] = field(default_factory=list)  # said once at startup: defaults chosen for the user
     gpu_memory: float = GPU_MEMORY  # the engine's share of the card
+    hung_after_s: float = HUNG_AFTER_S
 
     @property
     def health_url(self) -> str:
@@ -99,6 +102,13 @@ class LaunchPlan:
     @property
     def models_url(self) -> str:
         return self.base_url.rstrip("/") + "/models"
+
+    @property
+    def liveness_url(self) -> str:
+        """What to poll to know it's alive. SGLang's /health generates a token, so its /metrics instead."""
+        parts = urlsplit(self.base_url)
+        path = "/metrics" if self.engine.name in METRICS_ARE_LIVENESS else "/health"
+        return f"{parts.scheme}://{parts.netloc}{path}"
 
 
 def launchable(llm) -> Optional[Engine]:
@@ -157,6 +167,9 @@ def plan(llm, *, has_tools: bool, environ: Optional[Mapping[str, str]] = None) -
         command += [engine.max_callers_flag, str(int(_number(options, "max_callers", 0, 1, None)))]
 
     notes = []
+    if ref.startswith("hf:") and not _downloaded(model, revision):
+        notes.append(f"{model} isn't downloaded yet, so this first start downloads it inside {engine.display}'s "
+                     "start-up (minutes for a large model); `frun models pull <agent.py>` does it ahead, with progress")
     parser = options.get("tool_parser")
     if parser is None and has_tools:
         parser = engine.tool_parser
@@ -177,8 +190,19 @@ def plan(llm, *, has_tools: bool, environ: Optional[Mapping[str, str]] = None) -
         # Both engines compile kernels on first use and call `ninja` from their own environment
         child_env["PATH"] = bin_dir + os.pathsep + child_env.get("PATH", "")
     timeout = _number(options, "start_timeout_s", START_TIMEOUT_S, 10, None)
+    hung_after = _number(options, "hung_after_s", HUNG_AFTER_S, 10, None)
     return LaunchPlan(engine, model_name, f"http://127.0.0.1:{port}/v1", command, child_env, timeout, notes,
-                      gpu_memory)
+                      gpu_memory, hung_after)
+
+
+def _downloaded(repo: str, revision: Optional[str]) -> bool:
+    """Whether the engine will find the model in Hugging Face's cache. On disk only; True when unsure."""
+    try:
+        from fusion_runtime.catalog.download import in_engine_cache
+
+        return in_engine_cache(repo, revision=revision)
+    except Exception:
+        return True  # only decides whether to print a note
 
 
 def already_serving(launch: LaunchPlan, timeout_s: float = 2.0) -> bool:
@@ -214,7 +238,11 @@ def already_serving(launch: LaunchPlan, timeout_s: float = 2.0) -> bool:
 
 # What speech takes on the GPU beside the engine, in GB: rough, measured on a 3090 with
 # CTranslate2 float16 Whisper and Kokoro on onnxruntime-gpu. Used to warn, never to refuse.
-WHISPER_GB = {"tiny": 0.3, "base": 0.4, "small": 0.9, "medium": 2.0, "large": 3.6, "turbo": 2.0, "distil": 1.6}
+# Checked in order, the most specific first: "large-v3-turbo" and "distil-large-v3" also contain
+# "large", and matching that first counted them as the full large model.
+WHISPER_GB = (("turbo", 2.0), ("distil-large", 1.6), ("tiny", 0.3), ("base", 0.4), ("small", 0.9),
+              ("medium", 2.0), ("large", 3.6))
+WHISPER_DEFAULT_GB = 0.9  # a model named some other way: as much as small
 KOKORO_GB = 0.8
 CUDA_CONTEXT_GB = 0.8  # each library's CUDA context in fusion's process, together
 
@@ -268,7 +296,7 @@ def speech_gb(config) -> float:
     stt = getattr(config, "stt", None)
     if stt is not None and getattr(stt, "device", "cpu") in ("cuda", "auto"):
         model = str(getattr(stt, "model", "")).lower()
-        need += next((gb for size, gb in WHISPER_GB.items() if size in model), WHISPER_GB["small"])
+        need += next((gb for size, gb in WHISPER_GB if size in model), WHISPER_DEFAULT_GB)
     need += KOKORO_GB  # on the GPU whenever onnxruntime-gpu is installed; small enough to always count
     return round(need + CUDA_CONTEXT_GB, 1)
 
@@ -311,6 +339,9 @@ class LLMServer:
         self._watcher: Optional[threading.Thread] = None
         self.restarts = 0
         self.first_restart_delay_s = 2.0
+        self.liveness_every_s = LIVENESS_EVERY_S
+        self.hung_restarts = 0
+        self._ready = threading.Event()  # answering normally: the hung check only runs then
 
     @property
     def name(self) -> str:
@@ -320,8 +351,10 @@ class LLMServer:
         """Start the server and wait until it answers. Raises LaunchError if it exits or takes too long."""
         self._spawn()
         self._wait_ready(self._process)
+        self._ready.set()
         self._watcher = threading.Thread(target=self._watch, name="llm-server-watch", daemon=True)
         self._watcher.start()
+        threading.Thread(target=self._check_alive, name="llm-server-liveness", daemon=True).start()
 
     def stop(self, timeout_s: float = 20.0) -> None:
         self._stopping.set()
@@ -401,6 +434,63 @@ class LLMServer:
                 next_note += 60.0
             time.sleep(1.0)
 
+    def warm_up(self) -> bool:
+        """One tiny request, so compiling on the first request happens now. True when it answered."""
+        import httpx
+
+        started = time.monotonic()
+        body = {"model": self.launch.model_name, "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 1, "temperature": 0}
+        try:
+            response = httpx.post(self.launch.base_url.rstrip("/") + "/chat/completions", json=body,
+                                  timeout=self.launch.start_timeout_s)
+            ok = response.status_code == 200
+        except httpx.HTTPError:
+            ok = False
+        if ok:
+            self._log("info", f"{self.name} warmed in {time.monotonic() - started:.1f} s")
+        else:
+            self._log("warning", f"{self.name} didn't answer a warm-up request; the next call may be slow")
+        return ok
+
+    def _check_alive(self) -> None:
+        """Restart a server that's running but stopped answering (hung), the way a crash is restarted.
+
+        The watcher only sees a process that exits. A hung one stays up: every call times out behind it
+        and nothing restarts it (SGLang froze ~70 s with its process up on 5 Oct). Checked only while
+        it's ready, so a slow start or a restart in progress never counts.
+        """
+        import httpx
+
+        silent_since = None
+        while not self._stopping.wait(self.liveness_every_s):
+            if not self._ready.is_set():
+                silent_since = None
+                continue
+            try:
+                answered = httpx.get(self.launch.liveness_url, timeout=max(2.0, self.liveness_every_s)).status_code == 200
+            except httpx.HTTPError:
+                answered = False
+            now = time.monotonic()
+            if answered:
+                silent_since = None
+                continue
+            silent_since = silent_since or now
+            process = self._process
+            if now - silent_since < self.launch.hung_after_s or process is None or process.poll() is not None:
+                continue
+            self.hung_restarts += 1
+            self._ready.clear()
+            silent_since = None
+            self._log("error", f"{self.name} has been running but not answering for "
+                               f"{self.launch.hung_after_s:.0f} s (hung); restarting it")
+            _signal_group(process, signal.SIGTERM)
+            try:
+                process.wait(20)
+            except subprocess.TimeoutExpired:
+                _signal_group(process, signal.SIGKILL)
+            # the watcher sees it exit and restarts it, with the usual backoff and warm-up
+
     @property
     def pid(self) -> Optional[int]:
         return self._process.pid if self._process else None
@@ -411,6 +501,7 @@ class LLMServer:
             process = self._process
             started = time.monotonic()
             code = process.wait()
+            self._ready.clear()
             if self._stopping.is_set():
                 return
             if time.monotonic() - started > 300:
@@ -424,6 +515,8 @@ class LLMServer:
             try:
                 self._spawn()
                 self._wait_ready(self._process)
+                self.warm_up()  # a restarted server is cold again: its first-request work isn't a caller's
+                self._ready.set()
             except LaunchError as e:
                 self._log("error", str(e))
             except OSError as e:  # the program went away (environment deleted?): keep trying, say why
@@ -441,6 +534,8 @@ ENGINE_SERIES = {
                "kv_cache_used": ("sglang:token_usage",)},
 }
 SERVED_BY = {"vLLM": "vllm", "SGLang": "sglang", "llama-server": "llama_server"}
+# Engines whose /health generates a token: the monitor checks /metrics instead (see EngineMonitor.poll)
+METRICS_ARE_LIVENESS = ("sglang",)
 
 
 def parse_engine_metrics(text: str, engine: str) -> Dict[str, float]:
@@ -501,18 +596,21 @@ class EngineMonitor:
         from fusion_runtime.telemetry import telemetry
 
         before = self.state.get("state")
-        try:
-            healthy = (await client.get(self.health_url, timeout=3.0)).status_code == 200
-        except httpx.HTTPError:
-            healthy = False
-        state: Dict[str, Any] = {"engine": self.engine, "url": self.state["url"], "state": "up" if healthy else "down"}
-        if healthy and self.engine in ENGINE_SERIES:
+        numbers: Dict[str, Any] = {}
+        if self.engine in METRICS_ARE_LIVENESS:
+            # SGLang's /health runs a generation (one token) to prove the model works: polled every few
+            # seconds, that's the GPU never idle. Its /metrics page answering is proof enough it's alive,
+            # and it carries the numbers we want anyway: one cheap request instead of two.
+            healthy, numbers = await self._read_metrics(client)
+        else:
             try:
-                response = await client.get(self.metrics_url, timeout=3.0)
-                if response.status_code == 200:
-                    state.update(parse_engine_metrics(response.text, self.engine))
+                healthy = (await client.get(self.health_url, timeout=3.0)).status_code == 200
             except httpx.HTTPError:
-                pass
+                healthy = False
+            if healthy and self.engine in ENGINE_SERIES:
+                numbers = (await self._read_metrics(client))[1]
+        state: Dict[str, Any] = {"engine": self.engine, "url": self.state["url"], "state": "up" if healthy else "down"}
+        state.update(numbers)
         state["checked_at"] = round(time.time(), 1)
         self.state = state
         telemetry.emit("llm_server.state", level="debug", stage="llm",
@@ -521,6 +619,18 @@ class EngineMonitor:
             telemetry.emit("llm_server.up" if healthy else "llm_server.down",
                            level="info" if healthy else "error", stage="llm", engine=self.display, url=state["url"],
                            hint=None if healthy else "replies fail until it's back; frun up restarts a server it started")
+
+    async def _read_metrics(self, client):
+        """(answered, the engine's numbers) from its Prometheus page."""
+        import httpx
+
+        try:
+            response = await client.get(self.metrics_url, timeout=3.0)
+        except httpx.HTTPError:
+            return False, {}
+        if response.status_code != 200:
+            return False, {}
+        return True, parse_engine_metrics(response.text, self.engine)
 
     async def run(self) -> None:
         import asyncio

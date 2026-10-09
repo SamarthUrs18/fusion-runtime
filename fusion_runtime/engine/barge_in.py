@@ -35,13 +35,25 @@ class BargeInState:
     speaking_since: Optional[float] = None
     fired_at: Optional[float] = None  # time.monotonic() of the latest interruption
     _fired: bool = False
+    # Held off: this speech must be heard in full (a greeting that says "this call is recorded").
+    # Ends when the client reports it finished playing, or when the next reply starts.
+    protected: bool = False
 
     @property
     def speaking(self) -> bool:
         return (self.generating or self.playing) and not self._fired
 
+    @property
+    def can_interrupt(self) -> bool:
+        return self.speaking and not self.protected
+
+    def protect(self):
+        """Hold interruptions off until what's being said now has finished playing."""
+        self.protected = True
+
     def mark_speaking(self):
         self.generating = True
+        self.protected = False
         self._fired = False
         self.speaking_since = time.monotonic()
         self.interrupted.clear()
@@ -56,6 +68,7 @@ class BargeInState:
         self.playing = playing
         if not playing and not self.generating:
             self.speaking_since = None
+            self.protected = False  # the protected speech has been heard in full
 
     def fire(self):
         """Record an interruption: cancels in-flight generation and stops

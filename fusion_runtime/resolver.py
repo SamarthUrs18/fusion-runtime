@@ -435,6 +435,9 @@ def _served(stage, runtime: str, ref: str, family, options) -> ResolvedModel:
     if not url.startswith(("http://", "https://")):
         raise InvalidRequest(f"url must be the {name} server's address, like {default_url}; got {url!r}")
     options["model_name"] = model_name
+    # A model server does its first-request work (compiling, graphs) on the first call, which would
+    # otherwise be a caller's: warm it while loading. Not for a bare URL, which may be a paid API.
+    options.setdefault("warmup", True)
     return ResolvedModel(ModelSpec("llm", "openai_http", url, family, options), "url", "http",
                          metadata={"served_by": name})
 

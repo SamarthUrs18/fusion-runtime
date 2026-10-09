@@ -51,6 +51,16 @@ class TurnTrace:
     def at(self, name: str) -> Optional[float]:
         return self.marks[name][0] if name in self.marks else None
 
+    def awaiting_turn_end(self) -> bool:
+        """No turn end recorded since the caller last stopped speaking.
+
+        Once per turn, unless the caller spoke again after it: a turn end that got no reply (a
+        failed request, nothing transcribed) stays on the turn, and measuring the next end
+        against it gave a negative silence wait (-15 s on the 3090 pod).
+        """
+        ended, spoke = self.at("turn_end_detected"), self.at("speech_end")
+        return ended is None or (spoke is not None and spoke > ended)
+
     def between_ms(self, start: str, end: str) -> Optional[float]:
         a, b = self.at(start), self.at(end)
         return None if a is None or b is None else (b - a) * 1000

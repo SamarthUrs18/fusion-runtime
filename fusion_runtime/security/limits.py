@@ -24,6 +24,7 @@ class Limits:
     max_message_bytes: int = MEGABYTE  # audio frames are ~1 KB; anything this big is an attack
     max_turn_audio_s: float = 60.0  # one person talking without ever pausing (speech, not silence)
     max_silence_s: float = 60.0  # nobody speaks: the caller walked away with the line open. 0 = no limit
+    dead_audio_s: float = 3.0  # no frames, or only exact zeros, this long: tell the caller. 0 = off
     max_session_s: float = 900.0  # wall clock for one conversation
     idle_timeout_s: float = 60.0  # no audio and no messages: reclaim the slot
     connections_per_minute: int = 30  # per address, before authentication
@@ -48,6 +49,7 @@ class Limits:
             max_message_bytes=number("FUSION_MAX_MESSAGE_BYTES", cls.max_message_bytes),
             max_turn_audio_s=number("FUSION_MAX_TURN_AUDIO_S", cls.max_turn_audio_s),
             max_silence_s=number("FUSION_MAX_SILENCE_S", cls.max_silence_s),
+            dead_audio_s=number("FUSION_DEAD_AUDIO_S", cls.dead_audio_s),
             max_session_s=number("FUSION_MAX_SESSION_S", cls.max_session_s),
             idle_timeout_s=number("FUSION_IDLE_TIMEOUT_S", cls.idle_timeout_s),
             connections_per_minute=number("FUSION_CONNECTIONS_PER_MINUTE", cls.connections_per_minute),
@@ -161,6 +163,7 @@ class AudioBudget:
         self._turn_speech_start = 0.0
         self.last_voice = self.started  # someone spoke: the caller, or the agent
         self._agent_playing = False
+        self._agent_audio_until = self.started  # when the agent's audio sent so far finishes playing
 
     def message(self, size: int) -> None:
         if size > self.limits.max_message_bytes:
@@ -174,8 +177,6 @@ class AudioBudget:
         self.message(size)
         self.turn_bytes += size
         if speech_s is not None:
-            if self._speech_s is None:
-                self._turn_speech_start = 0.0
             self._speech_s = speech_s
         if last_speech is not None:
             self.last_voice = max(self.last_voice, last_speech)
@@ -191,9 +192,17 @@ class AudioBudget:
         if self._speech_s is not None:
             self._turn_speech_start = self._speech_s
 
-    def agent_spoke(self) -> None:
-        """The agent sent audio: the line isn't silent."""
-        self.last_voice = self._clock()
+    def agent_spoke(self, seconds: float = 0.0) -> None:
+        """The agent sent `seconds` of audio: the line isn't silent until it has played.
+
+        Replies are made faster than they play, so a long one is all sent well before the caller
+        has heard it. A client that reports playback says when it really ends; for one that
+        doesn't, the end is worked out from how much audio went out. After an interruption that
+        overestimates, which only makes the silence limit later, never early.
+        """
+        now = self._clock()
+        self.last_voice = max(self.last_voice, now)
+        self._agent_audio_until = max(self._agent_audio_until, now) + seconds
 
     def agent_playing(self, playing: bool) -> None:
         """The client says the agent's audio is (or stopped) coming out of its speaker."""
@@ -210,8 +219,9 @@ class AudioBudget:
             return OverLimit("idle",
                              f"nothing received for {self.limits.idle_timeout_s:.0f} seconds",
                              close_code=1000)
+        quiet_since = max(self.last_voice, self._agent_audio_until)
         if (self._speech_s is not None and self.limits.max_silence_s > 0 and not self._agent_playing
-                and now - self.last_voice > self.limits.max_silence_s):
+                and now - quiet_since > self.limits.max_silence_s):
             return OverLimit("silence",
                              f"no speech for {self.limits.max_silence_s:.0f} seconds",
                              close_code=1000)

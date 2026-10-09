@@ -37,6 +37,8 @@ class KokoroFamily:
         self.model_path = model_path
         self.options = options
         self._kokoro = None
+        self.degraded: Optional[str] = None
+        self.provider_warnings: List[Tuple[str, str]] = []
 
     def load(self) -> None:
         """Blocking: call from a worker thread."""
@@ -56,8 +58,10 @@ class KokoroFamily:
                 f"Kokoro voice pack (voices-v1.0.bin) not found in: {', '.join(str(c) for c in candidates)}. "
                 "Run: frun models pull"
             )
-        session = onnx_session(self.model_path)
+        session = onnx_session(self.model_path, found=self.provider_warnings)
         self._kokoro = Kokoro.from_session(session, str(voices))
+        # Running, but slower than it should be: health() reports it for as long as the server runs
+        self.degraded = next((w for w, _ in self.provider_warnings if "CPU" in w), None)
 
     @property
     def voices(self) -> Tuple[str, ...]:
@@ -99,7 +103,7 @@ class KokoroFamily:
 GPU_BUILD = "onnxruntime-gpu"
 
 
-def onnx_session(model_path: Path):
+def onnx_session(model_path: Path, found: Optional[list] = None):
     """The model's onnxruntime session: CUDA when this onnxruntime has it, else the CPU.
 
     kokoro-onnx asks for every provider the GPU build lists, TensorRT first, and
@@ -121,7 +125,11 @@ def onnx_session(model_path: Path):
     options = rt.SessionOptions()
     options.log_severity_level = 3  # errors only; a provider that didn't load is reported below, once
     session = rt.InferenceSession(str(model_path), sess_options=options, providers=providers)
-    for warning in provider_warnings(providers, session.get_providers(), _installed_builds()):
+    warnings = provider_warnings(providers, session.get_providers(), _installed_builds(),
+                                 cpu_on_purpose=named == "CPUExecutionProvider")
+    if found is not None:
+        found.extend(warnings)
+    for warning in warnings:
         from fusion_runtime.telemetry import telemetry
 
         telemetry.emit("tts.on_cpu" if "CPU" in warning[0] else "tts.onnxruntime", level="warning",
@@ -129,8 +137,13 @@ def onnx_session(model_path: Path):
     return session
 
 
-def provider_warnings(asked: List[str], got: List[str], builds: List[str]) -> List[Tuple[str, str]]:
-    """(what's wrong, the fix) for an onnxruntime that can't use the GPU it was installed for."""
+def provider_warnings(asked: List[str], got: List[str], builds: List[str],
+                      cpu_on_purpose: bool = False) -> List[Tuple[str, str]]:
+    """(what's wrong, the fix) for an onnxruntime that can't use the GPU it was installed for.
+
+    ONNX_PROVIDER=CPUExecutionProvider on a GPU machine is a choice (leaving the GPU to the LLM),
+    not a broken install, so it isn't reported as one.
+    """
     warnings = []
     if "onnxruntime" in builds and GPU_BUILD in builds:
         # Both install the same `onnxruntime` module, so whichever went in last wins, usually the
@@ -145,7 +158,7 @@ def provider_warnings(asked: List[str], got: List[str], builds: List[str]) -> Li
             f"text-to-speech is running on the CPU: {wanted_gpu[0]} didn't load",
             "onnxruntime-gpu 1.30+ needs CUDA 13 while torch uses CUDA 12; see "
             "https://fusion-runtime.dev/docs#gpu"))
-    elif GPU_BUILD in builds and not wanted_gpu:
+    elif GPU_BUILD in builds and not wanted_gpu and not cpu_on_purpose:
         warnings.append((
             "text-to-speech is running on the CPU: onnxruntime-gpu is installed but this onnxruntime "
             "has no CUDA provider",
