@@ -21,6 +21,7 @@ from fusion_runtime import __version__, web
 from fusion_runtime.agent import DEFAULT_PROMPT, Agent, greeting_for, load_agent
 from fusion_runtime.config import load_profile
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator
+from fusion_runtime.engine.audio_format import BadAudioFormat
 from fusion_runtime.env import load_env_file
 from fusion_runtime.security import (
     ALLOWED_ORIGINS_ENV,
@@ -630,6 +631,9 @@ async def voice_websocket(websocket: WebSocket):
             from fusion_runtime.engine.audio_watch import AudioWatch
 
             hearing = AudioWatch(limits.dead_audio_s)
+            from fusion_runtime.engine.audio_format import Intake
+
+            intake = Intake(orchestrator.config.sample_rate)
 
             def report_audio(change):
                 """The caller's audio stopped, went digitally silent, or came back: log it, tell the client."""
@@ -656,8 +660,14 @@ async def voice_websocket(websocket: WebSocket):
                             turns_seen = trace.turn_count
                             budget.turn_ended()
                         budget.audio(len(data), speech_s=trace.speech_s, last_speech=trace.last_speech_mono)
+                        data = intake.accept(data)  # whole samples; a WAV header gone; BadAudioFormat otherwise
+                        if intake.note:
+                            trace.event("audio.format_fixed", level="warning", stage="audio", hint=intake.note)
+                            _dispatch_event(websocket, {"type": "warning", "code": "wav_header", "message": intake.note})
+                            intake.note = None
                         report_audio(hearing.frame(data))
-                        await audio_queue.put(data)
+                        if data:
+                            await audio_queue.put(data)
                         continue
                     text = message.get("text")
                     if text is not None:
@@ -737,6 +747,14 @@ async def voice_websocket(websocket: WebSocket):
                 if exc is not None and not _client_gone(websocket, exc):
                     raise exc
 
+        except BadAudioFormat as e:
+            end_reason, error_code = "bad_audio_format", "bad_audio_format"
+            telemetry.emit("session.bad_audio", level="warning", stage="audio", key=principal.label, detail=str(e))
+            with contextlib.suppress(Exception):
+                await websocket.send_json({"type": "error", "code": "bad_audio_format", "message": str(e),
+                                           "retryable": False})
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1003)  # unsupported data
         except OverLimit as e:
             end_reason, error_code = e.reason, e.reason
             telemetry.emit("session.limited", level="warning", stage="server", reason=e.reason,
