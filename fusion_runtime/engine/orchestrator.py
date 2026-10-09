@@ -213,6 +213,7 @@ class PipelineOrchestrator:
         trace: Optional[SessionTrace] = None,
         tools: Sequence[Tool] = (),
         greeting: Optional[str] = None,
+        greeting_interruptible: bool = True,
     ) -> AsyncIterator[bytes]:
         """
         Main pipeline: Audio → STT → LLM → TTS → Audio
@@ -222,6 +223,7 @@ class PipelineOrchestrator:
         the LLM runtime must support tool calling (see check_tools).
 
         greeting — said as soon as the pipeline starts, before the caller speaks.
+        greeting_interruptible — False: talking over the greeting doesn't stop it.
 
         on_event(dict) — optional callback receiving live events:
           {"type": "transcript", "text": ..., "is_final": bool}
@@ -277,7 +279,7 @@ class PipelineOrchestrator:
             # Stage 2: LLM Streaming (consumes STT partials)
             llm_stream = self._llm_stage(
                 stt_stream, system_prompt, emit, turn_state, stt_reset, barge_in, trace, tools=tools,
-                greeting=greeting,
+                greeting=greeting, greeting_interruptible=greeting_interruptible,
             )
 
             # Stage 3: TTS Streaming (consumes LLM tokens)
@@ -499,6 +501,8 @@ class PipelineOrchestrator:
         residual echo of the bot's own voice as readily as on a real user.
         """
 
+        if not getattr(self.config.turn_detection, "interruptible", True):
+            return  # Turns(interruptible=False): the agent always finishes; the caller is answered after
         model = await self._load_vad_frame_model()
         if model is None:
             return  # no VAD available — can't detect barge-in at all
@@ -524,9 +528,9 @@ class PipelineOrchestrator:
             if not frames:
                 continue
 
-            if not barge_in.speaking:
+            if not barge_in.can_interrupt:
                 speech_run_ms = 0.0
-                continue  # nothing to interrupt right now
+                continue  # nothing to interrupt right now (or it's protected: a greeting heard in full)
             watched = []
             for frame, frame_start_sample in frames:
                 arrived = trace.arrival_time(frame_start_sample) if trace is not None else None
@@ -539,7 +543,7 @@ class PipelineOrchestrator:
             probs = await self._vad_probabilities(model, watched, sample_rate)
 
             for prob in probs:
-                if not barge_in.speaking:
+                if not barge_in.can_interrupt:
                     break  # fired (or the reply ended) while these frames were being checked
 
                 if prob >= threshold:
@@ -782,6 +786,7 @@ class PipelineOrchestrator:
         conversation: Optional[Conversation] = None,
         tools: Sequence[Tool] = (),
         greeting: Optional[str] = None,
+        greeting_interruptible: bool = True,
     ) -> AsyncIterator[str]:
         """LLM streaming, gated by real (forward-measured) silence rather
         than reacting only when new STT text happens to arrive.
@@ -1246,8 +1251,11 @@ class PipelineOrchestrator:
             last_bot_text = text
             if barge_in is not None:
                 barge_in.mark_speaking()
+                if not greeting_interruptible:
+                    barge_in.protect()
             if trace is not None:
-                trace.event("greeting.spoken", stage="tts", chars=len(text), **telemetry.content(text, "reply"))
+                trace.event("greeting.spoken", stage="tts", chars=len(text), interruptible=greeting_interruptible,
+                            **telemetry.content(text, "reply"))
             if emit:
                 emit({"type": "response", "text": text, "is_final": True, "greeting": True})
             for sentence in _sentences(text):

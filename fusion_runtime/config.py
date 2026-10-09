@@ -178,6 +178,9 @@ class TurnDetectionConfig(BaseModel):
     # Shorter stops sooner; longer ignores coughs, "mm-hm" and leftover echo of
     # the agent's own voice. Measured as sustained speech by Silero VAD.
     barge_in_min_speech_ms: int = 300
+    # False: the agent always finishes what it's saying; talking over it is heard and answered after.
+    # Turns(interruptible=False) in an agent file.
+    interruptible: bool = True
     # Text-domain self-echo rejection: a candidate "user" turn is discarded
     # (never sent to the LLM) if a long enough run of its words appears
     # verbatim, in order, inside the text the bot itself most recently

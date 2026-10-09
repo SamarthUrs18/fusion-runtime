@@ -220,6 +220,7 @@ class Agent:
     vad: Optional[VAD] = None
     tools: Sequence[Any] = ()  # functions the model can call; plain functions become tools
     greeting: Optional[str] = None  # said when a caller connects, before they speak; None = wait for them
+    greeting_interruptible: bool = True  # False: always heard in full ("this call may be recorded")
     profile: str = "development"  # the defaults everything above is applied to
     source: Optional[Path] = None  # the file it was loaded from, when it came from one
 

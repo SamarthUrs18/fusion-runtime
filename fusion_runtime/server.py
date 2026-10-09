@@ -607,6 +607,10 @@ async def voice_websocket(websocket: WebSocket):
                     # A client that detects interruptions itself, and has already
                     # stopped its own playback. Cancel generation so we stop
                     # producing a reply nobody is listening to any more.
+                    if barge_in.protected or not orchestrator.config.turn_detection.interruptible:
+                        trace.event("barge_in.ignored", stage="barge_in", source="client",
+                                    reason="protected" if barge_in.protected else "not_interruptible")
+                        return
                     barge_in.fire()
                     turn = trace.responding
                     if turn is not None:
@@ -724,6 +728,8 @@ async def voice_websocket(websocket: WebSocket):
                     tools=agent.tools if agent is not None else (),
                     # only when there is one, so an orchestrator written before greetings still fits
                     **({"greeting": greeting} if (greeting := greeting_for(agent)) else {}),
+                    **({"greeting_interruptible": False}
+                       if greeting and agent is not None and not agent.greeting_interruptible else {}),
                 )
                 try:
                     async for chunk in pipeline:
