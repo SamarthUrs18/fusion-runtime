@@ -123,6 +123,32 @@ calling on), llama-server (`--jinja`) or a hosted API. The in-process
 llama.cpp runtime can't, and `frun up` says so at startup. A runnable version is
 [`examples/tools_agent.py`](examples/tools_agent.py).
 
+### Answering from your own documents
+
+Retrieval is a tool like any other: a function that takes the caller's question and returns a few
+short passages, which the model answers from.
+
+```python
+@tool(timeout_s=3)
+def search_help(question: str) -> dict:
+    """Search the shop's help articles: returns, refunds, delivery, cancelling orders.
+
+    Args:
+        question: What the caller wants to know, in their words.
+    """
+    return {"passages": my_search(question, limit=3)}
+```
+
+`my_search` is yours: a vector database, Elasticsearch, your help centre's API.
+[`examples/knowledge_agent.py`](examples/knowledge_agent.py) is a runnable version with a small
+keyword search over the Markdown files in [`examples/knowledge/`](examples/knowledge/), in plain
+Python with nothing to install.
+
+On a call, two things matter more than in a chat window. A lookup costs a second model round
+before the caller hears anything, so if your knowledge fits in a page or two, put it in the prompt
+instead: that's faster than any search. And passages go into the prompt, so keep them short (a few
+sentences each, a few per search): long ones slow the model's first word.
+
 ## On your own site
 
 ```html
