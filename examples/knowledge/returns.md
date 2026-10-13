@@ -10,5 +10,5 @@ from the delivery address within two working days. Keep the item in its original
 
 ## When a return is refused
 The courier checks the item at pickup. A return is refused if the item is used, damaged by the
-customer, or missing parts or the box. The caller can raise a complaint from the order page if they
+customer, or missing parts or the box. You can raise a complaint from the order page if you
 think the refusal was wrong.

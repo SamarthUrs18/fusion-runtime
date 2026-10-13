@@ -77,7 +77,11 @@ async def one_session(index: int, url: str, key: str, audio: bytes, turns: int, 
 
     step = 16000 * 2 // 1000 * CHUNK_MS
     try:
-        await ws.recv()  # the config message
+        first = json.loads(await ws.recv())  # the config message, or why the call was refused
+        if first.get("type") == "error":
+            results.append({"caller": index, "turn": -1,
+                            "error": first.get("message") + (f" ({first['fix']})" if first.get("fix") else "")})
+            return
         # A real microphone never goes digitally silent, and fusion tells a caller sending exact
         # zeros that their mic is muted, so the quiet between turns is faint room noise.
         quiet = b"\x01\x00" * (step // 2)
@@ -140,8 +144,19 @@ async def one_session(index: int, url: str, key: str, audio: bytes, turns: int, 
 
 async def run_round(callers: int, url: str, key: str, audio: bytes, turns: int) -> list:
     results: list = []
-    await asyncio.gather(*[one_session(i, url, key, audio, turns, results) for i in range(callers)])
+    await asyncio.gather(*[_counted(i, url, key, audio, turns, results) for i in range(callers)])
     return results
+
+
+async def _counted(index: int, url: str, key: str, audio: bytes, turns: int, results: list) -> None:
+    """One caller; a call the server drops is a failed turn in the round, not the end of the run."""
+    from websockets.exceptions import ConnectionClosed
+
+    try:
+        await one_session(index, url, key, audio, turns, results)
+    except ConnectionClosed as e:
+        why = getattr(e.rcvd, "reason", "") or f"code {getattr(e.rcvd, 'code', '?')}"
+        results.append({"caller": index, "error": f"the server closed the call ({why}); see its log"})
 
 
 def summarize(callers: int, results: list, seconds: float) -> dict:
@@ -180,6 +195,27 @@ def report(row: dict, baseline: Optional[float]) -> str:
     return "\n".join(lines)
 
 
+def bottleneck(rows: List[dict]) -> str:
+    """Which stage grew most from the fewest callers to the most: where the next caller waits."""
+    measured = [r for r in sorted(rows, key=lambda r: r["callers"]) if r.get("stages_median_ms")]
+    if len(measured) < 2 or measured[0]["callers"] == measured[-1]["callers"]:
+        return "Run more than one round (--callers 1,4,8) to see which stage queues as callers are added."
+    first, last = measured[0]["stages_median_ms"], measured[-1]["stages_median_ms"]
+    growth = {stage: last[stage] - first.get(stage, 0) for stage in last}
+    stage = max(growth, key=growth.get)
+    span = f"from {measured[0]['callers']} to {measured[-1]['callers']} caller(s)"
+    if growth[stage] < 100:
+        return f"No stage grew by more than 100 ms {span}: nothing is queueing yet."
+    llm = {k: v for k, v in last.items() if k.startswith("llm")}
+    if stage.startswith("llm"):
+        return (f"The LLM is where callers wait: {stage} went from {first.get(stage, 0)} to {last[stage]} ms {span}.\n"
+                "An in-process model answers one caller at a time; put it on vLLM or SGLang (frun up starts them).")
+    held = ", ".join(f"{k} {v} ms" for k, v in llm.items())
+    return (f"Speech is where callers wait: {stage} went from {first.get(stage, 0)} to {last[stage]} ms {span}"
+            + (f", while the LLM held ({held})" if held else "") + ".\n"
+            "Whisper and Kokoro handle one caller at a time on each server; more callers need more servers.")
+
+
 def capacity(rows: List[dict], target_ms: float) -> str:
     """The most callers whose median stayed under the target, with every round below it clean too."""
     best = None
@@ -208,12 +244,8 @@ async def _bench(url: str, key: str, audio: bytes, callers: List[int], turns: in
             baseline = row["median_ms"]
         await asyncio.sleep(2)  # let sessions close before the next round claims slots
     typer.echo("")
-    if target_ms:
-        typer.echo(capacity(rows, target_ms))
-    else:
-        typer.echo("A median that climbs in step with the caller count means replies are queueing.\n"
-                   "Put the agent's LLM on vLLM or SGLang and run this again to see what changes;\n"
-                   "--target-ms 1500 turns the rounds into a capacity.")
+    typer.echo(bottleneck(rows))
+    typer.echo(capacity(rows, target_ms) if target_ms else "--target-ms 1500 turns the rounds into a capacity.")
     if json_out:
         json_out.write_text(json.dumps({"label": label or ws_url, "turns_per_caller": turns,
                                         "target_ms": target_ms, "rounds": rows}, indent=2) + "\n")

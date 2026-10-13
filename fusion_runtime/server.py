@@ -96,17 +96,19 @@ async def startup():
         agent = None
         config = load_profile(config_name)
     telemetry.emit(
-        "server.start", stage="server", version=__version__, profile=config_name, pid=os.getpid(),
+        "server.start", stage="server", version=__version__, pid=os.getpid(),
+        profile=agent.profile if agent is not None else config_name,  # an agent file names its own
         python=platform.python_version(), platform=f"{platform.system()} {platform.machine()}",
         log_format=os.getenv("FUSION_LOG_FORMAT", "pretty"), log_content=telemetry.log_content,
     )
-    _loop_monitor = LoopMonitor()
-    _loop_monitor.start()
-
     orchestrator = PipelineOrchestrator(config)
     await orchestrator.initialize()
     if agent is not None and agent.tools:
         orchestrator.check_tools(agent.tools)  # an LLM that can't call them fails now, not mid-call
+    # Watched from here on: loading models holds the loop for a second or two, before any call can
+    # connect, and reporting that on every start (pod test, 13 Oct) read like a fault
+    _loop_monitor = LoopMonitor()
+    _loop_monitor.start()
     _engine_monitor = _watch_llm_server(orchestrator)
     telemetry.emit("server.ready", stage="server", duration_ms=(time.monotonic() - _started_at) * 1000)
 
@@ -416,7 +418,7 @@ async def health(request: Request):
         models_loaded=orchestrator is not None and getattr(orchestrator, "ready", False),
         config={
             "stt": orchestrator.config.stt.provider.value if orchestrator else None,
-            "llm": orchestrator.config.llm.provider.value if orchestrator else None,
+            "llm": _llm_label(orchestrator) if orchestrator else None,
             "tts": orchestrator.config.tts.provider.value if orchestrator else None,
         },
     )
@@ -428,6 +430,18 @@ async def health(request: Request):
     body.active_sessions = len(_active_sessions)
     body.llm_server = _engine_monitor.snapshot() if _engine_monitor is not None else None
     return body
+
+
+def _llm_label(pipeline) -> str:
+    """The server the LLM is on (vllm, sglang, llama_server), else its provider. The provider alone
+    said llama_cpp for a model on vLLM: that's the config's default, not what runs (pod test, 13 Oct)."""
+    resolved = getattr(pipeline, "__dict__", {}).get("resolved_models", {}).get("llm")
+    served_by = resolved.metadata.get("served_by") if resolved is not None and resolved.metadata else None
+    if served_by:
+        from fusion_runtime.llm_server import SERVED_BY
+
+        return SERVED_BY.get(served_by, served_by)  # "sglang", as in llm_server.engine, not "SGLang"
+    return pipeline.config.llm.provider.value
 
 
 def _is_operator(request: Request) -> bool:

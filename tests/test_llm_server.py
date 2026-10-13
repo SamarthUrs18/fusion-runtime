@@ -230,6 +230,30 @@ def test_without_a_log_file_every_line_goes_to_the_terminal():
                                            "   vllm > vLLM ready in 40 s", "   vllm | Avg prompt throughput: 812 tokens/s"]
 
 
+def test_fusions_own_checks_stay_out_of_the_terminal(tmp_path):
+    """Pod test, 13 Oct: the liveness check and the load monitor each ask every 5 s, and their
+    access-log lines were all the terminal showed. A check that failed still shows."""
+    import io
+
+    out, log = io.StringIO(), tmp_path / "vllm.log"
+    printer = llm_server.LogPrinter(llm_server.ENGINES["vllm"], json_format=False, stream=out, file=log)
+    printer("ready", "vLLM ready in 40 s")
+    for line in ['INFO:     127.0.0.1:36190 - "GET /health HTTP/1.1" 200 OK',
+                 'INFO:     127.0.0.1:36224 - "GET /metrics HTTP/1.1" 200 OK',
+                 'INFO:     127.0.0.1:36200 - "GET /v1/models HTTP/1.1" 200 OK',
+                 'INFO:     127.0.0.1:36216 - "POST /v1/chat/completions HTTP/1.1" 200 OK',
+                 'ERROR:    127.0.0.1:36190 - "GET /health HTTP/1.1" 503 Service Unavailable']:
+        printer("server", line)
+    printer.close()
+    shown = out.getvalue()
+    assert "/metrics" not in shown and "GET /health HTTP/1.1\" 200" not in shown and "503" in shown
+    assert "GET /metrics" in log.read_text()  # still in the full log
+    terminal_only = io.StringIO()
+    bare = llm_server.LogPrinter(llm_server.ENGINES["vllm"], json_format=False, stream=terminal_only)
+    bare("server", 'INFO:     127.0.0.1:36190 - "GET /health HTTP/1.1" 200 OK')
+    assert terminal_only.getvalue() == ""  # without a file too: the container log has no use for them
+
+
 def test_with_a_log_file_the_terminal_keeps_the_start_and_trouble_only(tmp_path):
     import io
     import json
@@ -468,6 +492,9 @@ def test_a_server_that_hangs_with_its_process_up_is_restarted(engine_env, tmp_pa
         while time.monotonic() < deadline and not (server.pid != first and llm_server.already_serving(launch)):
             time.sleep(0.1)
         assert server.pid != first and server.restarts == 1
+        # fusion ended it, so it says so, not "exited (code -9)" as if it crashed again
+        assert any("stopped the hung vLLM" in m for _, m in lines)
+        assert not any("exited (code" in m for _, m in lines)
     finally:
         server.stop()
 

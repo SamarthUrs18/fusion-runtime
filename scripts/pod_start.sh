@@ -139,6 +139,11 @@ case "$device" in
 esac
 
 # ---- 3. the LLM server ------------------------------------------------------------------------
+# Before the engine starts: left to it, the first start spends 5-15 minutes downloading with no
+# progress shown. The engine's model goes into HF_HOME, where it looks; the agent's speech models too.
+step "models"
+frun models pull "$AGENT" "vllm:hf:$LLM_MODEL"
+
 step "$ENGINE ($LLM_MODEL on port $LLM_PORT)"
 # Only one engine fits next to speech on a 24 GB card: stop the other one if it's running.
 other_match="vllm serve"; [[ "$ENGINE" == vllm ]] && other_match="sglang.launch_server"
@@ -150,9 +155,9 @@ else
     echo "not installed; installing into $ENGINE_ENV (several GB, a few minutes)"
     python -m venv "$ENGINE_ENV"
     if [[ "$ENGINE" == vllm ]]; then
-      "$ENGINE_ENV/bin/pip" install -q --no-cache-dir "$VLLM_PACKAGE"
+      "$ENGINE_ENV/bin/pip" install --no-cache-dir --progress-bar off "$VLLM_PACKAGE"  # not -q: 10 silent minutes look hung
     else
-      "$ENGINE_ENV/bin/pip" install -q --no-cache-dir "sglang[all]"
+      "$ENGINE_ENV/bin/pip" install --no-cache-dir --progress-bar off "sglang[all]"
     fi
   fi
   # Its own venv, on PATH: both engines compile kernels on first use and call `ninja` from it.
@@ -183,9 +188,12 @@ if [[ ! -s "$WORKSPACE/key" ]]; then
   [[ -s "$WORKSPACE/key" ]] || fail "couldn't generate a key (frun key new)"
   echo "new key in $WORKSPACE/key"
 fi
-frun models pull "$AGENT"
 
 origin="${PUBLIC_URL:-}"
+# Runpod gives its variables to the container's first process only, not to an SSH shell
+if [[ -z "${RUNPOD_POD_ID:-}" && -r /proc/1/environ ]]; then
+  RUNPOD_POD_ID="$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^RUNPOD_POD_ID=//p')"
+fi
 if [[ -z "$origin" && -n "${RUNPOD_POD_ID:-}" ]]; then
   origin="https://$RUNPOD_POD_ID-$PORT.proxy.runpod.net"
 fi

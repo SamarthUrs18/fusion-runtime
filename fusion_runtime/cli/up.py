@@ -429,11 +429,27 @@ def public_url(host: str, port: int, environ: Optional[Mapping[str, str]] = None
     The pod's address is only guessed for a server listening on every interface: Runpod's proxy
     can't reach one bound to 127.0.0.1.
     """
+    from_os = environ is None
     environ = os.environ if environ is None else environ
     if environ.get(PUBLIC_URL_ENV, "").strip():
         return environ[PUBLIC_URL_ENV].strip().rstrip("/")
-    if host in ("0.0.0.0", "::") and environ.get("RUNPOD_POD_ID"):
-        return f"https://{environ['RUNPOD_POD_ID']}-{port}.proxy.runpod.net"
+    pod = environ.get("RUNPOD_POD_ID") or (_container_variable("RUNPOD_POD_ID") if from_os else None)
+    if host in ("0.0.0.0", "::") and pod:
+        return f"https://{pod}-{port}.proxy.runpod.net"
+    return None
+
+
+def _container_variable(name: str, path: str = "/proc/1/environ") -> Optional[str]:
+    """A variable the container was started with. Runpod sets its own (RUNPOD_POD_ID) for the
+    container's first process only, so a shell over SSH doesn't have them (pod test, 13 Oct)."""
+    try:
+        with open(path, "rb") as f:
+            for entry in f.read().split(b"\0"):
+                key, _, value = entry.partition(b"=")
+                if key.decode(errors="replace") == name and value:
+                    return value.decode(errors="replace")
+    except OSError:  # not Linux, or not ours to read
+        pass
     return None
 
 

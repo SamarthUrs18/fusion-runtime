@@ -32,6 +32,21 @@ def test_capacity_is_the_most_callers_under_the_target_without_failures():
     assert bench.capacity(rows, 100).startswith("No round stayed under 100 ms")
 
 
+def test_the_stage_that_grew_is_named_not_a_fixed_hint():
+    """Pod test, 13 Oct: on vLLM the old closing line still said to move the LLM to vLLM."""
+    from fusion_runtime.cli.bench import bottleneck
+
+    speech_bound = [{"callers": 1, "stages_median_ms": {"stt": 139, "llm first token": 43, "tts first audio": 383}},
+                    {"callers": 16, "stages_median_ms": {"stt": 329, "llm first token": 48, "tts first audio": 1540}}]
+    said = bottleneck(speech_bound)
+    assert said.startswith("Speech is where callers wait: tts first audio went from 383 to 1540 ms")
+    assert "LLM held (llm first token 48 ms)" in said and "vLLM" not in said
+    llm_bound = [{"callers": 1, "stages_median_ms": {"stt": 70, "llm queue": 0, "tts first audio": 300}},
+                 {"callers": 4, "stages_median_ms": {"stt": 80, "llm queue": 2200, "tts first audio": 350}}]
+    assert bottleneck(llm_bound).startswith("The LLM is where callers wait: llm queue went from 0 to 2200 ms")
+    assert "nothing is queueing" in bottleneck([{**speech_bound[0], "callers": 1}, {**speech_bound[0], "callers": 4}])
+
+
 def test_the_shipped_recordings_are_found_and_readable():
     for name in bench.RECORDINGS:
         assert len(bench.load_audio(bench.audio_path(name))) > 16000  # over half a second
@@ -48,3 +63,21 @@ def test_an_unreachable_server_is_named(monkeypatch):
     monkeypatch.setenv("FUSION_API_KEY", "")
     result = runner.invoke(app, ["bench", "--url", "ws://127.0.0.1:9", "--callers", "1", "--turns", "1"])
     assert result.exit_code == 1 and "Is the server running?" in result.output
+
+
+def test_a_call_the_server_drops_is_a_failure_not_a_crash(monkeypatch):
+    """Pod test, 13 Oct: the server closed calls with 1011 and frun bench died with a traceback."""
+    import asyncio
+
+    from fusion_runtime.cli import bench as bench_module
+    from websockets.exceptions import ConnectionClosedError
+    from websockets.frames import Close
+
+    async def dropped(index, url, key, audio, turns, results):
+        raise ConnectionClosedError(Close(1011, "internal error"), None)
+
+    monkeypatch.setattr(bench_module, "one_session", dropped)
+    results = asyncio.run(bench_module.run_round(2, "ws://x", "", b"", 1))
+    assert len(results) == 2 and all("closed the call (internal error)" in r["error"] for r in results)
+    row = bench_module.summarize(2, results, 1.0)
+    assert row["failed"] == 2 and "median_ms" not in row

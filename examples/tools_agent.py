@@ -24,6 +24,11 @@ ORDERS = {
 }
 
 
+def digits(spoken: str) -> str:
+    """Speech-to-text writes numbers its own way: "1,042", "#1042", "10 42". Keep the digits."""
+    return "".join(ch for ch in spoken if ch.isdigit())
+
+
 @tool
 async def order_status(order_id: str) -> dict:
     """Look up where an order is and when it will arrive.
@@ -31,7 +36,7 @@ async def order_status(order_id: str) -> dict:
     Args:
         order_id: The order number, digits only, as the caller reads it out.
     """
-    order = ORDERS.get(order_id.strip().lstrip("#"))
+    order = ORDERS.get(digits(order_id))
     if order is None:
         return {"found": False, "hint": "ask the caller to read the number again"}
     return {"found": True, **order}
@@ -47,6 +52,7 @@ def change_delivery(order_id: str, when: Literal["morning", "afternoon", "evenin
     """
     # An ordinary (not async) function runs on a worker thread, so a blocking
     # client library is fine here.
+    order_id = digits(order_id)
     if order_id not in ORDERS:
         return "no such order"
     return f"delivery for {order_id} moved to the {when}"
@@ -58,7 +64,8 @@ agent = Agent(
         "You are the order line for ShopKart. Use the tools to check orders and change deliveries; "
         "never guess an order's status. When you need to look something up, call the tool right away. "
         "You can only look up an order by its number: if the caller doesn't know it, say so. "
-        "Keep every answer to one short sentence."
+        "If the caller asks something unrelated, answer briefly and kindly, then ask how you can help "
+        "with their order. Keep every answer to one short sentence."
     ),
     stt=STT("whisper-small"),
     # frun up starts vLLM for this model (port 8002, 60% of the GPU, Qwen's tool-call format,

@@ -16,6 +16,7 @@ reachable from another machine; callers reach the agent, and the agent reaches i
 """
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -42,6 +43,7 @@ MAX_MODEL_LEN = 4096  # a voice call's context; longer reserves memory a call ne
 START_TIMEOUT_S = 900.0  # a first start downloads the model and compiles kernels: SGLang took ~10 min
 LOG_TAIL = 40  # lines kept to show when the server fails to start
 HUNG_AFTER_S = 60.0  # running but not answering this long: restart it, as if it had crashed
+STOP_WHILE_STARTING_S = 5.0  # how long a server still starting gets to stop before it's killed
 LIVENESS_EVERY_S = 5.0
 
 
@@ -342,6 +344,8 @@ class LLMServer:
         self.liveness_every_s = LIVENESS_EVERY_S
         self.hung_restarts = 0
         self._ready = threading.Event()  # answering normally: the hung check only runs then
+        self._stopped_hung = False  # the exit the watcher sees next was ours, not a crash
+        self._started_once = False  # a restart downloads nothing: its "still starting" note says less
 
     @property
     def name(self) -> str:
@@ -361,6 +365,10 @@ class LLMServer:
         process = self._process
         if process is None or process.poll() is not None:
             return
+        if not self._ready.is_set():
+            # Still starting: nothing to finish, and vLLM ignores SIGTERM until it's up, so Ctrl+C
+            # waited the full 20 s before the kill (pod test, 13 Oct)
+            timeout_s = min(timeout_s, STOP_WHILE_STARTING_S)
         self._log("info", f"stopping {self.name}")
         _signal_group(process, signal.SIGTERM)
         try:
@@ -418,6 +426,7 @@ class LLMServer:
                 raise LaunchError(f"{self.name} exited while starting (exit code {code}). Its last lines:\n{tail}")
             try:
                 if httpx.get(self.launch.health_url, timeout=2.0).status_code == 200:
+                    self._started_once = True
                     self._log("ready", f"{self.name} ready in {time.monotonic() - started:.0f} s")
                     return
             except httpx.HTTPError:
@@ -429,8 +438,8 @@ class LLMServer:
                                   "A first start downloads the model and compiles kernels; if that's what's "
                                   "happening, raise start_timeout_s")
             if waited > next_note:
-                self._log("info", f"{self.name} still starting ({waited:.0f} s); a first start downloads "
-                                  "the model and compiles kernels")
+                self._log("info", f"{self.name} still starting ({waited:.0f} s)" + (
+                    "" if self._started_once else "; a first start downloads the model and compiles kernels"))
                 next_note += 60.0
             time.sleep(1.0)
 
@@ -439,8 +448,9 @@ class LLMServer:
         import httpx
 
         started = time.monotonic()
+        # Sampled like a call (see OpenAIHTTPLLM._warm_up): a greedy request skips SGLang's sampling kernel
         body = {"model": self.launch.model_name, "messages": [{"role": "user", "content": "Hi"}],
-                "max_tokens": 1, "temperature": 0}
+                "max_tokens": 1, "temperature": 0.7, "top_p": 0.9}
         try:
             response = httpx.post(self.launch.base_url.rstrip("/") + "/chat/completions", json=body,
                                   timeout=self.launch.start_timeout_s)
@@ -484,6 +494,7 @@ class LLMServer:
             silent_since = None
             self._log("error", f"{self.name} has been running but not answering for "
                                f"{self.launch.hung_after_s:.0f} s (hung); restarting it")
+            self._stopped_hung = True
             _signal_group(process, signal.SIGTERM)
             try:
                 process.wait(20)
@@ -507,8 +518,12 @@ class LLMServer:
             if time.monotonic() - started > 300:
                 delay = self.first_restart_delay_s  # it ran for a while: this is a new problem, not the same one again
             self.restarts += 1
-            self._log("error", f"{self.name} exited (code {code}); calls can't get replies until it's back. "
-                               f"Restarting in {delay:.0f} s")
+            if self._stopped_hung:  # we ended it: "exited (code -9)" read like a second failure
+                self._stopped_hung = False
+                self._log("info", f"stopped the hung {self.name}; starting it again in {delay:.0f} s")
+            else:
+                self._log("error", f"{self.name} exited (code {code}); calls can't get replies until it's "
+                                   f"back. Restarting in {delay:.0f} s")
             if self._stopping.wait(delay):
                 return
             delay = min(delay * 2, 60.0)
@@ -693,6 +708,8 @@ class LogPrinter:
                 self._file.write(message + "\n" if level == "server" else f"--- {stamp} fusion: {message}\n")
             if level == "ready":
                 self._starting = False
+            if level == "server" and _OWN_CHECK.search(message):
+                return  # fusion's own health and load checks, every few seconds: in the file only
             if self._file is None or level != "server" or self._starting or _looks_like_trouble(message):
                 self.stream.write(self._format(level, message) + "\n")
                 self.stream.flush()
@@ -714,6 +731,9 @@ class LogPrinter:
 
 
 _TROUBLE = ("WARNING", "ERROR", "CRITICAL", "Traceback", "Exception", "Error:")
+# The access-log line for one of fusion's own checks that went fine: the liveness check and the load
+# monitor each ask every 5 s, which filled the terminal with nothing else (pod test, 13 Oct)
+_OWN_CHECK = re.compile(r'127\.0\.0\.1:\d+ - "GET /(?:health|metrics|v1/models) HTTP/[\d.]+" 200')
 
 
 def _looks_like_trouble(line: str) -> bool:

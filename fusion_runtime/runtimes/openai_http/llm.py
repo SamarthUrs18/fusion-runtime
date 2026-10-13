@@ -156,10 +156,16 @@ class OpenAIHTTPLLM(LLMRuntime):
         """
         import time
 
+        from fusion_runtime.config import LLMConfig
         from fusion_runtime.telemetry import telemetry
 
+        # Sampled the way calls are, not greedily: SGLang builds its sampling kernel on the first
+        # sampled request, minutes on a fresh machine, and a temperature-0 warm-up skipped it, so the
+        # first caller's request timed out instead (pod test, 13 Oct)
+        defaults = LLMConfig.model_fields
         body = {**(self.spec.options.get("extra_body") or {}), "model": self.model_name,
-                "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 1, "temperature": 0}
+                "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 1,
+                "temperature": defaults["temperature"].default, "top_p": defaults["top_p"].default}
         started = time.perf_counter()
         try:
             response = await self.client.post("/chat/completions", json=body, timeout=timeout_s)

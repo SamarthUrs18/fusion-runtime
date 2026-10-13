@@ -127,7 +127,7 @@ def pull(
                 break
         raise typer.Exit(1)
 
-    for ref in engine_refs:
+    for ref in dict.fromkeys(engine_refs):  # the agent's model, named again on the command line: once
         try:
             fetched = pull_for_engine(ref, log=typer.echo, force=force)
         except (ModelAccessDenied, DownloadError) as e:

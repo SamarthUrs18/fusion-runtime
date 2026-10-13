@@ -10,4 +10,4 @@ Same-day delivery is available in Bengaluru, Mumbai and Delhi for orders placed 
 
 ## Changing the address
 The delivery address can be changed in the app until the order is shipped. After that, it can't
-be changed; the caller can refuse the delivery and order again.
+be changed; you can refuse the delivery and order again.

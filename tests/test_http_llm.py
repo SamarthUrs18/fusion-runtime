@@ -302,6 +302,8 @@ async def test_a_model_server_is_warmed_while_loading():
         telemetry.remove_sink(sink)
     warm = server.bodies[0]
     assert warm["max_tokens"] == 1 and warm["messages"] == [{"role": "user", "content": "Hi"}]
+    # sampled like a call: a greedy warm-up left SGLang's sampling kernel for the first caller to build
+    assert warm["temperature"] > 0 and 0 < warm["top_p"] < 1
     assert [e.name for e in sink.events if e.name.startswith("llm.warm")] == ["llm.warmed"]
 
 

@@ -96,17 +96,19 @@ def search_help(question: str) -> dict:
     found = index.search(question)
     if not found:
         return {"found": False, "hint": "nothing in the help articles matches; say you don't know"}
-    return {"found": True, "passages": found}
+    # Said with the results, where the model is looking: without it, a 7B model reads out every passage
+    return {"found": True, "passages": found,
+            "hint": "answer only what the caller asked, in one short sentence, from these"}
 
 
 agent = Agent(
     name="shopkart-help",
     prompt=(
-        "You are the help line for ShopKart, an online shop. For any question about returns, refunds, "
-        "delivery or cancelling, call search_help right away and answer only from what it returns; "
-        "never answer those from memory. If it finds nothing, say you don't have that information. "
-        "You're speaking on a call: answer in one or two short sentences, with no lists or links, "
-        "and don't mention the articles."
+        # One rule a small model can't misjudge: search every time. Asked to decide which questions
+        # need a search, a 7B model skipped it and made up delivery charges.
+        "You are the help line for ShopKart, an online shop. For every question the caller asks, call "
+        "search_help first, then answer only from what it returns, never from memory. If it finds "
+        "nothing, say you don't have that information. You're on a call: one short sentence, no lists."
     ),
     stt=STT("whisper-small"),
     llm=LLM("vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ", max_tokens=200, max_tool_rounds=2),

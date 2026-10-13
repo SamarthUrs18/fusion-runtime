@@ -166,3 +166,16 @@ def test_a_turn_discarded_as_the_agents_own_echo_is_not_reported_as_an_exchange(
     collect({"type": "turn.trace", "summary": {"outcome": "completed", "ttfa_ms": 900}})
     assert [(t.user, t.agent) for t in turns] == [("a real question", "a real answer")]
     assert turns[0].metrics["ttfa_ms"] == 900
+
+
+def test_health_names_the_server_the_llm_is_on():
+    """Pod test, 13 Oct: /health said llama_cpp, the config's default provider, for a model on vLLM."""
+    from types import SimpleNamespace
+
+    from fusion_runtime.config import PipelineConfig
+
+    on_vllm = SimpleNamespace(config=PipelineConfig(),
+                              resolved_models={"llm": SimpleNamespace(metadata={"served_by": "vllm"})})
+    assert server._llm_label(on_vllm) == "vllm"
+    in_process = SimpleNamespace(config=PipelineConfig(), resolved_models={})
+    assert server._llm_label(in_process) == PipelineConfig().llm.provider.value

@@ -66,3 +66,14 @@ def test_a_pod_shows_its_public_link_not_localhost():
     assert public_url("127.0.0.1", 8000, {"FUSION_PUBLIC_URL": "https://voice.example.com"}) == \
         "https://voice.example.com"
     assert public_url("0.0.0.0", 8000, {}) is None
+
+
+def test_a_pods_id_is_found_from_an_ssh_session(tmp_path):
+    """Runpod gives RUNPOD_POD_ID to the container's first process only, not to SSH shells."""
+    from fusion_runtime.cli.up import _container_variable
+
+    environ = tmp_path / "environ"
+    environ.write_bytes(b"PATH=/usr/bin\0RUNPOD_POD_ID=l1xlz0nqytsoiv\0HF_HOME=/workspace\0")
+    assert _container_variable("RUNPOD_POD_ID", str(environ)) == "l1xlz0nqytsoiv"
+    assert _container_variable("RUNPOD_GPU_COUNT", str(environ)) is None
+    assert _container_variable("RUNPOD_POD_ID", str(tmp_path / "missing")) is None

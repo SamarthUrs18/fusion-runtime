@@ -27,6 +27,9 @@ Requires Python 3.11–3.13.
 pip install fusion-runtime
 ```
 
+The first install can sit quiet for a few minutes: where there's no ready-made llama.cpp for your
+machine, pip builds it. That's normal.
+
 An agent is one file. This is the whole thing:
 
 ```python
