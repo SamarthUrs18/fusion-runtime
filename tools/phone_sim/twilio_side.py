@@ -13,18 +13,21 @@ The signing and the message formats are written here from Twilio's documentation
 from fusion, so a mistake on fusion's side shows up as a failed call instead of agreeing with
 itself. μ-law comes from fusion (it's checked against the reference encoder in fusion's tests).
 """
-import asyncio
 import base64
 import hashlib
 import hmac
 import json
-import time
 import uuid
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-PHONE_RATE = 8000
+import numpy as np
+from phone_call import (  # noqa: F401 - Playback is part of this module's API
+    PHONE_RATE,
+    Call,
+    Playback,
+)
+
 FRAME_MS = 20
 FRAME_BYTES = PHONE_RATE * FRAME_MS // 1000  # one byte a sample in μ-law
 
@@ -86,123 +89,49 @@ def stop(stream_sid: str, call_sid: str, sequence: int) -> str:
 
 # ---- the call ----------------------------------------------------------------------------------
 
-@dataclass
-class Playback:
-    """What the caller's phone has been sent and not yet played, as Twilio keeps it.
+class TwilioCall(Call):
+    provider = "twilio"
 
-    `queued_s` tells how much audio is ahead of a new mark. Real speakers report that themselves
-    (the interactive simulator passes DuplexAudio's); without one, audio plays in real time on a
-    clock, which is what a recording or a test needs.
-    """
-    queued_s: Optional[Callable[[], float]] = None
-    _until: float = 0.0  # when the audio sent so far finishes, without a speaker
-    marks: List[Tuple[float, str]] = field(default_factory=list)  # (plays at, name)
-
-    def queue(self, seconds: float) -> None:
-        self._until = max(self._until, time.monotonic()) + seconds
-
-    def ahead_s(self) -> float:
-        return self.queued_s() if self.queued_s is not None else max(0.0, self._until - time.monotonic())
-
-    def add_mark(self, name: str) -> None:
-        self.marks.append((time.monotonic() + self.ahead_s(), name))
-
-    def due(self) -> List[str]:
-        now = time.monotonic()
-        ready = [name for at, name in self.marks if at <= now]
-        self.marks = [(at, name) for at, name in self.marks if at > now]
-        return ready
-
-    def clear(self) -> List[str]:
-        """Drop what hasn't played; the marks waiting behind it come back at once."""
-        self._until = time.monotonic()
-        pending, self.marks = [name for _, name in self.marks], []
-        return pending
-
-
-class Call:
-    """One call to fusion, from Twilio's side of the stream."""
-
-    def __init__(self, websocket, stream_sid: str, call_sid: str, playback: Playback,
-                 on_audio: Callable[[bytes], None] = lambda pcm: None, on_note: Callable[[str], None] = print,
-                 on_clear: Callable[[], None] = lambda: None):
-        self.ws = websocket
-        self.stream_sid, self.call_sid = stream_sid, call_sid
-        self.playback = playback
-        self.on_audio = on_audio  # 8 kHz int16 PCM of the agent, as the phone would play it
-        self.on_note = on_note
-        self.on_clear = on_clear  # the speaker drops what it hasn't played
-        self.sequence = 2  # connected and start came first
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.chunk = 0
-        self.agent_audio_s = 0.0
-        self.connected_at = time.monotonic()
-        self.first_audio_at: Optional[float] = None  # the greeting's first sound, if the agent greets
-        self.clears = 0
-        self.closed: Optional[str] = None
 
-    async def send_caller_audio(self, mulaw: bytes) -> None:
-        """The caller speaking: 20 ms media messages, as Twilio sends them."""
-        for i in range(0, len(mulaw) - FRAME_BYTES + 1, FRAME_BYTES):
-            self.sequence += 1
-            self.chunk += 1
-            await self.ws.send(media(self.stream_sid, mulaw[i:i + FRAME_BYTES], self.sequence, self.chunk,
-                                     self.chunk * FRAME_MS))
-
-    async def hang_up(self) -> None:
-        self.sequence += 1
-        await self.ws.send(stop(self.stream_sid, self.call_sid, self.sequence))
-        await self.ws.close()
-
-    async def run(self) -> None:
-        """Play and acknowledge what fusion sends until the stream closes."""
+    async def send_caller_audio(self, samples: np.ndarray) -> None:
         from fusion_runtime.phone import mulaw as codec
 
-        echo = asyncio.create_task(self._echo_marks())
-        try:
-            async for raw in self.ws:
-                message = json.loads(raw)
-                event = message.get("event")
-                if event == "media":
-                    audio = base64.b64decode(message["media"]["payload"])
-                    if self.first_audio_at is None:
-                        self.first_audio_at = time.monotonic()
-                        self.on_note(f"first audio {(self.first_audio_at - self.connected_at) * 1000:.0f} ms "
-                                     "after the call connected")
-                    seconds = len(audio) / PHONE_RATE
-                    self.agent_audio_s += seconds
-                    self.playback.queue(seconds)
-                    self.on_audio(codec.decode(audio).tobytes())
-                elif event == "mark":
-                    self.playback.add_mark(message["mark"]["name"])
-                elif event == "clear":
-                    self.clears += 1
-                    self.on_clear()
-                    self.on_note("fusion cleared the phone's audio (the caller interrupted)")
-                    for name in self.playback.clear():
-                        await self._send_mark(name)
-                else:
-                    self.on_note(f"unexpected message from fusion: {event}")
-        except Exception as e:  # the stream closing is how fusion ends a call
-            self.closed = f"{type(e).__name__}: {e}"
-        finally:
-            echo.cancel()
-            code = getattr(self.ws, "close_code", None)
-            self.closed = self.closed or f"fusion closed the stream (code {code})"
+        data = codec.encode(samples)
+        for i in range(0, len(data) - FRAME_BYTES + 1, FRAME_BYTES):
+            self.chunk += 1
+            await self.ws.send(media(self.stream_id, data[i:i + FRAME_BYTES], self.next_sequence(), self.chunk,
+                                     self.chunk * FRAME_MS))
 
-    async def _echo_marks(self) -> None:
-        while True:
-            await asyncio.sleep(0.01)
-            for name in self.playback.due():
-                await self._send_mark(name)
+    def read(self, message: dict):
+        from fusion_runtime.phone import mulaw as codec
 
-    async def _send_mark(self, name: str) -> None:
-        self.sequence += 1
-        await self.ws.send(mark(self.stream_sid, name, self.sequence))
+        event = message.get("event")
+        if event == "media":
+            return "audio", codec.decode(base64.b64decode(message["media"]["payload"])).tobytes()
+        if event == "mark":
+            return "marker", message["mark"]["name"]
+        if event == "clear":
+            return "clear", None
+        return "other", event
+
+    async def acknowledge(self, name: str) -> None:
+        await self.ws.send(mark(self.stream_id, name, self.next_sequence()))
+
+    async def hang_up(self) -> None:
+        await self.ws.send(stop(self.stream_id, self.call_id, self.next_sequence()))
+        await self.ws.close()
+
+
+# Kept for the tests and the simulator: the playback model and the call, under their old names
+Call = TwilioCall
 
 
 async def place_call(base_url: str, auth_token: str, playback: Playback, caller: str = "+15550100001",
                      called: str = "+15550100999", **call_options):
-    """Ring fusion: the signed webhook, then the stream it asks for. Returns the open Call, or raises
+    """Ring fusion: the signed webhook, then the stream it asks for. Returns the open call, or raises
     with what fusion answered instead."""
     import httpx
     import websockets
@@ -221,4 +150,4 @@ async def place_call(base_url: str, auth_token: str, playback: Playback, caller:
     stream_sid = "MZ" + uuid.uuid4().hex
     await ws.send(connected())
     await ws.send(start(stream_sid, call_sid, stream_params))
-    return Call(ws, stream_sid, call_sid, playback, **call_options)
+    return TwilioCall(ws, stream_sid, call_sid, playback, **call_options)

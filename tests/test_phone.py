@@ -237,3 +237,125 @@ async def test_playback_follows_twilios_marks():
     assert states == [True]  # one reply still playing
     await twilio_says(twilio_side.mark("MZ1", marks[1]["mark"]["name"], 6))
     assert states == [True, False]
+
+
+# ---- Exotel and Plivo --------------------------------------------------------------------------
+
+import exotel_side  # noqa: E402
+import plivo_side  # noqa: E402
+from fusion_runtime.phone import exotel, plivo  # noqa: E402
+
+KEY = "frun_test_" + "k" * 32
+
+
+@pytest.fixture
+def keyed(monkeypatch):
+    """A server with a key, as an Exotel call needs: the applet's URL carries it."""
+    monkeypatch.setenv("FUSION_LOG_FORMAT", "off")
+    monkeypatch.setenv("FUSION_ACCEPTED_KEYS", f"exotel:{KEY}")
+    monkeypatch.setenv(plivo.AUTH_TOKEN_ENV, TOKEN)
+    monkeypatch.delenv("FUSION_PUBLIC_URL", raising=False)
+    monkeypatch.setattr(server, "PipelineOrchestrator", FakeOrchestrator)
+    FakeOrchestrator.heard = []
+    sink = ListSink()
+    with TestClient(server.app, client=("203.0.113.7", 40000)) as client:
+        telemetry.add_sink(sink)
+        try:
+            yield client, sink
+        finally:
+            telemetry.remove_sink(sink)
+
+
+def basic(key):
+    return "Basic " + base64.b64encode(f"fusion:{key}".encode()).decode()
+
+
+def test_an_exotel_call_is_answered_in_16_bit_pcm_and_whole_chunks(keyed):
+    client, sink = keyed
+    speech = (np.random.default_rng(2).normal(0, 2000, 1600 * 6)).astype("<i2").tobytes()  # 0.6 s at 16 kHz
+    with client.websocket_connect("/v1/phone/exotel/stream?sample-rate=16000",
+                                  headers={"Authorization": basic(KEY)}) as ws:
+        ws.send_text(exotel_side.connected())
+        ws.send_text(exotel_side.start("MZ1", "CA1", 16000, "+919800000001", "+918000000999"))
+        for i in range(6):
+            ws.send_text(exotel_side.media("MZ1", speech[i * 3200:(i + 1) * 3200], i + 2, i + 1, (i + 1) * 100))
+        sent = []
+        while not any(m["event"] == "clear" for m in sent) or not any(m["event"] == "mark" for m in sent):
+            sent.append(json.loads(ws.receive_text()))
+        ws.send_text(exotel_side.stop("MZ1", "CA1", 99))
+    # 16 kHz in, so the pipeline gets the caller as sent: 100 ms is 3200 bytes
+    assert FakeOrchestrator.heard and sum(map(len, FakeOrchestrator.heard)) == pytest.approx(3200 * 6, rel=0.05)
+    media = [base64.b64decode(m["media"]["payload"]) for m in sent if m["event"] == "media"]
+    assert media and all(len(c) == 3200 for c in media)  # Exotel: at least 3200 bytes, a multiple of 320
+    assert all(m.get("stream_sid") == "MZ1" for m in sent)
+    start = sink.named("session.start")[0]
+    assert start.attrs["transport"] == "exotel" and start.attrs["key"] == "exotel"
+
+
+def test_an_exotel_stream_without_a_good_key_is_refused(keyed):
+    client, sink = keyed
+    from starlette.websockets import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect) as closed, \
+            client.websocket_connect("/v1/phone/exotel/stream", headers={"Authorization": basic("wrong")}):
+        pass
+    assert closed.value.code == 1008 and sink.named("auth.failed")
+
+
+def test_plivo_and_fusion_sign_the_same_way():
+    url, nonce = "wss://voice.example.com/v1/phone/plivo/stream", "12345"
+    good = plivo_side.sign(TOKEN, url, nonce)
+    assert plivo.signature(TOKEN, url, nonce) == good
+    assert plivo.valid_signature(TOKEN, [url], nonce, good)
+    # Plivo's examples build the URL from the connection: https or wss, either is taken
+    assert plivo.valid_signature(TOKEN, ["https://voice.example.com/v1/phone/plivo/stream"], nonce, good)
+    assert plivo.valid_signature(TOKEN, [url], nonce, f"stale,{good}")  # a rotated token's two signatures
+    assert not plivo.valid_signature(TOKEN, [url], "other", good)
+    assert not plivo.valid_signature("another-account", [url], nonce, good)
+
+
+def test_a_plivo_call_is_answered_with_checkpoints(keyed):
+    client, sink = keyed
+    reply = client.post("/v1/phone/plivo", data={"CallUUID": "c-1", "From": "+15550100001", "To": "+15550100999"})
+    url, attributes, _ = plivo_side.parse_stream_xml(reply.text)
+    assert url == "ws://testserver/v1/phone/plivo/stream"
+    assert attributes["bidirectional"] == "true" and attributes["contentType"] == "audio/x-mulaw;rate=8000"
+    nonce = "n-1"
+    noise = mulaw.encode(np.random.default_rng(3).normal(0, 2000, 160 * 12))
+    with client.websocket_connect("/v1/phone/plivo/stream", headers={
+            "X-Plivo-Signature-V3": plivo_side.sign(TOKEN, url, nonce), "X-Plivo-Signature-V3-Nonce": nonce}) as ws:
+        ws.send_text(plivo_side.start("s-1", "c-1"))
+        for i in range(12):
+            ws.send_text(plivo_side.media("s-1", noise[i * 160:(i + 1) * 160], i + 2, i + 1, (i + 1) * 20))
+        sent = []
+        while not any(m["event"] == "clearAudio" for m in sent) or not any(m["event"] == "checkpoint" for m in sent):
+            sent.append(json.loads(ws.receive_text()))
+    plays = [m for m in sent if m["event"] == "playAudio"]
+    assert plays and all(m["media"]["contentType"] == "audio/x-mulaw" and m["media"]["sampleRate"] == 8000
+                         for m in plays)
+    assert sink.named("session.start")[0].attrs["transport"] == "plivo"
+
+
+def test_an_unsigned_plivo_stream_is_refused(keyed):
+    client, _ = keyed
+    from starlette.websockets import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect) as closed, client.websocket_connect("/v1/phone/plivo/stream", headers={
+            "X-Plivo-Signature-V3": "forged", "X-Plivo-Signature-V3-Nonce": "n"}):
+        pass
+    assert closed.value.code == 1008
+
+
+async def test_the_end_of_a_reply_goes_out_whole_not_cut():
+    """A reply's last partial frame waits for more, and goes out padded once the reply has ended."""
+    import asyncio
+
+    link = exotel.ExotelLink(_Socket(), exotel.Start("MZ1", "CA1", 16000), pipeline_rate=16000, reply_rate=24000)
+    link.controls = lambda message: None
+    await link.send_audio((np.ones(6000, dtype=np.int16) * 3000).tobytes())  # 250 ms: two chunks and a half
+    media = [m for m in link.websocket.sent if m["event"] == "media"]
+    assert len(media) == 2 and not any(m["event"] == "mark" for m in link.websocket.sent)  # the tail waits
+    await asyncio.sleep(0.1)
+    media = [base64.b64decode(m["media"]["payload"]) for m in link.websocket.sent if m["event"] == "media"]
+    assert len(media) == 3 and all(len(c) == 3200 for c in media)  # padded to a whole chunk
+    assert link.websocket.sent[-1]["event"] == "mark"

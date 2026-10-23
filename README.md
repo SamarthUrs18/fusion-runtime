@@ -166,6 +166,36 @@ site embeds. With no `url` it connects back to wherever the script came from.
 Browsers only allow a microphone on `https://`, so a deployment needs TLS and `wss://`. A page
 never holds an API key: your backend mints it a short-lived token.
 
+## Phone calls
+
+Keep your own number and your provider account (and its KYC); the provider streams each call to
+fusion, and the agent answers it. Twilio, Exotel and Plivo:
+
+| Provider | Point the number at | Set where fusion runs |
+|---|---|---|
+| Twilio | voice webhook "A call comes in": `https://<server>/v1/phone/twilio` (POST) | `FUSION_TWILIO_AUTH_TOKEN`: the account's auth token |
+| Exotel | a Voicebot applet in the call flow: `wss://fusion:<key>@<server>/v1/phone/exotel/stream?sample-rate=16000` | `FUSION_ACCEPTED_KEYS`, with the key in that URL |
+| Plivo | the number's answer URL: `https://<server>/v1/phone/plivo` (POST) | `FUSION_PLIVO_AUTH_TOKEN`: the account's auth token |
+
+Each request is checked before a call is taken: Twilio's webhook signature, the key in Exotel's
+URL, Plivo's signature on the stream. Behind a proxy, set `FUSION_PUBLIC_URL` to the address the
+provider calls (on a Runpod pod `frun up` sets it), since that's the address they sign.
+
+A call gets everything a browser conversation does: the same limits, interruption (the provider
+drops the agent's unplayed audio the moment the caller talks over it), tools and logs, with
+`transport=twilio` and the call's id on `session.start`. On top of that:
+
+- The greeting is made when the server starts, so a caller hears it within ~50 ms.
+- A full server answers "all our lines are busy" rather than dropping the call.
+- A dead line is faint hiss, not silence: nothing from the caller above `FUSION_PHONE_FLOOR_RMS`
+  (40) for `FUSION_DEAD_LINE_S` (10 s) is logged as a quiet line, and every call's `session.end`
+  records its loudest moment and whether the caller was heard at all.
+
+Try it without a number or an account: [`tools/phone_sim`](tools/phone_sim/README.md) plays the
+provider's side from your machine, with your microphone, at phone quality. All three are built
+from the providers' documentation and tested with that simulator, not yet on real numbers; if your
+account behaves differently, open an issue.
+
 ## Authentication
 
 ```bash

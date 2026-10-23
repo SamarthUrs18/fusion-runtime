@@ -21,7 +21,7 @@ from fusion_runtime.config import PUBLIC_URL_ENV, load_profile
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator
 from fusion_runtime.engine.audio_format import BadAudioFormat
 from fusion_runtime.env import load_env_file
-from fusion_runtime.phone import twilio
+from fusion_runtime.phone import exotel, plivo, twilio
 from fusion_runtime.security import (
     ALLOWED_ORIGINS_ENV,
     Authenticator,
@@ -32,6 +32,7 @@ from fusion_runtime.security import (
     ProxyTrust,
     TokenStore,
     Unauthorized,
+    bearer,
     came_through_a_proxy,
     scrub_access_logs,
 )
@@ -612,7 +613,7 @@ async def voice_websocket(websocket: WebSocket):
 
 # ============ Phone calls (fusion_runtime.phone) ============
 
-def _request_url(request: Request) -> str:
+def _request_url(request) -> str:
     """The address the caller used, as a phone provider signs it: the public one when we're behind a
     proxy (FUSION_PUBLIC_URL), which sees a different host and scheme than the caller did."""
     public = (os.getenv(PUBLIC_URL_ENV) or "").strip().rstrip("/")
@@ -686,17 +687,112 @@ async def twilio_stream(websocket: WebSocket):
         with contextlib.suppress(Exception):
             await websocket.close(code=1008)
         return
+    await _phone_call(twilio.TwilioLink(websocket, start, pipeline_rate=orchestrator.config.sample_rate,
+                                        reply_rate=orchestrator.config.tts.sample_rate), principal)
+
+
+async def _phone_call(link, principal: Principal) -> None:
+    """A provider's stream, accepted and authenticated: take a slot and talk."""
     try:
         slots.take(principal.label)
     except OverLimit as e:
         telemetry.emit("session.rejected", level="warning", stage="server", reason=e.reason,
-                       transport="twilio", call_sid=start.call_sid)
+                       transport=link.kind, call_sid=link.call_id)
         with contextlib.suppress(Exception):
-            await websocket.close(code=e.close_code)
+            await link.websocket.close(code=e.close_code)
         return
-    link = twilio.TwilioLink(websocket, start, pipeline_rate=orchestrator.config.sample_rate,
-                             reply_rate=orchestrator.config.tts.sample_rate)
     await _voice_session(link, principal)
+
+
+def _refuse_phone_stream(websocket, path: str, reason: str, **fields):
+    telemetry.emit("auth.failed", level="warning", stage="server", path=path,
+                   client=_client_host(websocket), reason=reason, **fields)
+    with contextlib.suppress(OverLimit):
+        auth_failures.check(_rate_address(websocket))
+    return websocket.close(code=1008)
+
+
+@app.websocket(exotel.STREAM_PATH)
+async def exotel_stream(websocket: WebSocket):
+    """A call from an Exotel Voicebot applet. Its URL carries one of fusion's keys as Basic auth."""
+    try:
+        rate.check(_rate_address(websocket))
+    except OverLimit:
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1013)
+        return
+    header = websocket.headers.get("authorization")
+    secret = exotel.basic_password(header) or bearer(header)
+    principal = auth.keys.verify(secret) if secret and auth.enabled else None
+    if principal is None:
+        reason = ("no keys are set, so there is nothing for Exotel's URL to carry: set FUSION_ACCEPTED_KEYS"
+                  if not auth.enabled else "the key in the Exotel URL wasn't accepted")
+        with contextlib.suppress(Exception):
+            await _refuse_phone_stream(websocket, exotel.STREAM_PATH, reason)
+        return
+    await websocket.accept()
+    try:
+        start = await exotel.read_start(websocket)
+    except exotel.NotThisProvider as e:
+        with contextlib.suppress(Exception):
+            await _refuse_phone_stream(websocket, exotel.STREAM_PATH, str(e))
+        return
+    await _phone_call(exotel.ExotelLink(websocket, start, pipeline_rate=orchestrator.config.sample_rate,
+                                        reply_rate=orchestrator.config.tts.sample_rate), principal)
+
+
+@app.post(plivo.ANSWER_PATH, include_in_schema=False)
+async def plivo_answer(request: Request):
+    """A call to a Plivo number whose answer URL points here: stream it to us. Carries no secret:
+    the stream itself is signed by Plivo, and checked when it connects."""
+    if not os.getenv(plivo.AUTH_TOKEN_ENV, "").strip():
+        telemetry.emit("phone.not_configured", level="error", stage="server", provider="plivo",
+                       hint=f"set {plivo.AUTH_TOKEN_ENV} to the Plivo account's auth token")
+        return JSONResponse(status_code=503, content={"error": {
+            "code": "phone_not_configured", "message": "phone calls aren't set up on this server",
+            "fix": f"Set {plivo.AUTH_TOKEN_ENV} to your Plivo account's auth token where the server runs."}})
+    try:
+        rate.check(_rate_address(request))
+    except OverLimit:
+        return Response(plivo.refuse_xml("Sorry, we can't take your call right now."), media_type="application/xml")
+    form = {k: str(v) for k, v in (await request.form()).items()}
+    if slots.in_use >= limits.max_sessions:
+        telemetry.emit("session.rejected", level="warning", stage="server", reason="server_full",
+                       transport="plivo", call_sid=form.get("CallUUID"))
+        return Response(plivo.refuse_xml("Sorry, all our lines are busy. Please call again in a moment."),
+                        media_type="application/xml")
+    telemetry.emit("phone.incoming", stage="server", provider="plivo", call_sid=form.get("CallUUID"),
+                   **telemetry.content(form.get("From"), "caller"))
+    return Response(plivo.stream_xml(plivo.stream_url(_request_url(request))), media_type="application/xml")
+
+
+@app.websocket(plivo.STREAM_PATH)
+async def plivo_stream(websocket: WebSocket):
+    """The call's audio, from Plivo, which signs the connection with the account's auth token."""
+    secret = os.getenv(plivo.AUTH_TOKEN_ENV, "").strip()
+    try:
+        rate.check(_rate_address(websocket))
+    except OverLimit:
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1013)
+        return
+    urls = {_request_url(websocket), str(websocket.url)}
+    if not plivo.valid_signature(secret, urls, websocket.headers.get("x-plivo-signature-v3-nonce"),
+                                 websocket.headers.get("x-plivo-signature-v3")):
+        reason = (f"{plivo.AUTH_TOKEN_ENV} isn't set" if not secret else "the Plivo signature didn't match")
+        with contextlib.suppress(Exception):
+            await _refuse_phone_stream(websocket, plivo.STREAM_PATH, reason,
+                                       hint=f"check {plivo.AUTH_TOKEN_ENV}, and that {PUBLIC_URL_ENV} is the address Plivo calls")
+        return
+    await websocket.accept()
+    try:
+        start = await plivo.read_start(websocket)
+    except plivo.NotThisProvider as e:
+        with contextlib.suppress(Exception):
+            await _refuse_phone_stream(websocket, plivo.STREAM_PATH, str(e))
+        return
+    await _phone_call(plivo.PlivoLink(websocket, start, pipeline_rate=orchestrator.config.sample_rate,
+                                      reply_rate=orchestrator.config.tts.sample_rate), plivo.PRINCIPAL)
 
 
 async def _voice_session(link: Link, principal: Principal) -> None:

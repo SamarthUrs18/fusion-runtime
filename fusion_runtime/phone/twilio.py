@@ -28,28 +28,20 @@ from typing import Any, Dict, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
 from xml.sax.saxutils import quoteattr
 
-import numpy as np
-
-# Here, not when a call connects: the first import of the resampler (scipy's filter design) took a
-# second, and on the event loop that froze audio for every call on the server (seen 24 Oct)
-from fusion_runtime.audio.echo_canceller import StreamingResampler
-from fusion_runtime.phone import mulaw
+from fusion_runtime.phone.link import MULAW, NotThisProvider, PhoneLink
 from fusion_runtime.security.keys import Principal
-from fusion_runtime.transport import Link, Received
 
 AUTH_TOKEN_ENV = "FUSION_TWILIO_AUTH_TOKEN"  # the account's auth token: Twilio signs every webhook with it
 WEBHOOK_PATH = "/v1/phone/twilio"
 STREAM_PATH = "/v1/phone/twilio/stream"
 PHONE_RATE = 8000
-FRAME_BYTES = 160  # 20 ms of 8 kHz μ-law, the size Twilio sends its own audio in
 START_TIMEOUT_S = 10.0
 
 # Calls arrive as this, for limits and logs: Twilio authenticates them, not one of our keys
 PRINCIPAL = Principal(fingerprint="twilio", name="twilio", via="twilio")
 
 
-class NotTwilio(Exception):
-    """A request or stream that isn't from Twilio, or doesn't follow its protocol."""
+NotTwilio = NotThisProvider  # a request or stream that isn't from Twilio, or doesn't follow its protocol
 
 
 # ---- the webhook -------------------------------------------------------------------------------
@@ -141,79 +133,33 @@ async def read_start(websocket, timeout_s: float = START_TIMEOUT_S) -> Start:
         raise NotTwilio(f"no start message within {timeout_s:.0f} s") from None
 
 
-class TwilioLink(Link):
-    """A phone call on Twilio Media Streams, as a fusion session sees it."""
+class TwilioLink(PhoneLink):
+    """A phone call on Twilio Media Streams: 8 kHz μ-law, marks, clear."""
 
     kind = "twilio"
-    phone_line = True
 
     def __init__(self, websocket, start: Start, pipeline_rate: int, reply_rate: int):
-        super().__init__(websocket)
+        super().__init__(websocket, start.call_sid, start.stream_sid, line_rate=PHONE_RATE, encoding=MULAW,
+                         pipeline_rate=pipeline_rate, reply_rate=reply_rate)
         self.start = start
-        self._reply_rate = reply_rate
-        self._inbound = StreamingResampler(PHONE_RATE, pipeline_rate)
-        self._outbound = StreamingResampler(reply_rate, PHONE_RATE)
-        self._unplayed_marks = 0  # marks sent that Twilio hasn't played up to yet
-        self._mark_count = 0
-        self._leftover = b""  # outbound μ-law short of a whole 20 ms frame
 
-    def describe(self) -> Dict[str, Any]:
-        return {"transport": self.kind, "call_sid": self.start.call_sid}
+    def parse(self, data: Dict[str, Any]):
+        event = data.get("event")
+        if event == "media":
+            return "media", (data.get("media") or {}).get("payload")
+        if event == "mark":
+            return "played", (data.get("mark") or {}).get("name")
+        if event == "stop":
+            return "stop", None
+        if event == "dtmf":
+            return "dtmf", (data.get("dtmf") or {}).get("digit")
+        return "other", None
 
-    async def receive(self) -> Received:
-        while True:
-            message = await self._message()
-            text = message.get("text") or ""
-            try:
-                data = json.loads(text)
-            except ValueError:
-                return "bad", None, len(text)
-            event = data.get("event")
-            if event == "media":
-                payload = (data.get("media") or {}).get("payload") or ""
-                try:
-                    phone = mulaw.decode(base64.b64decode(payload))
-                except ValueError:
-                    return "bad", None, len(text)
-                pcm = self._inbound.process(phone.astype(np.float64))
-                return "audio", np.clip(np.round(pcm), -32768, 32767).astype(np.int16).tobytes(), len(text)
-            if event == "mark":
-                self._unplayed_marks = max(0, self._unplayed_marks - 1)
-                if self._unplayed_marks == 0:
-                    self.controls({"type": "playback", "playing": False})
-                continue
-            if event == "stop":
-                from fastapi import WebSocketDisconnect
+    def media_message(self, payload_b64: str) -> Dict[str, Any]:
+        return {"event": "media", "streamSid": self.stream_id, "media": {"payload": payload_b64}}
 
-                raise WebSocketDisconnect(1000)  # the caller hung up
-            if event == "dtmf" and self.trace is not None:
-                self.trace.event("phone.dtmf", stage="audio", digit=(data.get("dtmf") or {}).get("digit"))
-            # connected / start again / anything newer: nothing to do
+    def marker_message(self, name: str) -> Dict[str, Any]:
+        return {"event": "mark", "streamSid": self.stream_id, "mark": {"name": name}}
 
-    async def send_audio(self, pcm: bytes) -> None:
-        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
-        phone = self._outbound.process(samples)
-        data = self._leftover + mulaw.encode(np.clip(np.round(phone), -32768, 32767))
-        whole = len(data) - len(data) % FRAME_BYTES
-        self._leftover = data[whole:]
-        if not whole:
-            return
-        if self._unplayed_marks == 0:
-            self.controls({"type": "playback", "playing": True})
-        for i in range(0, whole, FRAME_BYTES):
-            await self.websocket.send_json({"event": "media", "streamSid": self.start.stream_sid,
-                                            "media": {"payload": base64.b64encode(data[i:i + FRAME_BYTES]).decode()}})
-        self._mark_count += 1
-        self._unplayed_marks += 1
-        await self.websocket.send_json({"event": "mark", "streamSid": self.start.stream_sid,
-                                        "mark": {"name": f"fusion-{self._mark_count}"}})
-
-    def event(self, event: Dict[str, Any]) -> None:
-        if event.get("type") == "interrupted":
-            # The caller talked over the agent: drop what Twilio hasn't played yet
-            self._send_soon({"event": "clear", "streamSid": self.start.stream_sid})
-            self._unplayed_marks = 0
-            self._leftover = b""
-            self._outbound = StreamingResampler(self._reply_rate, PHONE_RATE)  # no tail of the old reply
-            self.controls({"type": "playback", "playing": False})
-        # transcripts, traces and audio problems have nowhere to go on a phone line: they're in the log
+    def clear_message(self) -> Dict[str, Any]:
+        return {"event": "clear", "streamSid": self.stream_id}
