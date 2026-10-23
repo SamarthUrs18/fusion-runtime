@@ -140,7 +140,9 @@ def test_a_call_is_answered_heard_and_spoken_to(phone):
 
     start = sink.named("session.start")[0]
     assert start.attrs["transport"] == "twilio" and start.attrs["call_sid"] == "CA" + "1" * 32
-    assert sink.named("session.end")[0].attrs["reason"] == "client_disconnected"
+    end = sink.named("session.end")[0]
+    assert end.attrs["reason"] == "client_disconnected"
+    assert end.attrs["heard_caller"] is True and end.attrs["peak_rms"] > 1000  # the caller's line was alive
 
 
 def test_a_webhook_not_signed_by_twilio_is_refused(phone):

@@ -25,6 +25,11 @@ class Limits:
     max_turn_audio_s: float = 60.0  # one person talking without ever pausing (speech, not silence)
     max_silence_s: float = 60.0  # nobody speaks: the caller walked away with the line open. 0 = no limit
     dead_audio_s: float = 3.0  # no frames, or only exact zeros, this long: tell the caller. 0 = off
+    # Phone lines: a dead one is faint hiss, not zeros. Nothing above this level (16-bit RMS) for
+    # dead_line_s is reported as a quiet line. Asif Ali's numbers: speech peaks over 1000, a dead
+    # path under ~40. Report only: a quiet caller can sit under it too. 0 = off
+    phone_floor_rms: float = 40.0
+    dead_line_s: float = 10.0
     max_session_s: float = 900.0  # wall clock for one conversation
     idle_timeout_s: float = 60.0  # no audio and no messages: reclaim the slot
     connections_per_minute: int = 30  # per address, before authentication
@@ -50,6 +55,8 @@ class Limits:
             max_turn_audio_s=number("FUSION_MAX_TURN_AUDIO_S", cls.max_turn_audio_s),
             max_silence_s=number("FUSION_MAX_SILENCE_S", cls.max_silence_s),
             dead_audio_s=number("FUSION_DEAD_AUDIO_S", cls.dead_audio_s),
+            phone_floor_rms=number("FUSION_PHONE_FLOOR_RMS", cls.phone_floor_rms),
+            dead_line_s=number("FUSION_DEAD_LINE_S", cls.dead_line_s),
             max_session_s=number("FUSION_MAX_SESSION_S", cls.max_session_s),
             idle_timeout_s=number("FUSION_IDLE_TIMEOUT_S", cls.idle_timeout_s),
             connections_per_minute=number("FUSION_CONNECTIONS_PER_MINUTE", cls.connections_per_minute),

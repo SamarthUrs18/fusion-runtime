@@ -230,6 +230,7 @@ def _configure_auth(environ=None) -> None:
                    per_key=limits.per_key(len(keys)), idle_timeout_s=limits.idle_timeout_s,
                    max_session_s=limits.max_session_s, max_turn_audio_s=limits.max_turn_audio_s,
                    max_silence_s=limits.max_silence_s, dead_audio_s=limits.dead_audio_s,
+                   phone_floor_rms=limits.phone_floor_rms, dead_line_s=limits.dead_line_s,
                    connections_per_minute=limits.connections_per_minute,
                    tokens_per_minute=limits.tokens_per_minute, trusted_proxy=proxies.enabled,
                    allowed_origins=origins.allowed or "same origin only")
@@ -722,6 +723,7 @@ async def _voice_session(link: Link, principal: Principal) -> None:
                        **link.describe(),
                        **({"degraded": ",".join(sorted(degraded))} if degraded else {}))
         receive_task = send_task = clock_task = None
+        hearing = None
         try:
             # A token is spent by the connection that used it, so without this a
             # page could never reconnect — clicking "talk" a second time would
@@ -775,7 +777,9 @@ async def _voice_session(link: Link, principal: Principal) -> None:
             budget = AudioBudget(limits, orchestrator.config.sample_rate)
             from fusion_runtime.engine.audio_watch import AudioWatch
 
-            hearing = AudioWatch(limits.dead_audio_s)
+            hearing = AudioWatch(limits.dead_audio_s,
+                                 floor_rms=limits.phone_floor_rms if link.phone_line else 0.0,
+                                 quiet_after_s=limits.dead_line_s if link.phone_line else 0.0)
 
             def report_audio(change):
                 """The caller's audio stopped, went digitally silent, or came back: log it, tell the client."""
@@ -896,8 +900,19 @@ async def _voice_session(link: Link, principal: Principal) -> None:
             slots.give_back(principal.label)
             _live_sessions.pop(session_id, None)
             _active_sessions.discard(session_id)
+            heard = {}
+            if hearing is not None:
+                heard["peak_rms"] = round(hearing.peak_rms)  # the call's loudest moment from the caller
+                if link.phone_line:
+                    heard["heard_caller"] = hearing.heard_caller  # False: never above the line's floor
             telemetry.emit("session.end", stage="server", reason=end_reason, error_code=error_code,
-                           duration_s=round(time.monotonic() - started, 2), turns=trace.turn_count)
+                           duration_s=round(time.monotonic() - started, 2), turns=trace.turn_count, **heard)
+            if (link.phone_line and hearing is not None and not hearing.heard_caller
+                    and time.monotonic() - started >= limits.dead_line_s):  # a call hung up at once says nothing
+                telemetry.emit("phone.never_heard_caller", level="warning", stage="audio",
+                               peak_rms=round(hearing.peak_rms), floor_rms=limits.phone_floor_rms,
+                               hint="nothing from the caller ever rose above the line's floor: a dead audio "
+                                    "path, a muted phone, or a floor set too high (FUSION_PHONE_FLOOR_RMS)")
 
 
 # ============ Metrics Endpoints ============

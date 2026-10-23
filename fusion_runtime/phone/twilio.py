@@ -145,6 +145,7 @@ class TwilioLink(Link):
     """A phone call on Twilio Media Streams, as a fusion session sees it."""
 
     kind = "twilio"
+    phone_line = True
 
     def __init__(self, websocket, start: Start, pipeline_rate: int, reply_rate: int):
         super().__init__(websocket)

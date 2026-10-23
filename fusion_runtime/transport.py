@@ -38,6 +38,7 @@ def client_gone(websocket: WebSocket, exc: Optional[BaseException] = None) -> bo
 
 class Link:
     kind = "link"
+    phone_line = False  # a dead phone line is hiss, not zeros: the session checks its level too
 
     def __init__(self, websocket: WebSocket):
         self.websocket = websocket

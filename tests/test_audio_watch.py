@@ -112,3 +112,45 @@ def test_the_caller_is_told_when_their_mic_sends_only_silence(local):
         assert problem["problem"] == "silent_audio" and "muted" in problem["message"]
         ws.send_bytes(SPEECH)
         assert next_text(ws, "audio_ok") == {"type": "audio_ok"}
+
+
+# ---- phone lines: a dead one is hiss, not zeros ------------------------------------------------
+
+HISS = struct.pack("<320h", *([25, -25] * 160))  # RMS 25: under Asif Ali's ~40 for a dead path
+
+
+def test_a_phone_line_with_only_hiss_is_reported_as_quiet():
+    clock = Clock()
+    watch = AudioWatch(after_s=3.0, clock=clock, floor_rms=40, quiet_after_s=10.0)
+    for _ in range(40):  # 8 s of hiss: under 10 s so far, and never "muted": it isn't zeros
+        clock.now += 0.2
+        assert watch.frame(HISS) is None
+    for _ in range(15):
+        clock.now += 0.2
+        problem = watch.frame(HISS)
+        if problem:
+            break
+    assert problem["problem"] == "quiet_line" and "dead phone line" in problem["message"]
+    assert not watch.heard_caller and round(watch.peak_rms) == 25
+    clock.now += 0.2
+    ok = watch.frame(SPEECH)  # the caller speaks: it was a quiet caller after all
+    assert ok["event"] == "audio.ok" and ok["problem"] == "quiet_line" and watch.heard_caller
+
+
+def test_without_a_floor_hiss_is_just_a_quiet_caller():
+    """The browser keeps today's checks: no floor, so a quiet room is never a problem."""
+    clock = Clock()
+    watch = AudioWatch(after_s=3.0, clock=clock)
+    for _ in range(100):
+        clock.now += 0.2
+        assert watch.frame(HISS) is None
+    assert round(watch.peak_rms) == 25  # the loudest moment is still kept
+
+
+def test_audio_coming_back_quietly_ends_no_audio():
+    clock = Clock()
+    watch = AudioWatch(after_s=3.0, clock=clock, floor_rms=40, quiet_after_s=10.0)
+    clock.now += 3.5
+    assert watch.check()["problem"] == "no_audio"
+    clock.now += 0.2
+    assert watch.frame(HISS)["event"] == "audio.ok"  # frames again, even if only the line's hiss

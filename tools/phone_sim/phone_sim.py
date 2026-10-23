@@ -80,6 +80,15 @@ async def wait_for_quiet(call, first_reply_s: float) -> None:
             return
 
 
+async def dead_line(call, seconds: float, note) -> None:
+    """A call whose audio path never attached: the line's faint hiss and nothing else."""
+    note(f"caller: (a dead line: {seconds:.0f} s of hiss, nobody there)")
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and call.closed is None:
+        await call.send_caller_audio(line_noise(1))
+        await asyncio.sleep(0.02)
+
+
 async def talk(call, audio, note) -> None:
     """The microphone, cleaned of the agent's own voice, as the caller's side of the line."""
     from fusion_runtime.phone import mulaw
@@ -107,9 +116,9 @@ async def main(args) -> int:
 
     recorded, heard_at = [], []
     audio = None
-    if args.say:
+    if args.say or args.dead_line:
         playback = twilio_side.Playback()
-        speech = load_speech(args.say)
+        speech = load_speech(args.say) if args.say else b""
     else:
         from fusion_runtime.audio.duplex_audio import DuplexAudio
 
@@ -136,7 +145,9 @@ async def main(args) -> int:
 
     listener = asyncio.create_task(call.run())
     try:
-        if args.say:
+        if args.dead_line:
+            await dead_line(call, args.dead_line, note)
+        elif args.say:
             await speak_recording(call, speech, args.listen, note, heard_at)
         else:
             await talk(call, audio, note)
@@ -169,6 +180,8 @@ def parse(argv=None):
     parser.add_argument("--record", metavar="WAV", help="save what the agent said, at phone quality")
     parser.add_argument("--caller", default="+15550100001", help="the caller's number, as Twilio would send it")
     parser.add_argument("--no-aec", action="store_true", help="no echo cancellation (use headphones)")
+    parser.add_argument("--dead-line", type=float, metavar="S",
+                        help="a call whose audio never attached: S seconds of line hiss, then hang up")
     return parser.parse_args(argv)
 
 

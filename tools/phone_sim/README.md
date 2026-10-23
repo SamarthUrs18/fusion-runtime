@@ -52,6 +52,7 @@ python3 tools/phone_sim/phone_sim.py --say question.wav --record agent.wav
 | `--caller` | the caller's number Twilio would send (`+15550100001`) |
 | `--auth-token` | instead of `FUSION_TWILIO_AUTH_TOKEN` |
 | `--no-aec` | no echo cancellation |
+| `--dead-line S` | a call whose audio path never attached: S seconds of line hiss, then hang up |
 
 Needs `pip install "fusion-runtime[talk]"` for the microphone and speaker.
 
