@@ -30,6 +30,9 @@ from xml.sax.saxutils import quoteattr
 
 import numpy as np
 
+# Here, not when a call connects: the first import of the resampler (scipy's filter design) took a
+# second, and on the event loop that froze audio for every call on the server (seen 24 Oct)
+from fusion_runtime.audio.echo_canceller import StreamingResampler
 from fusion_runtime.phone import mulaw
 from fusion_runtime.security.keys import Principal
 from fusion_runtime.transport import Link, Received
@@ -145,8 +148,6 @@ class TwilioLink(Link):
 
     def __init__(self, websocket, start: Start, pipeline_rate: int, reply_rate: int):
         super().__init__(websocket)
-        from fusion_runtime.audio.echo_canceller import StreamingResampler
-
         self.start = start
         self._reply_rate = reply_rate
         self._inbound = StreamingResampler(PHONE_RATE, pipeline_rate)
@@ -212,8 +213,6 @@ class TwilioLink(Link):
             self._send_soon({"event": "clear", "streamSid": self.start.stream_sid})
             self._unplayed_marks = 0
             self._leftover = b""
-            from fusion_runtime.audio.echo_canceller import StreamingResampler
-
             self._outbound = StreamingResampler(self._reply_rate, PHONE_RATE)  # no tail of the old reply
             self.controls({"type": "playback", "playing": False})
         # transcripts, traces and audio problems have nowhere to go on a phone line: they're in the log

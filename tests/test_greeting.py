@@ -82,3 +82,45 @@ def test_a_greeting_is_checked_and_the_environment_can_change_it():
         Agent(prompt="p", greeting="   ")
     with pytest.raises(AgentError, match="keep it under 400"):
         Agent(prompt="p", greeting="Hello. " * 100)
+
+
+# ---- said at once: made when the server starts, not on each call -------------------------------
+
+class CountingTTS:
+    def __init__(self):
+        self.said = []
+
+    async def synthesize(self, request):
+        from fusion_runtime.contract.tts import AudioChunk
+
+        self.said.append(request.text)
+        yield AudioChunk(pcm=bytes([len(self.said)]) * 480, sample_rate=24000)
+
+
+async def test_the_greeting_is_made_once_and_every_call_plays_it_without_waiting():
+    """Phones notice a pause at the start of a call most: the greeting is synthesized at startup."""
+    orch = orchestrator()
+    orch.tts = CountingTTS()
+    audio_s = await orch.prerender(GREETING)
+    assert orch.tts.said == ["Hi, this is ShopKart.", "How can I help with your order?"] and audio_s == 0.02
+
+    async def greeting_tokens():
+        async for token in orch._llm_stage(nothing_said(), "sys", greeting=GREETING):
+            yield token
+
+    played = [pcm async for pcm in orch._tts_stage(greeting_tokens())]
+    assert len(orch.tts.said) == 2  # nothing synthesized again
+    assert played == [bytes([1]) * 480, bytes([2]) * 480]  # the stored audio, in order
+
+
+async def test_a_different_line_is_still_synthesized():
+    orch = orchestrator()
+    orch.tts = CountingTTS()
+    await orch.prerender(GREETING)
+
+    async def reply():
+        yield "It ships Friday."
+        yield END_OF_REPLY
+
+    assert [pcm async for pcm in orch._tts_stage(reply())] == [bytes([3]) * 480]
+    assert orch.tts.said[-1] == "It ships Friday."

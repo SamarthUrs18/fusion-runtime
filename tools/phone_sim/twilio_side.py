@@ -135,6 +135,8 @@ class Call:
         self.sequence = 2  # connected and start came first
         self.chunk = 0
         self.agent_audio_s = 0.0
+        self.connected_at = time.monotonic()
+        self.first_audio_at: Optional[float] = None  # the greeting's first sound, if the agent greets
         self.clears = 0
         self.closed: Optional[str] = None
 
@@ -162,6 +164,10 @@ class Call:
                 event = message.get("event")
                 if event == "media":
                     audio = base64.b64decode(message["media"]["payload"])
+                    if self.first_audio_at is None:
+                        self.first_audio_at = time.monotonic()
+                        self.on_note(f"first audio {(self.first_audio_at - self.connected_at) * 1000:.0f} ms "
+                                     "after the call connected")
                     seconds = len(audio) / PHONE_RATE
                     self.agent_audio_s += seconds
                     self.playback.queue(seconds)

@@ -1443,6 +1443,43 @@ class PipelineOrchestrator:
                         tools=[call.name for call in calls])
         return None, True
 
+    def _tts_request(self, text: str, session_id: Optional[str] = None) -> TTSRequest:
+        tts_config = getattr(self.config, "tts", None)
+        return TTSRequest(text=text, language=getattr(tts_config, "language", None),
+                          voice=getattr(tts_config, "voice", None), speed=getattr(tts_config, "speed", 1.0),
+                          session_id=session_id)
+
+    def _tts_key(self, text: str) -> tuple:
+        tts_config = getattr(self.config, "tts", None)
+        return (text, getattr(tts_config, "voice", None), getattr(tts_config, "speed", 1.0),
+                getattr(tts_config, "language", None))
+
+    async def prerender(self, text: str) -> float:
+        """Synthesize what every call opens with (the greeting) once, now, so saying it is instant.
+
+        Split the way a reply is spoken, so each sentence is found again when the greeting is said,
+        and interrupting it still stops between sentences. Returns the seconds of audio made.
+        """
+        output_rate = getattr(getattr(self.config, "tts", None), "sample_rate", 24000)
+
+        async def sentences():
+            for sentence in _sentences(text):
+                yield sentence
+            yield END_OF_REPLY
+
+        made: Dict[tuple, List[bytes]] = {}
+        async for segment in speakable_segments(sentences()):
+            if not segment.strip():
+                continue
+            stream = self.tts.synthesize(self._tts_request(segment))
+            try:
+                made[self._tts_key(segment)] = [_resample_pcm16(chunk.pcm, chunk.sample_rate, output_rate)
+                                                async for chunk in stream]
+            finally:
+                await stream.aclose()
+        self.__dict__.setdefault("_prerendered", {}).update(made)
+        return sum(len(pcm) for chunks in made.values() for pcm in chunks) / 2 / output_rate
+
     async def _tts_stage(
         self,
         llm_stream: AsyncIterator[str],
@@ -1455,16 +1492,16 @@ class PipelineOrchestrator:
         tts_scheduler = self.scheduler("tts")
         session_id = trace.session_id if trace is not None else None
 
+        prerendered = self.__dict__.get("_prerendered", {})
         async for segment in speakable_segments(llm_stream):
             if not segment.strip():
                 continue
-            request = TTSRequest(
-                text=segment,
-                language=getattr(tts_config, "language", None),
-                voice=getattr(tts_config, "voice", None),
-                speed=getattr(tts_config, "speed", 1.0),
-                session_id=session_id,
-            )
+            ready = prerendered.get(self._tts_key(segment))
+            if ready is not None:  # said before the call started (the greeting): no synthesis, no wait
+                for pcm in ready:
+                    yield pcm
+                continue
+            request = self._tts_request(segment, session_id)
             stream = self.tts.synthesize(request)
             try:
                 while True:

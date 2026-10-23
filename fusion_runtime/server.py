@@ -105,6 +105,7 @@ async def startup():
     await orchestrator.initialize()
     if agent is not None and agent.tools:
         orchestrator.check_tools(agent.tools)  # an LLM that can't call them fails now, not mid-call
+    await _prerender_greeting(orchestrator, greeting_for(agent))
     # Watched from here on: loading models holds the loop for a second or two, before any call can
     # connect, and reporting that on every start (pod test, 13 Oct) read like a fault
     _loop_monitor = LoopMonitor()
@@ -124,6 +125,22 @@ async def shutdown():
         await _engine_monitor.stop()
     if orchestrator:
         await orchestrator.shutdown()
+
+
+async def _prerender_greeting(pipeline, greeting: Optional[str]) -> None:
+    """Every call opens with the greeting, so it's synthesized once here, not on each call: the
+    caller hears it at once. Silence at the start of a phone call is the pause people notice most."""
+    if not greeting or not greeting.strip() or not hasattr(pipeline, "prerender"):
+        return
+    started = time.monotonic()
+    try:
+        audio_s = await pipeline.prerender(greeting.strip())
+    except Exception as e:  # it's only faster: each call can still say it the usual way
+        telemetry.emit("greeting.prerender_failed", level="warning", stage="tts", error=describe_error(e, "tts"),
+                       hint="the greeting is synthesized on each call instead")
+        return
+    telemetry.emit("greeting.prerendered", stage="tts", duration_ms=(time.monotonic() - started) * 1000,
+                   audio_s=round(audio_s, 2))
 
 
 def _watch_llm_server(pipeline):
