@@ -289,6 +289,7 @@ ACCEPTED_KEYS_ENV = "FUSION_ACCEPTED_KEYS"  # server: keys it accepts
 ACCEPTED_KEYS_FILE_ENV = "FUSION_ACCEPTED_KEYS_FILE"  # server: the same, from a file it can re-read
 API_KEY_ENV = "FUSION_API_KEY"  # client: the key `frun talk` presents
 AGENT_ENV = "FUSION_AGENT"  # the agent file to run, when no path is given on the command line
+PUBLIC_URL_ENV = "FUSION_PUBLIC_URL"  # the address people (and phone providers) reach this server at
 TOKEN_TTL_ENV = "FUSION_SESSION_TOKEN_TTL_S"  # how long a browser's session token lives
 TRUSTED_PROXY_ENV = "FUSION_TRUSTED_PROXY"  # believe X-Forwarded-*; only true behind your own proxy
 

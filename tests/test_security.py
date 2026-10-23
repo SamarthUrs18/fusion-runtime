@@ -599,7 +599,9 @@ async def test_reloading_keys_revokes_completely(monkeypatch, tmp_path):
     minted = server.auth.tokens.mint(server.auth.keys.verify(KEY))
     kept = server.auth.tokens.mint(server.auth.keys.verify(OTHER))
     socket = _FakeSocket()
-    server._live_sessions["s1"] = (fingerprint(KEY), socket)
+    from fusion_runtime.transport import BrowserLink
+
+    server._live_sessions["s1"] = (fingerprint(KEY), BrowserLink(socket, 16000))
 
     path.write_text(f"mobile:{OTHER}\n")  # the leaked key is taken out
     result = await server.reload_keys()

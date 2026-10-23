@@ -4,7 +4,6 @@ FastAPI Server - HTTP/WebSocket API for fusion-runtime
 import asyncio
 import base64
 import contextlib
-import json
 import os
 import platform
 import time
@@ -12,17 +11,17 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
-from starlette.websockets import WebSocketState
 
 from fusion_runtime import __version__, web
 from fusion_runtime.agent import DEFAULT_PROMPT, Agent, greeting_for, load_agent
-from fusion_runtime.config import load_profile
+from fusion_runtime.config import PUBLIC_URL_ENV, load_profile
 from fusion_runtime.engine import BargeInState, PipelineOrchestrator
 from fusion_runtime.engine.audio_format import BadAudioFormat
 from fusion_runtime.env import load_env_file
+from fusion_runtime.phone import twilio
 from fusion_runtime.security import (
     ALLOWED_ORIGINS_ENV,
     Authenticator,
@@ -50,6 +49,7 @@ from fusion_runtime.telemetry import (
     session_scope,
     telemetry,
 )
+from fusion_runtime.transport import BrowserLink, Link
 
 app = FastAPI(title="fusion-runtime", version=__version__)
 
@@ -63,7 +63,7 @@ mints: ConnectionRate = ConnectionRate(limits.tokens_per_minute)  # tokens minte
 slots: SessionSlots = SessionSlots(limits)
 proxies: ProxyTrust = ProxyTrust()
 origins: OriginRule = OriginRule()
-_live_sessions: dict = {}  # session id -> (key fingerprint, socket), so a revoked key can be cut off
+_live_sessions: dict = {}  # session id -> (key fingerprint, link), so a revoked key can be cut off
 agent: Optional["Agent"] = None  # set when the server was started with an agent file
 _started_at = time.monotonic()
 _active_sessions: set = set()
@@ -245,14 +245,10 @@ async def reload_keys() -> dict:
     auth = Authenticator(keys, auth.tokens)  # the same token store: valid tokens keep working
     slots.keys = len(keys)
     tokens_dropped = sum(auth.tokens.drop_for_key(gone) for gone in removed)
-    doomed = [(sid, socket) for sid, (fp, socket) in _live_sessions.items() if fp in removed]
-    for session_id, socket in doomed:
-        with contextlib.suppress(Exception):
-            await socket.send_json({"type": "error", "code": "key_revoked",
-                                    "message": "the key this conversation started with was removed",
-                                    "retryable": False})
-        with contextlib.suppress(Exception):
-            await socket.close(code=1008)
+    doomed = [(sid, link) for sid, (fp, link) in _live_sessions.items() if fp in removed]
+    for session_id, link in doomed:
+        await link.fail({"type": "error", "code": "key_revoked",
+                         "message": "the key this conversation started with was removed", "retryable": False}, 1008)
         _live_sessions.pop(session_id, None)
     telemetry.emit("keys.reloaded", stage="server", keys=len(keys), added=len(added),
                    removed=len(removed), tokens_dropped=tokens_dropped, sessions_closed=len(doomed))
@@ -544,16 +540,6 @@ def _collect_turns(turns: list):
 
 # ============ WebSocket Endpoint ============
 
-def _client_gone(websocket: WebSocket, exc: Optional[BaseException] = None) -> bool:
-    """True when a failure just means the client disconnected, not that something broke."""
-    if isinstance(exc, WebSocketDisconnect):
-        return True
-    if websocket.client_state != WebSocketState.CONNECTED or websocket.application_state != WebSocketState.CONNECTED:
-        return True
-    name = type(exc).__name__ if exc is not None else ""
-    return name in ("ConnectionClosed", "ConnectionClosedOK", "ConnectionClosedError", "ClientDisconnected")
-
-
 @app.websocket("/v1/voice/ws")
 async def voice_websocket(websocket: WebSocket):
     """WebSocket for real-time bidirectional voice chat."""
@@ -603,14 +589,111 @@ async def voice_websocket(websocket: WebSocket):
         await refuse(e.reason, str(e), None, e.close_code, retryable=True)
         return
     await websocket.accept()
+    await _voice_session(BrowserLink(websocket, orchestrator.config.sample_rate), principal)
 
+
+# ============ Phone calls (fusion_runtime.phone) ============
+
+def _request_url(request: Request) -> str:
+    """The address the caller used, as a phone provider signs it: the public one when we're behind a
+    proxy (FUSION_PUBLIC_URL), which sees a different host and scheme than the caller did."""
+    public = (os.getenv(PUBLIC_URL_ENV) or "").strip().rstrip("/")
+    if not public:
+        return str(request.url)
+    query = f"?{request.url.query}" if request.url.query else ""
+    return f"{public}{request.url.path}{query}"
+
+
+@app.post(twilio.WEBHOOK_PATH, include_in_schema=False)
+async def twilio_incoming_call(request: Request):
+    """A call to a Twilio number whose voice URL points here: check it's Twilio, connect it to the stream."""
+    secret = os.getenv(twilio.AUTH_TOKEN_ENV, "").strip()
+    if not secret:
+        telemetry.emit("phone.not_configured", level="error", stage="server", provider="twilio",
+                       hint=f"set {twilio.AUTH_TOKEN_ENV} to the Twilio account's auth token")
+        return JSONResponse(status_code=503, content={"error": {
+            "code": "phone_not_configured", "message": "phone calls aren't set up on this server",
+            "fix": f"Set {twilio.AUTH_TOKEN_ENV} to your Twilio account's auth token where the server runs."}})
+    try:
+        rate.check(_rate_address(request))
+    except OverLimit:
+        return Response(twilio.refuse_twiml("Sorry, we can't take your call right now."), media_type="text/xml")
+    form = {k: str(v) for k, v in (await request.form()).items()}
+    url = _request_url(request)
+    if not twilio.valid_signature(secret, url, form, request.headers.get("x-twilio-signature")):
+        telemetry.emit("auth.failed", level="warning", stage="server", path=twilio.WEBHOOK_PATH,
+                       client=_client_host(request), reason="the Twilio signature didn't match",
+                       hint=f"check {twilio.AUTH_TOKEN_ENV}, and that {PUBLIC_URL_ENV} is the address Twilio calls")
+        with contextlib.suppress(OverLimit):
+            auth_failures.check(_rate_address(request))
+        return JSONResponse(status_code=403, content={"error": {"code": "auth_failed",
+                                                                "message": "not a request from Twilio"}})
+    if slots.in_use >= limits.max_sessions:  # say so on the line, rather than connect and drop the call
+        telemetry.emit("session.rejected", level="warning", stage="server", reason="server_full",
+                       transport="twilio", call_sid=form.get("CallSid"))
+        return Response(twilio.refuse_twiml("Sorry, all our lines are busy. Please call again in a moment."),
+                        media_type="text/xml")
+    token = auth.tokens.mint(twilio.PRINCIPAL).token
+    telemetry.emit("phone.incoming", stage="server", provider="twilio", call_sid=form.get("CallSid"),
+                   **telemetry.content(form.get("From"), "caller"))
+    return Response(twilio.connect_twiml(twilio.stream_url(url), {"token": token, "call_sid": form.get("CallSid", "")}),
+                    media_type="text/xml")
+
+
+@app.websocket(twilio.STREAM_PATH)
+async def twilio_stream(websocket: WebSocket):
+    """The call's audio, from Twilio. Authenticated by the single-use token the webhook put in it."""
+    try:
+        rate.check(_rate_address(websocket))
+    except OverLimit:
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1013)
+        return
+    await websocket.accept()
+    try:
+        start = await twilio.read_start(websocket)
+    except twilio.NotTwilio as e:
+        telemetry.emit("auth.failed", level="warning", stage="server", path=twilio.STREAM_PATH,
+                       client=_client_host(websocket), reason=str(e))
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1008)
+        return
+    principal = auth.tokens.redeem(start.parameters.get("token"))
+    if principal is None:
+        telemetry.emit("auth.failed", level="warning", stage="server", path=twilio.STREAM_PATH,
+                       client=_client_host(websocket), reason="no valid session token in the stream's start",
+                       call_sid=start.call_sid)
+        with contextlib.suppress(OverLimit):
+            auth_failures.check(_rate_address(websocket))
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1008)
+        return
+    try:
+        slots.take(principal.label)
+    except OverLimit as e:
+        telemetry.emit("session.rejected", level="warning", stage="server", reason=e.reason,
+                       transport="twilio", call_sid=start.call_sid)
+        with contextlib.suppress(Exception):
+            await websocket.close(code=e.close_code)
+        return
+    link = twilio.TwilioLink(websocket, start, pipeline_rate=orchestrator.config.sample_rate,
+                             reply_rate=orchestrator.config.tts.sample_rate)
+    await _voice_session(link, principal)
+
+
+async def _voice_session(link: Link, principal: Principal) -> None:
+    """One conversation, whatever carries it: a browser socket or a phone line (fusion_runtime.transport).
+
+    The slot is taken and the link accepted by the caller; it's given back here, however it ends.
+    """
+    websocket = link.websocket
     session_id = str(uuid.uuid4())
     started = time.monotonic()
     end_reason = "client_disconnected"
     error_code = None
     trace = SessionTrace(session_id=session_id)
     _active_sessions.add(session_id)
-    _live_sessions[session_id] = (principal.fingerprint, websocket)
+    _live_sessions[session_id] = (principal.fingerprint, link)
 
     with session_scope(session_id):
         client = websocket.client
@@ -618,11 +701,11 @@ async def voice_websocket(websocket: WebSocket):
         telemetry.emit("session.start", level="warning" if degraded else "info", stage="server",
                        client=f"{client.host}:{client.port}" if client else None,
                        key=principal.label, authenticated=principal.via,
-                       profile=os.getenv("FUSION_CONFIG", "development"),
+                       profile=agent.profile if agent is not None else os.getenv("FUSION_CONFIG", "development"),
+                       **link.describe(),
                        **({"degraded": ",".join(sorted(degraded))} if degraded else {}))
         receive_task = send_task = clock_task = None
         try:
-            # Send config
             # A token is spent by the connection that used it, so without this a
             # page could never reconnect — clicking "talk" a second time would
             # fail. Handing over the next one on the socket we already trust
@@ -630,12 +713,10 @@ async def voice_websocket(websocket: WebSocket):
             # idle past the expiry still has to ask its backend, as it does on
             # first load.
             next_token = auth.tokens.mint(principal).token if auth.enabled else None
-            await websocket.send_json({
-                "type": "config",
+            await link.open(session_id, trace, {
                 "sample_rate": orchestrator.config.sample_rate,  # what we want from the client
                 "output_sample_rate": orchestrator.config.tts.sample_rate,  # what replies arrive in
                 "channels": orchestrator.config.channels,
-                "session_id": session_id,
                 **({"next_token": next_token} if next_token else {}),
             })
 
@@ -643,13 +724,8 @@ async def voice_websocket(websocket: WebSocket):
             audio_queue: asyncio.Queue = asyncio.Queue()
             barge_in = BargeInState()
 
-            def _handle_control(raw: str):
+            def _handle_control(msg: dict):
                 """Control messages the client sends alongside the audio stream."""
-                try:
-                    msg = json.loads(raw)
-                except (ValueError, TypeError):
-                    trace.event("client.bad_message", level="warning", stage="server", bytes=len(raw))
-                    return
                 if msg.get("type") == "interrupt":
                     # A client that detects interruptions itself, and has already
                     # stopped its own playback. Cancel generation so we stop
@@ -678,13 +754,11 @@ async def voice_websocket(websocket: WebSocket):
                 else:
                     trace.event("client.unknown_message", level="debug", stage="server", message_type=msg.get("type"))
 
+            link.controls = _handle_control
             budget = AudioBudget(limits, orchestrator.config.sample_rate)
             from fusion_runtime.engine.audio_watch import AudioWatch
 
             hearing = AudioWatch(limits.dead_audio_s)
-            from fusion_runtime.engine.audio_format import Intake
-
-            intake = Intake(orchestrator.config.sample_rate)
 
             def report_audio(change):
                 """The caller's audio stopped, went digitally silent, or came back: log it, tell the client."""
@@ -693,37 +767,28 @@ async def voice_websocket(websocket: WebSocket):
                 if change["event"] == "audio.problem":
                     trace.event("audio.problem", level="warning", stage="audio", problem=change["problem"],
                                 seconds=change["seconds"], hint=change["message"])
-                    _dispatch_event(websocket, {"type": "audio_problem", "problem": change["problem"],
-                                                "message": change["message"]})
+                    link.event({"type": "audio_problem", "problem": change["problem"], "message": change["message"]})
                 else:
                     trace.event("audio.ok", stage="audio", problem=change["problem"], lasted_s=change["lasted_s"])
-                    _dispatch_event(websocket, {"type": "audio_ok"})
+                    link.event({"type": "audio_ok"})
 
             async def receive_audio():
                 turns_seen = trace.turn_count
                 while True:
-                    message = await websocket.receive()
-                    if message["type"] == "websocket.disconnect":
-                        raise WebSocketDisconnect(message.get("code", 1000))
-                    data = message.get("bytes")
-                    if data is not None:
+                    kind, data, size = await link.receive()
+                    budget.message(size)
+                    if kind == "audio":
                         if trace.turn_count != turns_seen:  # a turn ended: the budget starts again
                             turns_seen = trace.turn_count
                             budget.turn_ended()
                         budget.audio(len(data), speech_s=trace.speech_s, last_speech=trace.last_speech_mono)
-                        data = intake.accept(data)  # whole samples; a WAV header gone; BadAudioFormat otherwise
-                        if intake.note:
-                            trace.event("audio.format_fixed", level="warning", stage="audio", hint=intake.note)
-                            _dispatch_event(websocket, {"type": "warning", "code": "wav_header", "message": intake.note})
-                            intake.note = None
                         report_audio(hearing.frame(data))
                         if data:
                             await audio_queue.put(data)
-                        continue
-                    text = message.get("text")
-                    if text is not None:
-                        budget.message(len(text))
-                        _handle_control(text)
+                    elif kind == "control":
+                        _handle_control(data)
+                    else:
+                        trace.event("client.bad_message", level="warning", stage="server", bytes=size)
 
             async def watch_the_clock():
                 """A socket that opened and went quiet, or a conversation that never
@@ -745,31 +810,11 @@ async def voice_websocket(websocket: WebSocket):
                     chunk = await audio_queue.get()
                     yield chunk
 
-            def _dispatch_event(ws, event):
-                # Fire-and-forget event send (transcripts, responses, traces).
-                # The socket may already be closing by the time this task runs
-                # (client disconnected mid-pipeline) — swallow that quietly
-                # instead of letting it surface as "Task exception was never
-                # retrieved".
-                async def _send():
-                    try:
-                        await ws.send_json(event)
-                    except (RuntimeError, WebSocketDisconnect):
-                        pass
-                    except Exception as e:
-                        if not _client_gone(ws, e):
-                            trace.event("client.send_failed", level="warning", stage="server",
-                                        error=describe_error(e, "server"), event_type=event.get("type"))
-                try:
-                    asyncio.get_running_loop().create_task(_send())
-                except RuntimeError:
-                    pass
-
             async def send_audio():
                 pipeline = orchestrator.run_pipeline(
                     audio_stream(),
                     agent.prompt if agent is not None else DEFAULT_PROMPT,
-                    on_event=lambda event: _dispatch_event(websocket, event),
+                    on_event=link.event,
                     barge_in=barge_in,
                     trace=trace,
                     tools=agent.tools if agent is not None else (),
@@ -782,7 +827,7 @@ async def voice_websocket(websocket: WebSocket):
                     reply_bytes_per_s = 2 * orchestrator.config.tts.sample_rate  # 16-bit mono
                     async for chunk in pipeline:
                         budget.agent_spoke(len(chunk) / reply_bytes_per_s)
-                        await websocket.send_bytes(chunk)
+                        await link.send_audio(chunk)
                 finally:
                     # Close the pipeline now (not whenever it gets garbage collected), so its
                     # tasks, per-session VAD models and decode threads are released.
@@ -798,28 +843,21 @@ async def voice_websocket(websocket: WebSocket):
                                          return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 exc = task.exception()
-                if exc is not None and not _client_gone(websocket, exc):
+                if exc is not None and not link.gone(exc):
                     raise exc
 
         except BadAudioFormat as e:
             end_reason, error_code = "bad_audio_format", "bad_audio_format"
             telemetry.emit("session.bad_audio", level="warning", stage="audio", key=principal.label, detail=str(e))
-            with contextlib.suppress(Exception):
-                await websocket.send_json({"type": "error", "code": "bad_audio_format", "message": str(e),
-                                           "retryable": False})
-            with contextlib.suppress(Exception):
-                await websocket.close(code=1003)  # unsupported data
+            await link.fail({"type": "error", "code": "bad_audio_format", "message": str(e), "retryable": False},
+                            1003)  # unsupported data
         except OverLimit as e:
             end_reason, error_code = e.reason, e.reason
             telemetry.emit("session.limited", level="warning", stage="server", reason=e.reason,
                            key=principal.label, detail=str(e))
-            with contextlib.suppress(Exception):
-                await websocket.send_json({"type": "error", "code": e.reason, "message": str(e),
-                                           "retryable": True})
-            with contextlib.suppress(Exception):
-                await websocket.close(code=e.close_code)
+            await link.fail({"type": "error", "code": e.reason, "message": str(e), "retryable": True}, e.close_code)
         except Exception as e:
-            if _client_gone(websocket, e):
+            if link.gone(e):
                 end_reason = "client_disconnected"
             else:
                 end_reason = "error"
@@ -827,13 +865,10 @@ async def voice_websocket(websocket: WebSocket):
                 error_code = info.code
                 if not getattr(e, "fusion_reported", False):  # pipeline errors are already logged and counted
                     telemetry.emit("session.error", level="error", stage="server", error=info)
-                with contextlib.suppress(Exception):
-                    await websocket.send_json({"type": "error", "session_id": session_id,
-                                               "turn_id": (trace.responding or trace.listening).turn_id
-                                               if (trace.responding or trace.listening) else None,
-                                               **info.for_client()})
-                with contextlib.suppress(Exception):
-                    await websocket.close(code=1011)
+                await link.fail({"type": "error", "session_id": session_id,
+                                 "turn_id": (trace.responding or trace.listening).turn_id
+                                 if (trace.responding or trace.listening) else None,
+                                 **info.for_client()}, 1011)
         finally:
             for task in (send_task, receive_task, clock_task):
                 if task is not None and not task.done():

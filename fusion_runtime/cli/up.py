@@ -12,7 +12,7 @@ import typer
 
 from fusion_runtime.cli._common import Profile, short_path
 
-PUBLIC_URL_ENV = "FUSION_PUBLIC_URL"  # the address people open, when it isn't this machine's (a proxy, a domain)
+PUBLIC_URL_ENV = "FUSION_PUBLIC_URL"  # config.PUBLIC_URL_ENV; not imported, so `frun --help` stays light
 
 class LogFormat(str, Enum):
     pretty = "pretty"
@@ -335,6 +335,10 @@ def up(
         os.environ["FUSION_AGENT"] = str(agent_file)
     else:
         os.environ.pop("FUSION_AGENT", None)
+    if public and not os.environ.get(PUBLIC_URL_ENV):
+        # The server checks phone providers' signatures against the address they called: on a pod
+        # that's the proxy's, not the one it sees
+        os.environ[PUBLIC_URL_ENV] = public
     os.environ["FUSION_LOG_FORMAT"] = log_format.value
     os.environ["FUSION_LOG_LEVEL"] = log_level.value
     os.environ["FUSION_LOG_CONTENT"] = "1" if log_content else "0"
