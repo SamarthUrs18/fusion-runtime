@@ -196,6 +196,12 @@ provider's side from your machine, with your microphone, at phone quality. All t
 from the providers' documentation and tested with that simulator, not yet on real numbers; if your
 account behaves differently, open an issue.
 
+On Twilio, test with an upgraded account and a number of your own. A trial account's calls come
+from a shared sandbox number that neither signs its requests nor streams the call's audio to a
+server, and a newly upgraded account may hold calls until Twilio's KYC (a Trust Hub customer
+profile) is approved. A refused webhook is logged with the address fusion checked, which tells a
+wrong address from a wrong token.
+
 ## Authentication
 
 ```bash

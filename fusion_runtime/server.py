@@ -642,6 +642,8 @@ async def twilio_incoming_call(request: Request):
     if not twilio.valid_signature(secret, url, form, request.headers.get("x-twilio-signature")):
         telemetry.emit("auth.failed", level="warning", stage="server", path=twilio.WEBHOOK_PATH,
                        client=_client_host(request), reason="the Twilio signature didn't match",
+                       checked_url=url, signed=bool(request.headers.get("x-twilio-signature")),
+                       params=",".join(sorted(form)),  # names only: the values hold the caller's number
                        hint=f"check {twilio.AUTH_TOKEN_ENV}, and that {PUBLIC_URL_ENV} is the address Twilio calls")
         with contextlib.suppress(OverLimit):
             auth_failures.check(_rate_address(request))
