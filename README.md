@@ -19,6 +19,11 @@ one machine and stream into each other, so a reply starts playing while it's sti
 stopwatched from your last syllable — the difference is a silence wait you can configure. 127
 tokens/sec, interruptions honoured mid-sentence.
 
+**Answers real phone calls.** Point your own Twilio number at it (Exotel and Plivo too), and the
+agent answers on your GPU. Tested on real Twilio calls: the caller asks about an order, the agent
+looks it up and changes the delivery with tools mid-call, and the caller can cut in.
+[Phone calls →](#phone-calls)
+
 ## Quickstart
 
 Requires Python 3.11–3.13.
@@ -168,6 +173,12 @@ never holds an API key: your backend mints it a short-lived token.
 
 ## Phone calls
 
+**Tested on real Twilio calls** to a US number, from a mobile in India and from a second Twilio
+number: the agent looked orders up and changed deliveries with tools mid-call, and the caller
+talked over it and it stopped. Exotel and Plivo are built from the providers' documentation and
+tested with the [simulator](tools/phone_sim/README.md), not yet on real numbers; if your account
+behaves differently, open an issue.
+
 Keep your own number and your provider account (and its KYC); the provider streams each call to
 fusion, and the agent answers it. Twilio, Exotel and Plivo:
 
@@ -193,11 +204,6 @@ drops the agent's unplayed audio the moment the caller talks over it), tools and
 
 Try it without a number or an account: [`tools/phone_sim`](tools/phone_sim/README.md) plays the
 provider's side from your machine, with your microphone, at phone quality.
-
-Twilio is tested on real calls to a US number: from a mobile in India and from a second Twilio
-number, looking orders up and changing them with tools, with the caller talking over the agent.
-Exotel and Plivo are built from the providers' documentation and tested with the simulator, not
-yet on real numbers; if your account behaves differently, open an issue.
 
 On Twilio, test by calling a number of your own. The console's test call on a trial account comes
 from a shared sandbox number that neither signed its requests nor streamed the call's audio to
