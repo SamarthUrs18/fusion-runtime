@@ -192,15 +192,30 @@ drops the agent's unplayed audio the moment the caller talks over it), tools and
   records its loudest moment and whether the caller was heard at all.
 
 Try it without a number or an account: [`tools/phone_sim`](tools/phone_sim/README.md) plays the
-provider's side from your machine, with your microphone, at phone quality. All three are built
-from the providers' documentation and tested with that simulator, not yet on real numbers; if your
-account behaves differently, open an issue.
+provider's side from your machine, with your microphone, at phone quality.
 
-On Twilio, test with an upgraded account and a number of your own. A trial account's calls come
-from a shared sandbox number that neither signs its requests nor streams the call's audio to a
-server, and a newly upgraded account may hold calls until Twilio's KYC (a Trust Hub customer
-profile) is approved. A refused webhook is logged with the address fusion checked, which tells a
-wrong address from a wrong token.
+Twilio is tested on real calls to a US number: from a mobile in India and from a second Twilio
+number, looking orders up and changing them with tools, with the caller talking over the agent.
+Exotel and Plivo are built from the providers' documentation and tested with the simulator, not
+yet on real numbers; if your account behaves differently, open an issue.
+
+On Twilio, test by calling a number of your own. The console's test call on a trial account comes
+from a shared sandbox number that neither signed its requests nor streamed the call's audio to
+fusion in our tests, and a newly upgraded account may hold calls until Twilio's KYC (a Trust Hub
+customer profile) is approved. A refused webhook is logged with the address fusion checked, which
+tells a wrong address from a wrong token.
+
+Calls that cross a border can lose audio on the way, before it reaches fusion: in our tests calls
+between India and a US number dropped parts of words, and calls Twilio placed to India reported
+"answered" while the phone was still ringing, then stayed silent. Test with a caller in the
+number's own country, or call it from a second number with Twilio's
+[Dev Phone](https://www.twilio.com/docs/labs/dev-phone).
+
+Phone audio is narrower than a microphone's, and Whisper small mishears more on it: "order 1042"
+came through as "RDEF 1042" for one caller. For callers, a larger model and a longer pause help,
+for about half a second more before each reply: `stt=STT("hf:deepdml/faster-whisper-large-v3-turbo-ct2")`
+(`frun models pull` it first) and `turns=Turns(wait_ms=800)`, so a caller who pauses mid-sentence
+isn't answered halfway.
 
 ## Authentication
 
