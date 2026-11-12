@@ -154,3 +154,30 @@ def test_audio_coming_back_quietly_ends_no_audio():
     assert watch.check()["problem"] == "no_audio"
     clock.now += 0.2
     assert watch.frame(HISS)["event"] == "audio.ok"  # frames again, even if only the line's hiss
+
+
+def test_zeros_on_a_phone_line_are_not_called_a_muted_microphone():
+    """Twilio's Dev Phone sends exact zeros in every pause (3 Nov), and the log said "Your
+    microphone is sending only silence" for a caller who was only listening."""
+    clock = Clock()
+    watch = AudioWatch(after_s=3.0, clock=clock, floor_rms=40, quiet_after_s=10.0, phone_line=True)
+    watch.frame(SPEECH)
+    changes = []
+    for _ in range(20):  # 4 s of zeros
+        clock.now += 0.2
+        changes.append(watch.frame(ZEROS))
+    [problem] = [c for c in changes if c]
+    assert problem["problem"] == "silent_audio" and problem["level"] == "info"
+    assert "microphone" not in problem["message"] and "pause" in problem["message"]
+    clock.now += 0.2
+    assert watch.frame(SPEECH)["event"] == "audio.ok"
+
+
+def test_the_browser_still_warns_about_a_muted_mic():
+    clock = Clock()
+    watch = AudioWatch(after_s=3.0, clock=clock)
+    clock.now += 3.0
+    watch.frame(ZEROS)
+    clock.now += 3.0
+    problem = watch.frame(ZEROS)
+    assert problem["level"] == "warning" and "muted" in problem["message"]

@@ -877,14 +877,15 @@ async def _voice_session(link: Link, principal: Principal) -> None:
 
             hearing = AudioWatch(limits.dead_audio_s,
                                  floor_rms=limits.phone_floor_rms if link.phone_line else 0.0,
-                                 quiet_after_s=limits.dead_line_s if link.phone_line else 0.0)
+                                 quiet_after_s=limits.dead_line_s if link.phone_line else 0.0,
+                                 phone_line=link.phone_line)
 
             def report_audio(change):
                 """The caller's audio stopped, went digitally silent, or came back: log it, tell the client."""
                 if change is None:
                     return
                 if change["event"] == "audio.problem":
-                    trace.event("audio.problem", level="warning", stage="audio", problem=change["problem"],
+                    trace.event("audio.problem", level=change["level"], stage="audio", problem=change["problem"],
                                 seconds=change["seconds"], hint=change["message"])
                     link.event({"type": "audio_problem", "problem": change["problem"], "message": change["message"]})
                 else:

@@ -29,6 +29,18 @@ MESSAGES = {
     "quiet_line": "Nothing above the line's noise floor: a dead phone line, or a very quiet caller.",
 }
 
+# A phone line has no microphone for anyone to check, and zeros there are often just a pause:
+# some phones and apps send exact silence between words (Twilio's Dev Phone does, 3 Nov). So
+# it's said as what it is, at info level, and a line that stays dead shows as "quiet_line" or in
+# the call's peak_rms.
+PHONE_MESSAGES = {
+    "no_audio": "The phone line stopped sending audio. Check the provider's media stream.",
+    "silent_audio": "The line is sending exact silence: a pause on a phone that mutes between words, "
+                    "or a caller on mute.",
+    "quiet_line": MESSAGES["quiet_line"],
+}
+PHONE_LEVELS = {"silent_audio": "info"}
+
 
 class AudioWatch:
     """`floor_rms` and `quiet_after_s` are for phone lines, where a dead path is faint hiss rather
@@ -37,8 +49,9 @@ class AudioWatch:
     """
 
     def __init__(self, after_s: float = 3.0, clock: Callable[[], float] = time.monotonic,
-                 floor_rms: float = 0.0, quiet_after_s: float = 0.0):
+                 floor_rms: float = 0.0, quiet_after_s: float = 0.0, phone_line: bool = False):
         self.after_s = after_s
+        self.phone_line = phone_line
         self.floor_rms = floor_rms
         self.quiet_after_s = quiet_after_s
         self._clock = clock
@@ -99,8 +112,10 @@ class AudioWatch:
 
     def _start(self, problem: str, seconds: float, now: float) -> Dict:
         self.problem, self._problem_since = problem, now
+        messages = PHONE_MESSAGES if self.phone_line else MESSAGES
+        level = PHONE_LEVELS.get(problem, "warning") if self.phone_line else "warning"
         return {"event": "audio.problem", "problem": problem, "seconds": round(seconds, 1),
-                "message": MESSAGES[problem]}
+                "message": messages[problem], "level": level}
 
     def _end(self, now: float) -> Dict:
         problem, since = self.problem, self._problem_since
