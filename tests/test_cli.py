@@ -463,10 +463,11 @@ def test_up_defaults_keep_content_out_of_logs(monkeypatch):
     monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
     monkeypatch.delenv("FUSION_CONFIG", raising=False)  # not a legal profile name
     monkeypatch.delenv("FUSION_LOG_FORMAT", raising=False)  # an unknown one is an error now (test below)
-    for var in ("FUSION_LOG_LEVEL", "FUSION_LOG_CONTENT"):
-        monkeypatch.setenv(var, "unset-before-test")
-    runner.invoke(app, ["up"])
-    assert (os.environ["FUSION_LOG_FORMAT"], os.environ["FUSION_LOG_CONTENT"]) == ("pretty", "0")
+    monkeypatch.delenv("FUSION_LOG_LEVEL", raising=False)
+    monkeypatch.setenv("FUSION_LOG_CONTENT", "unset-before-test")  # not a yes: stays off
+    assert runner.invoke(app, ["up"]).exit_code == 0
+    assert (os.environ["FUSION_LOG_FORMAT"], os.environ["FUSION_LOG_LEVEL"], os.environ["FUSION_LOG_CONTENT"]) == (
+        "pretty", "info", "0")
 
 
 def test_talk_passes_verbose(monkeypatch):
@@ -649,3 +650,28 @@ def test_up_logs_in_the_format_the_environment_asks_for(monkeypatch):
     monkeypatch.setenv("FUSION_LOG_FORMAT", "yaml")
     result = runner.invoke(app, ["up"])
     assert result.exit_code != 0 and "isn't a log format" in result.output
+
+
+def test_up_keeps_log_level_and_content_from_the_environment(monkeypatch):
+    """Pod test 3 Nov: FUSION_LOG_CONTENT=1 in .env, and `frun up` set it back to 0 because the
+    --log-content flag defaulted to off. The flags win only when given."""
+    _all_models_installed(monkeypatch)
+    _record_uvicorn(monkeypatch)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    monkeypatch.delenv("FUSION_AGENT", raising=False)
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)
+    monkeypatch.delenv("FUSION_LOG_FORMAT", raising=False)
+
+    monkeypatch.setenv("FUSION_LOG_CONTENT", "1")
+    monkeypatch.setenv("FUSION_LOG_LEVEL", "debug")
+    assert runner.invoke(app, ["up"]).exit_code == 0
+    assert (os.environ["FUSION_LOG_CONTENT"], os.environ["FUSION_LOG_LEVEL"]) == ("1", "debug")
+
+    monkeypatch.setenv("FUSION_LOG_CONTENT", "1")
+    monkeypatch.setenv("FUSION_LOG_LEVEL", "debug")
+    assert runner.invoke(app, ["up", "--no-log-content", "--log-level", "warning"]).exit_code == 0
+    assert (os.environ["FUSION_LOG_CONTENT"], os.environ["FUSION_LOG_LEVEL"]) == ("0", "warning")
+
+    monkeypatch.setenv("FUSION_LOG_LEVEL", "loud")
+    result = runner.invoke(app, ["up"])
+    assert result.exit_code != 0 and "isn't a log level" in result.output

@@ -26,6 +26,15 @@ class LogLevel(str, Enum):
     error = "error"
 
 
+def _from_env(choices, var: str, default, what: str):
+    wanted = (os.environ.get(var) or "").strip().lower()
+    try:
+        return choices(wanted) if wanted else default
+    except ValueError:
+        raise typer.BadParameter(
+            f"{var}={wanted!r} isn't a {what}. Use one of: {', '.join(c.value for c in choices)}") from None
+
+
 def up(
     agent: str = typer.Argument(
         None, metavar="[AGENT.PY]",
@@ -45,12 +54,14 @@ def up(
         help="pretty: readable lines for a terminal. json: one JSON object per line, for log collectors and "
              "deployments. Defaults to $FUSION_LOG_FORMAT, then pretty.",
     ),
-    log_level: LogLevel = typer.Option(
-        LogLevel.info, "--log-level", help="debug adds every partial transcript, audio chunk and client message.",
+    log_level: Optional[LogLevel] = typer.Option(
+        None, "--log-level", help="debug adds every partial transcript, audio chunk and client message. "
+                                  "Defaults to $FUSION_LOG_LEVEL, then info.",
     ),
-    log_content: bool = typer.Option(
-        False, "--log-content",
-        help="Include transcripts and replies in logs. Off by default: logs show only text lengths.",
+    log_content: Optional[bool] = typer.Option(
+        None, "--log-content/--no-log-content",
+        help="Include transcripts and replies in logs. Defaults to $FUSION_LOG_CONTENT, then off: "
+             "logs show only text lengths.",
     ),
     llm_url: str = typer.Option(
         None, "--llm-url", help="Use an OpenAI-compatible endpoint for the LLM, e.g. http://localhost:8080/v1 "
@@ -104,14 +115,15 @@ def up(
 
     # Same order as --config: the flag, then the variable. The images set FUSION_LOG_FORMAT=json,
     # and a flag default of pretty used to overwrite it, so containers logged for a terminal.
+    # Level and content work the same way: the default flag values used to overwrite
+    # FUSION_LOG_LEVEL and FUSION_LOG_CONTENT, so a .env asking for content logs got none.
     if log_format is None:
-        wanted = (os.environ.get("FUSION_LOG_FORMAT") or "").strip().lower()
-        try:
-            log_format = LogFormat(wanted) if wanted else LogFormat.pretty
-        except ValueError:
-            raise typer.BadParameter(
-                f"FUSION_LOG_FORMAT={wanted!r} isn't a log format. Use one of: "
-                f"{', '.join(f.value for f in LogFormat)}") from None
+        log_format = _from_env(LogFormat, "FUSION_LOG_FORMAT", LogFormat.pretty, "log format")
+    if log_level is None:
+        log_level = _from_env(LogLevel, "FUSION_LOG_LEVEL", LogLevel.info, "log level")
+    if log_content is None:
+        # Same reading as the server's (telemetry.configure_from_env); anything else stays off
+        log_content = (os.environ.get("FUSION_LOG_CONTENT") or "").strip().lower() in ("1", "true", "yes")
 
     from fusion_runtime.cli._checks import missing_models, port_answers_over_ipv6, port_in_use
     from fusion_runtime.config import (
