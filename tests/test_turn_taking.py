@@ -424,3 +424,84 @@ class TestResumedTurns:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+async def test_hanging_up_leaves_no_pending_wait_behind():
+    """Pod, 2 and 3 Nov: a caller hung up while the pipeline waited for their next turn, the wait
+    was left pending, and Python printed "Task was destroyed but it is pending!" mid-way through
+    the next call when the garbage collector found it."""
+    orch = make_orchestrator()
+    gen = orch._llm_stage(stt_once_then_stall("hello"), "system prompt", turn_state=TurnState())
+    step = asyncio.ensure_future(gen.__anext__())
+    await asyncio.sleep(0.05)  # no silence after "hello": still waiting for the turn to end
+    assert not step.done()
+    await cancel_and_wait(step)  # the call ends
+    await gen.aclose()
+    await asyncio.sleep(0)
+    left = [t for t in asyncio.all_tasks() if not t.done() and "Event.wait" in repr(t.get_coro())]
+    assert left == []
+
+
+async def stt_silent_forever():
+    """STT that never hears a word: noise, a cough, a TV in the next room."""
+    await asyncio.Event().wait()
+    yield  # pragma: no cover
+
+
+async def test_noise_without_words_is_dropped_after_the_pause():
+    """Pod, 3 Nov: sound the voice detector took for speech, with no words in it, kept the turn
+    open. Every later sound joined it, the turn limit counted it all as one turn of speech, and
+    a call with background noise ended after 60 s."""
+    from fusion_runtime.telemetry.trace import SessionTrace
+
+    sink = ListSink()
+    telemetry.add_sink(sink)
+    orch = make_orchestrator(min_silence_ms=300)
+    turn_state = TurnState(vad_active=True, heard_speech=True)
+    flushed = []
+    turn_state.start_next_turn = lambda: flushed.append(True)
+
+    async def nothing_left():
+        return None
+
+    turn_state.finalize_transcript = nothing_left
+    trace = SessionTrace()
+    trace.listening_turn().mark("speech_start")
+    stt_reset = asyncio.Event()
+    driver = asyncio.create_task(hold_then_grow_silence(turn_state, hold_ms=0))
+    gen = orch._llm_stage(stt_silent_forever(), "system prompt", None, turn_state, stt_reset, trace=trace)
+    step = asyncio.ensure_future(gen.__anext__())
+    try:
+        await asyncio.sleep(0.6)
+        assert not step.done(), "nothing to answer"
+        assert flushed == [True] and stt_reset.is_set() and turn_state.heard_speech is False
+        assert trace.listening is None, "the next sound starts a new turn"
+        assert [e.name for e in sink.events if e.name in ("turn.no_words", "turn.summary")] == [
+            "turn.no_words", "turn.summary"]
+        assert sink.named("turn.summary")[0].attrs["outcome"] == "no_words"
+    finally:
+        telemetry.remove_sink(sink)
+        driver.cancel()
+        await cancel_and_wait(step)
+        await gen.aclose()
+
+
+async def test_late_last_words_are_answered_not_dropped():
+    """The pause came before the STT's next partial: the words finalized on demand are the turn."""
+    orch = make_orchestrator(min_silence_ms=300)
+    turn_state = TurnState(vad_active=True, heard_speech=True)
+    turn_state.start_next_turn = lambda: None
+
+    async def last_words():
+        return PartialTranscript(text="yes please", confidence=1.0, latency_ms=0)
+
+    turn_state.finalize_transcript = last_words
+    driver = asyncio.create_task(hold_then_grow_silence(turn_state, hold_ms=0))
+    gen = orch._llm_stage(stt_silent_forever(), "system prompt", turn_state=turn_state)
+    try:
+        assert await asyncio.wait_for(gen.__anext__(), 2.0) == "ok"
+        assert orch.llm.user_messages == ["yes please"]
+    finally:
+        driver.cancel()
+        await gen.aclose()
+

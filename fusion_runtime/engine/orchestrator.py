@@ -781,6 +781,7 @@ class PipelineOrchestrator:
                     turn_state.vad_active = True
                     if prob >= threshold:
                         turn_state.silence_ms = 0.0
+                        turn_state.heard_speech = True
                     else:
                         turn_state.silence_ms += frame_ms
 
@@ -991,6 +992,15 @@ class PipelineOrchestrator:
                         finalize_task = asyncio.create_task(turn_state.finalize_transcript())
                     text = pending_transcript.strip()
                     if not text:
+                        # With no way to transcribe the last words on demand, words still on their
+                        # way from the STT would look like none: give them the fallback's grace too
+                        can_finalize = getattr(turn_state, "finalize_transcript", None) is not None
+                        drop_after = turn_config.min_silence_ms + (0 if can_finalize else 1500)
+                        if (paused_ms >= drop_after and getattr(turn_state, "heard_speech", False)
+                                and finalize_task is None):
+                            await last_words_transcribed()
+                            if not pending_transcript.strip() and turn_state.silence_ms >= drop_after:
+                                drop_wordless_turn(turn_state.silence_ms)
                         continue
 
                     if ask_detector:
@@ -1044,8 +1054,24 @@ class PipelineOrchestrator:
             pending_audio_bytes = 0
             if turn_state is not None:
                 turn_state.speech_audio.clear()
+                turn_state.heard_speech = False
                 if turn_state.start_next_turn is not None:
                     turn_state.start_next_turn()
+
+        def drop_wordless_turn(paused_ms: float) -> None:
+            """The voice detector heard something (a cough, a door, a TV), the caller paused, and
+            no words came of it. Left open, that turn swallowed every later sound: the call's
+            turn limit counted all of it as one turn of speech and ended the call after 60 s
+            of noise (pod, 3 Nov), and the noise stayed in what was sent to be transcribed."""
+            if trace is not None:
+                turn = trace.listening_turn()
+                trace.event("turn.no_words", turn=turn, level="debug", stage="turn", paused_ms=round(paused_ms),
+                            speech_ms=round(turn.counts.get("speech_audio_ms", 0)),
+                            hint="sound without words, so nothing to answer; the next sound starts a new turn")
+                trace.end_turn(turn, "no_words")
+            if stt_reset is not None:
+                stt_reset.set()
+            start_next_turn()
 
         def resume_previous_turn() -> None:
             """If the user cut off the last reply right after their turn ended, they weren't done:
@@ -1327,6 +1353,7 @@ class PipelineOrchestrator:
 
         accumulate_task = asyncio.create_task(accumulate_stt())
         watcher_task = asyncio.create_task(watch_for_turn_end())
+        ready_wait: Optional[asyncio.Task] = None
         try:
             if greeting and greeting.strip():
                 async for token in speak_greeting(greeting.strip()):
@@ -1364,10 +1391,18 @@ class PipelineOrchestrator:
         finally:
             accumulate_task.cancel()
             watcher_task.cancel()
+            # A caller who hangs up stops this while it waits for the next turn: left pending,
+            # that wait was collected later and printed "Task was destroyed but it is pending!"
+            # in the middle of the next call (pod, 2 and 3 Nov)
+            if ready_wait is not None:
+                ready_wait.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await accumulate_task
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher_task
+            if ready_wait is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ready_wait
 
     def check_tools(self, tools: Sequence[Tool]) -> None:
         """Refuse tools the loaded LLM can't call, at startup rather than on the first call."""

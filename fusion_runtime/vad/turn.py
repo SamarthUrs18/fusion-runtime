@@ -18,6 +18,9 @@ class TurnState:
     """
     silence_ms: float = 0.0
     vad_active: bool = False
+    # VAD heard something since this turn started, words or not. Lets a turn of noise
+    # that never became words be dropped instead of staying open.
+    heard_speech: bool = False
     # This turn's speech so far (16-bit PCM, 16 kHz), kept only when the turn
     # detector uses audio; trimmed to the most recent seconds.
     speech_audio: bytearray = field(default_factory=bytearray)
