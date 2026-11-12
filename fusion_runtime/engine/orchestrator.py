@@ -4,6 +4,7 @@ import contextlib
 import copy
 import difflib
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncIterator, Dict, List, Optional, Sequence, Tuple
 
@@ -741,6 +742,11 @@ class PipelineOrchestrator:
         segment_start_sample = 0
         silence_start_sample = 0
 
+        # The frames just before speech starts, sent ahead of it (VADConfig.pre_roll_ms). Only
+        # frames since the last speech frame, so what's sent is the audio right before the onset
+        pre_roll_frames = int(getattr(vad_config, "pre_roll_ms", 0) // frame_ms) if vad_config is not None else 0
+        before_speech: deque = deque(maxlen=max(pre_roll_frames, 1))
+
         buffer = bytearray()
         async for chunk in audio_stream:
             buffer.extend(chunk)
@@ -789,7 +795,11 @@ class PipelineOrchestrator:
                     if trace is not None:
                         trace.speech_heard(chunk_samples / sample_rate,
                                            at_mono=trace.arrival_time(frame_start_sample))
+                    while before_speech:
+                        yield before_speech.popleft()
                     yield frame
+                elif pre_roll_frames:
+                    before_speech.append(frame)
 
         if trace is not None and speaking:
             # Audio ended mid-speech (a file, or the client hung up while talking): close the segment.

@@ -139,6 +139,10 @@ class VADConfig(BaseModel):
     threshold: float = 0.5
     min_silence_ms: int = 100
     min_speech_ms: int = 250
+    # Audio kept from just before speech starts. Silero is only sure a frame or two into a word,
+    # and its soft first sounds ("w" of "wait") scored under the threshold and never reached
+    # the recogniser: short words said while cutting in lost their start. 0 = off
+    pre_roll_ms: int = 256
 
 
 class TurnDetectionConfig(BaseModel):

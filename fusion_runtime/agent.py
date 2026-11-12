@@ -189,18 +189,21 @@ class VAD:
     threshold: Optional[float] = None  # higher ignores more background noise
     min_speech_ms: Optional[int] = None
     min_silence_ms: Optional[int] = None
+    pre_roll_ms: Optional[int] = None  # audio kept from just before speech starts, so first sounds aren't lost
 
     def __init__(self, model: Optional[str] = None, *, threshold: Optional[float] = None,
-                 min_speech_ms: Optional[int] = None, min_silence_ms: Optional[int] = None) -> None:
+                 min_speech_ms: Optional[int] = None, min_silence_ms: Optional[int] = None,
+                 pre_roll_ms: Optional[int] = None) -> None:
         if model is not None:
             raise AgentError(
                 "VAD models can't be swapped yet (Silero is built in); VAD(threshold=..., "
-                "min_speech_ms=..., min_silence_ms=...) sets its behaviour"
+                "min_speech_ms=..., min_silence_ms=..., pre_roll_ms=...) sets its behaviour"
             )
         if threshold is not None and not 0.0 <= float(threshold) <= 1.0:
             raise AgentError(f"VAD(threshold=...) is between 0 and 1, got {threshold!r}")
         object.__setattr__(self, "threshold", threshold)
-        for name, value in (("min_speech_ms", min_speech_ms), ("min_silence_ms", min_silence_ms)):
+        for name, value in (("min_speech_ms", min_speech_ms), ("min_silence_ms", min_silence_ms),
+                            ("pre_roll_ms", pre_roll_ms)):
             if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
                 raise AgentError(f"VAD({name}=...) must be a whole number of milliseconds, got {value!r}")
             object.__setattr__(self, name, value)
@@ -292,6 +295,7 @@ class Agent:
                 "threshold": self.vad.threshold,
                 "min_speech_ms": self.vad.min_speech_ms,
                 "min_silence_ms": self.vad.min_silence_ms,
+                "pre_roll_ms": self.vad.pre_roll_ms,
             }.items() if v is not None}
             if updates:
                 parts["vad"] = config.vad.model_copy(update=updates)
