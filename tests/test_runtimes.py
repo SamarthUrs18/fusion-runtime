@@ -218,3 +218,84 @@ def test_tts_on_the_cpu_by_choice_isnt_a_warning():
     cpu = ["CPUExecutionProvider"]
     assert provider_warnings(cpu, cpu, ["onnxruntime-gpu"], cpu_on_purpose=True) == []
     assert "has no CUDA provider" in provider_warnings(cpu, cpu, ["onnxruntime-gpu"])[0][0]  # not chosen: said
+
+
+# ---- Whisper batches ----------------------------------------------------------------------------
+
+def _batching_stt(outs=None, crash=None):
+    from fusion_runtime.runtimes.ctranslate2.stt import CTranslate2STT
+
+    stt = CTranslate2STT(ModelSpec(stage="stt", runtime="ctranslate2", model="whisper"))
+    stt.model, stt._max_batch, stt.calls = object(), 4, []
+
+    def batch_sync(items):
+        stt.calls.append(len(items))
+        if crash:
+            raise RuntimeError(crash)
+        return [(f" window {i}", "en", 1.0, []) for i in range(len(items))] if outs is None else outs
+
+    stt._transcribe_batch_sync = batch_sync
+    return stt
+
+
+async def test_a_bad_request_fails_alone_and_the_rest_share_one_call():
+    from fusion_runtime.contract import InvalidRequest, Transcript
+
+    stt = _batching_stt()
+    good = b"\x01\x00" * 1600
+    results = await stt.transcribe([STTRequest(audio=good), STTRequest(audio=b"\x01"), STTRequest(audio=good)])
+    assert stt.calls == [2]  # the odd-length one never reached the model
+    assert isinstance(results[1], InvalidRequest)
+    assert [r.text for r in (results[0], results[2])] == [" window 0", " window 1"]
+    assert isinstance(results[0], Transcript) and results[0].duration_s == 0.1
+
+
+async def test_a_crashed_batch_is_a_failure_for_each_of_its_requests():
+    from fusion_runtime.contract import RuntimeFailure
+
+    stt = _batching_stt(crash="CUDA out of memory")
+    results = await stt.transcribe([STTRequest(audio=b"\x01\x00" * 1600) for _ in range(3)])
+    assert all(isinstance(r, RuntimeFailure) and "3 in one batch" in str(r) for r in results)
+
+
+async def test_invented_speech_dropped_in_a_batch_is_reported():
+    sink = ListSink()
+    telemetry.add_sink(sink)
+    try:
+        stt = _batching_stt(outs=[(" Hello.", "en", 1.0, []), ("", "en", 1.0, [(" Thanks for watching.", 0.8)])])
+        results = await stt.transcribe([STTRequest(audio=b"\x01\x00" * 1600) for _ in range(2)])
+    finally:
+        telemetry.remove_sink(sink)
+    assert [r.text for r in results] == [" Hello.", ""]
+    assert sink.named("stt.invented_speech_dropped")[0].attrs["no_speech_prob"] == 0.8
+
+
+def test_batch_size_defaults_to_one_on_the_cpu_and_eight_on_a_gpu():
+    from fusion_runtime.contract import InvalidRequest
+    from fusion_runtime.runtimes.ctranslate2.stt import CTranslate2STT
+
+    def sized(device, **options):
+        stt = CTranslate2STT(ModelSpec(stage="stt", runtime="ctranslate2", model="whisper", options=options))
+        stt.model = type("M", (), {"model": type("CT2", (), {"device": device})()})()
+        return stt._batch_size()
+
+    assert sized("cpu") == 1 and sized("cuda") == 8
+    assert sized("cpu", max_batch=4) == 4
+    with pytest.raises(InvalidRequest):
+        sized("cuda", max_batch=0)
+
+
+@pytest.mark.integration
+async def test_real_whisper_gives_the_same_words_batched():
+    resolved = _resolved_or_skip("stt")
+    resolved.spec.options["max_batch"] = 4
+    stt = create_runtime(resolved.spec)
+    await stt.load()
+    with wave.open(str(FIXTURE), "rb") as wav:
+        hello = wav.readframes(wav.getnframes())
+    with wave.open(str(FIXTURE.with_name("order_1042.wav")), "rb") as wav:
+        order = wav.readframes(wav.getnframes())
+    solo = (await stt.transcribe([STTRequest(audio=hello)]))[0]
+    batched = await stt.transcribe([STTRequest(audio=hello), STTRequest(audio=order), STTRequest(audio=hello)])
+    assert batched[0].text == batched[2].text == solo.text
+    assert "order" in batched[1].text.lower() and batched[1].language == "en"

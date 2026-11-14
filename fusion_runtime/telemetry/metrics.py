@@ -115,6 +115,8 @@ class TelemetryMetrics:
                                         ["stage"], buckets=LATENCY_BUCKETS, registry=r)
         self.scheduler_rejected = Counter("fusion_scheduler_rejected", "Requests refused because a model was at capacity",
                                           ["stage"], registry=r)
+        self.batch_size = Histogram("fusion_batch_size", "Requests in one model call (callers sharing it)",
+                                    ["stage"], buckets=(1, 2, 3, 4, 6, 8, 12, 16, 24, 32), registry=r)
         self.errors = Counter("fusion_errors", "Errors by stage and code", ["stage", "code"], registry=r)
         self.llm_server_up = Gauge("fusion_llm_server_up", "The LLM server answers its health check (1) or not (0)",
                                    ["engine"], registry=r)
@@ -184,6 +186,8 @@ class TelemetryMetrics:
                 self.scheduler_wait.labels(event.stage or "?").observe(event.duration_ms / 1000)
         elif name == "scheduler.rejected":
             self.scheduler_rejected.labels(event.stage or "?").inc()
+        elif name == "scheduler.batch":
+            self.batch_size.labels(event.stage or "?").observe(a.get("size", 1))
         elif name == "turn.resumed":
             self.turns_resumed.inc()
         elif name == "barge_in.fired":

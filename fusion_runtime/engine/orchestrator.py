@@ -607,11 +607,12 @@ class PipelineOrchestrator:
         stt_scheduler = self.scheduler("stt")
         session_id = trace.session_id if trace is not None else None
 
+        # Callers' windows that arrive while the model is busy share its next call (see scheduler.batch)
+        max_batch = getattr(getattr(self.stt, "capabilities", None), "max_batch", 1) or 1
+
         async def transcribe(pcm: bytes):
             request = STTRequest(audio=pcm, language=getattr(stt_config, "language", None), session_id=session_id)
-            async with stt_scheduler.slot(request):
-                results = await self.stt.transcribe([request])
-            return raise_if_error(results[0])
+            return raise_if_error(await stt_scheduler.batch(request, self.stt.transcribe, max_batch))
 
         # Apply VAD filter, then keep digital silence away from the recogniser whatever the VAD did
         vad_filtered = self._drop_digital_silence(self._apply_vad(audio_stream, turn_state, trace), trace)
