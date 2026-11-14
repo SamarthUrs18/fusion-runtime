@@ -34,6 +34,8 @@ BUILTIN_RUNTIMES: Dict[Tuple[str, str], str] = {
     ("stt", "ctranslate2"): "fusion_runtime.runtimes.ctranslate2.stt:CTranslate2STT",
     ("llm", "llama_cpp"): "fusion_runtime.runtimes.llama_cpp.llm:LlamaCppLLM",
     ("llm", "openai_http"): "fusion_runtime.runtimes.openai_http.llm:OpenAIHTTPLLM",
+    ("stt", "openai_http"): "fusion_runtime.runtimes.openai_http.stt:OpenAIHTTPSTT",
+    ("tts", "openai_http"): "fusion_runtime.runtimes.openai_http.tts:OpenAIHTTPTTS",
     ("tts", "onnx"): "fusion_runtime.runtimes.onnx.tts:OnnxTTS",
     ("turn", "silence"): "fusion_runtime.turns.silence:SilenceTurnDetector",
 }

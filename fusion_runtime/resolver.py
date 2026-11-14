@@ -16,7 +16,7 @@ Detection by format, never by model name:
     .gguf file                    → llama_cpp   (architecture, context length, chat template read from the file)
     CTranslate2 folder            → ctranslate2 (Whisper family: language support read from the vocabulary)
     .onnx file / folder           → onnx        (needs a family: from the catalog, a hint, or recognizable files)
-    http(s):// URL                → openai_http
+    http(s):// URL                → openai_http (chat, /audio/transcriptions or /audio/speech, by stage)
     safetensors folder            → not run in process: serve it with vLLM and point at its URL
 
 A model served by vLLM, SGLang or llama-server is named with that runtime in
@@ -55,7 +55,7 @@ RUNTIME_STAGES: Dict[str, Tuple[str, ...]] = {
     "llama_cpp": ("llm",),
     "ctranslate2": ("stt",),
     "onnx": ("tts",),
-    "openai_http": ("llm",),  # chat only; hosted STT/TTS would be a separate runtime
+    "openai_http": ("llm", "stt", "tts"),
 }
 
 # Servers named as a runtime: they speak the OpenAI API, so openai_http talks to them.
@@ -71,6 +71,8 @@ SERVED_RUNTIMES: Dict[str, Tuple[str, str]] = {
 _RUNTIME_OPTIONS = {
     "llama_cpp": "fusion_runtime.runtimes.llama_cpp.llm",
     "openai_http": "fusion_runtime.runtimes.openai_http.llm",
+    ("stt", "openai_http"): "fusion_runtime.runtimes.openai_http.stt",
+    ("tts", "openai_http"): "fusion_runtime.runtimes.openai_http.tts",
     "ctranslate2": "fusion_runtime.runtimes.ctranslate2.stt",
     "onnx": "fusion_runtime.runtimes.onnx.tts",
 }
@@ -196,7 +198,7 @@ def check_options(spec: ModelSpec, given: Mapping[str, Any], config_fields=(), s
     `given` is what the agent or config passed beyond the stage's own config fields;
     a misspelt setting (n_gpu_layer=20) would otherwise be dropped without a word.
     """
-    module = _RUNTIME_OPTIONS.get(spec.runtime)
+    module = _RUNTIME_OPTIONS.get((spec.stage, spec.runtime)) or _RUNTIME_OPTIONS.get(spec.runtime)
     if module is None:
         return  # a plugin knows its own settings
     import importlib
@@ -235,6 +237,9 @@ def _resolve_provider(stage, stage_config, ref, family, settings, catalog, root)
     from fusion_runtime.config import Provider
 
     provider = stage_config.provider
+    if stage in ("stt", "tts") and ref.startswith(("http://", "https://")):
+        # A speech server: the model's name on it goes in model_name, like an LLM endpoint's
+        return resolve(stage, ref, runtime="openai_http", options=settings, catalog=catalog, root=root)
     if stage == "llm" and (provider == Provider.OPENAI or ref.startswith(("http://", "https://"))):
         if ref.startswith(("http://", "https://")):
             url = ref
