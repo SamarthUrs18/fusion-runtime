@@ -225,7 +225,8 @@ def test_up_starts_server_with_chosen_profile(monkeypatch):
     assert result.exit_code == 0, result.output
     assert calls == [("fusion_runtime.server:app",
                       {"host": "127.0.0.1", "port": port, "workers": 1, "log_level": "info",
-                       "ws_max_size": 1024 * 1024})]  # oversized frames refused before buffering
+                       "ws_max_size": 1024 * 1024,  # oversized frames refused before buffering
+                       "ws_per_message_deflate": False})]
     assert os.environ["FUSION_CONFIG"] == "production"
     assert f"frun talk --url ws://localhost:{port}/v1/voice/ws" in result.output
 
@@ -675,3 +676,15 @@ def test_up_keeps_log_level_and_content_from_the_environment(monkeypatch):
     monkeypatch.setenv("FUSION_LOG_LEVEL", "loud")
     result = runner.invoke(app, ["up"])
     assert result.exit_code != 0 and "isn't a log level" in result.output
+
+
+def test_up_turns_off_websocket_compression(monkeypatch):
+    """4090 pod, 19 Nov: permessage-deflate compressed every audio frame on the event loop and
+    froze it for 100-180 ms with 16 callers; PCM barely compresses anyway."""
+    _all_models_installed(monkeypatch)
+    calls = _record_uvicorn(monkeypatch)
+    monkeypatch.setattr("fusion_runtime.cli._checks.port_in_use", lambda host, port: False)
+    monkeypatch.delenv("FUSION_CONFIG", raising=False)
+    monkeypatch.delenv("FUSION_AGENT", raising=False)
+    assert runner.invoke(app, ["up"]).exit_code == 0
+    assert calls[-1][1]["ws_per_message_deflate"] is False

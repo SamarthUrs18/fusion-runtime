@@ -1032,4 +1032,5 @@ if __name__ == "__main__":
         port=8000,
         workers=1,  # Single worker - scaling via container replication
         loop="uvloop",
+        ws_per_message_deflate=False,  # see cli/up.py: compressing audio blocked the event loop
     )

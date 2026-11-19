@@ -389,8 +389,12 @@ def up(
             engine.stop()
             printer.close()
 
-    # Refuse an oversized frame in the library, before it is buffered for us.
+    # Refuse an oversized frame in the library, before it is buffered for us. No WebSocket
+    # compression: it zlib-compresses every audio frame on the event loop, PCM hardly shrinks,
+    # and with 16 callers hearing replies it froze the loop (audio and interruptions for
+    # everyone) for 100-180 ms at a time (4090 pod, 19 Nov).
     settings = {"host": host, "port": port, "workers": 1, "ws_max_size": Limits.from_environment().max_message_bytes,
+                "ws_per_message_deflate": False,
                 "log_level": "warning" if log_format is LogFormat.json else "info"}
     if reload:
         settings.update(reload=True, reload_includes=[agent_file.name] if agent_file else None,
