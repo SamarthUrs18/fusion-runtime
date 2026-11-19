@@ -395,3 +395,25 @@ def test_a_turn_end_that_got_no_reply_is_replaced_when_the_caller_speaks_again()
     assert turn.awaiting_turn_end()
     turn.mark("turn_end_detected", at_mono=26.0, overwrite=True)
     assert turn.between_ms("speech_end", "turn_end_detected") == 500  # not -15000
+
+
+def _hold_the_loop(seconds):
+    time.sleep(seconds)  # what a blocking call looks like from the event loop
+
+
+async def test_a_stall_says_where_the_loop_was_stuck():
+    """4090 pod, 19 Nov: stalls of 100-400 ms said only that something blocked; finding the
+    first cause took a separate experiment. The watchdog catches the stack while it's stuck."""
+    sink = ListSink()
+    hub = Telemetry()
+    hub.add_sink(sink)
+    monitor = LoopMonitor(hub=hub, interval_s=0.02, stall_ms=100)
+    monitor.start()
+    await asyncio.sleep(0.05)
+    _hold_the_loop(0.3)
+    await asyncio.sleep(0.1)
+    await monitor.stop()
+    stall = sink.named("event_loop.stall")[0]
+    assert stall.attrs["where"].startswith("_hold_the_loop (test_telemetry.py:")
+    monitor._watchdog.join(timeout=1)
+    assert not monitor._watchdog.is_alive(), "the watchdog thread ends with the monitor"
