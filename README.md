@@ -24,6 +24,12 @@ agent answers on your GPU. Tested on real Twilio calls: the caller asks about an
 looks it up and changes the delivery with tools mid-call, and the caller can cut in.
 [Phone calls →](#phone-calls)
 
+**Sixteen callers on one GPU.** On an RTX 4090 with a 7B model on vLLM, one caller hears a reply
+about 0.6 s after they stop talking, eight about 1.4 s and sixteen about 2.3 s, with every turn
+answered. Whisper takes several callers in one pass, Kokoro speaks several sentences at once, and
+speech can come from any OpenAI-compatible server instead.
+[Several callers at once →](#several-callers-at-once)
+
 ## Quickstart
 
 Requires Python 3.11–3.13.
@@ -89,7 +95,16 @@ URL on a server with keys, the connection closes and the page says the token was
 ### Naming models
 
 A model is a catalog id (`frun models list`), a file path, `hf:owner/repo` for anything on
-Hugging Face, or a URL for an OpenAI-compatible endpoint. A model on vLLM, SGLang or
+Hugging Face, or a URL for an OpenAI-compatible endpoint — for speech too, not only the LLM:
+
+```python
+stt=STT("http://gpu-box:8003/v1", model_name="openai/whisper-large-v3-turbo"),   # vLLM serving Whisper
+tts=TTS("https://api.openai.com/v1", model_name="gpt-4o-mini-tts", voice="alloy",
+        api_key_env="OPENAI_API_KEY"),                                          # or a hosted voice
+```
+
+Speech to text goes to `/audio/transcriptions`, text to speech to `/audio/speech` (asked for as raw
+PCM and played as it arrives). A model on vLLM, SGLang or
 llama-server is named with that server in front — `vllm:hf:Qwen/Qwen2.5-7B-Instruct-AWQ` — and
 found at the server's usual address (`url=` for another). `frun up` starts vLLM and SGLang itself.
 
@@ -129,7 +144,7 @@ the wait cancels it. After `max_tool_rounds` calls in one turn (4) the model has
 Tools need an LLM server that can call them — vLLM or SGLang (`frun up` starts them with tool
 calling on), llama-server (`--jinja`) or a hosted API. The in-process
 llama.cpp runtime can't, and `frun up` says so at startup. A runnable version is
-[`examples/tools_agent.py`](examples/tools_agent.py).
+[`examples/tools_agent.py`](https://github.com/SamarthUrs18/fusion-runtime/blob/main/examples/tools_agent.py).
 
 ### Answering from your own documents
 
@@ -148,8 +163,8 @@ def search_help(question: str) -> dict:
 ```
 
 `my_search` is yours: a vector database, Elasticsearch, your help centre's API.
-[`examples/knowledge_agent.py`](examples/knowledge_agent.py) is a runnable version with a small
-keyword search over the Markdown files in [`examples/knowledge/`](examples/knowledge/), in plain
+[`examples/knowledge_agent.py`](https://github.com/SamarthUrs18/fusion-runtime/blob/main/examples/knowledge_agent.py) is a runnable version with a small
+keyword search over the Markdown files in [`examples/knowledge/`](https://github.com/SamarthUrs18/fusion-runtime/tree/main/examples/knowledge/), in plain
 Python with nothing to install.
 
 On a call, two things matter more than in a chat window. A lookup costs a second model round
@@ -175,8 +190,10 @@ never holds an API key: your backend mints it a short-lived token.
 
 **Tested on real Twilio calls** to a US number, from a mobile in India and from a second Twilio
 number: the agent looked orders up and changed deliveries with tools mid-call, and the caller
-talked over it and it stopped. Exotel and Plivo are built from the providers' documentation and
-tested with the [simulator](tools/phone_sim/README.md), not yet on real numbers; if your account
+talked over it and it stopped. On an RTX 4090 (19 November 2026) the agent started answering
+400–630 ms after the caller stopped, every cut-in stopped it, and the short words people cut in
+with ("No, it's 1043", "OK", "Wait") reached the transcript whole. Exotel and Plivo are built from the providers' documentation and
+tested with the [simulator](https://github.com/SamarthUrs18/fusion-runtime/blob/main/tools/phone_sim/README.md), not yet on real numbers; if your account
 behaves differently, open an issue.
 
 Keep your own number and your provider account (and its KYC); the provider streams each call to
@@ -202,7 +219,7 @@ drops the agent's unplayed audio the moment the caller talks over it), tools and
   (40) for `FUSION_DEAD_LINE_S` (10 s) is logged as a quiet line, and every call's `session.end`
   records its loudest moment and whether the caller was heard at all.
 
-Try it without a number or an account: [`tools/phone_sim`](tools/phone_sim/README.md) plays the
+Try it without a number or an account: [`tools/phone_sim`](https://github.com/SamarthUrs18/fusion-runtime/blob/main/tools/phone_sim/README.md) plays the
 provider's side from your machine, with your microphone, at phone quality.
 
 On Twilio, test by calling a number of your own. The console's test call on a trial account comes
@@ -221,7 +238,12 @@ Phone audio is narrower than a microphone's, and Whisper small mishears more on 
 came through as "RDEF 1042" for one caller. For callers, a larger model and a longer pause help,
 for about half a second more before each reply: `stt=STT("hf:deepdml/faster-whisper-large-v3-turbo-ct2")`
 (`frun models pull` it first) and `turns=Turns(wait_ms=800)`, so a caller who pauses mid-sentence
-isn't answered halfway.
+isn't answered halfway. On a GPU with several callers, the same large model served by vLLM is
+faster still: see [Several callers at once](#several-callers-at-once).
+
+A caller's first sound is soft, and the voice detector is only sure a frame or two into a word, so
+the 256 ms before speech is sent along with it: a quick "No" or "Wait" said over the agent isn't
+clipped to "o" or "ait". `vad=VAD(pre_roll_ms=...)` changes it.
 
 ## Authentication
 
@@ -272,9 +294,59 @@ console), so you can reproduce them rather than trusting ours. Barge-in fired on
 
 ## Several callers at once
 
-Measured on the same 3090, real WebSocket sessions, three turns each
-(`frun bench`). Response is the server's own
-figure: the turn ends, audio comes back.
+Measured with `frun bench` on an RTX 4090: real WebSocket sessions, each streaming a recorded
+question about an order in real time, three turns each. The time is how long a caller waits from
+the end of their question to the first audio of the answer, including the pause that decides
+they've finished. Median and worst turn of each round, the middle of three runs; 19 November 2026.
+"Before" is speech as it ran in 0.1.4: Whisper one caller at a time, Kokoro one sentence at a time.
+
+| Callers | Before: median | Before: worst | 0.1.5: median | 0.1.5: worst |
+|---|---|---|---|---|
+| 1 | 724 ms | 876 ms | **596 ms** | 760 ms |
+| 4 | 1472 ms | 2278 ms | **1014 ms** | 1246 ms |
+| 8 | 1938 ms | 3362 ms | **1414 ms** | 2112 ms |
+| 12 | 1692 ms | 4094 ms | **1868 ms** | 2722 ms |
+| 16 | 3068 ms | 7152 ms | **2264 ms** | 3277 ms |
+
+The worst turn is where it shows: at sixteen callers it went from 6.6–8.5 s to 3.1–3.7 s. The
+medians move less and are noisier (at twelve, "before" ranged 1.3–1.9 s over its three runs).
+Nothing failed in either. The "before" rows for 1 and 4 callers are a single run.
+Qwen2.5-7B-Instruct-AWQ on vLLM, Whisper small and Kokoro, all on the one card: the
+[tools agent](https://github.com/SamarthUrs18/fusion-runtime/blob/main/examples/tools_agent.py) with its defaults.
+
+**What changed in 0.1.5:**
+
+- **Whisper takes callers together.** Questions that arrive while it's busy go through in one pass,
+  up to 8 on a GPU (`STT(..., max_batch=N)`). A caller who finds it free goes at once, alone, so
+  one caller is never slower for it. At sixteen callers, speech to text held at about 1 s instead
+  of 1.5–3 s.
+- **Kokoro speaks four sentences at once** on a GPU (`TTS(..., max_concurrency=N)`). With Whisper
+  faster, callers had just queued for the voice instead.
+- **The server stopped freezing under load.** Compressing every frame of reply audio, and setting
+  up many calls at once, held up everyone's audio and interruptions for 100–400 ms at a time.
+  Both are fixed, and a stall now names the code that caused it in the log (`event_loop.stall
+  where=...`).
+
+**Speech from a server of its own.** vLLM can serve Whisper too, and fusion talks to it like any
+OpenAI-compatible endpoint. The same large model, Whisper large-v3-turbo, at sixteen callers:
+
+| Whisper large-v3-turbo | 1 caller | 8 callers | 16 callers |
+|---|---|---|---|
+| On vLLM, `STT("http://localhost:8003/v1", model_name=...)` | 573 ms | 1405 ms | 1850 ms |
+| In fusion, `STT("hf:deepdml/faster-whisper-large-v3-turbo-ct2")` | 745 ms | 1620 ms | 3174 ms |
+
+So on a GPU with many callers, the more accurate model costs nothing if vLLM serves it. You start
+that server yourself for now:
+
+```bash
+~/vllm-env/bin/pip install "vllm[audio]"
+~/vllm-env/bin/vllm serve openai/whisper-large-v3-turbo --port 8003 --gpu-memory-utilization 0.12
+```
+
+**The language model was never the limit on vLLM or SGLang.** Its first token stayed under
+~260 ms from one caller to sixteen. With the model in-process on llama.cpp, four callers is the
+ceiling: one context decodes one reply at a time (on a 3090, twelve callers waited 4.8 s for a
+first token). Earlier measurements, on an RTX 3090 in September:
 
 | Callers | In-process llama.cpp | vLLM | SGLang |
 |---|---|---|---|
@@ -284,26 +356,17 @@ figure: the turn ends, audio comes back.
 | 12 | ~7500 ms | 1083 ms | 1264 ms |
 | 16 | — | 2064 ms | 1598 ms |
 
-**With the model in-process, four callers is the ceiling.** At twelve, the language model's first
-token takes 4790 ms of a 5312 ms response, while speech-to-text stays at 76 ms and text-to-speech
-at 469 ms: one llama.cpp context decodes one reply at a time.
+These are the server's own figures (the turn is judged over, then audio comes back), so they read
+lower than the 4090 table above, which includes the pause. Measured 26 September 2026:
+Qwen2.5-7B-Instruct-AWQ, `--gpu-memory-utilization 0.6`, `--max-model-len 4096`, Whisper small and
+Kokoro on the same card, both servers with default settings otherwise. The in-process column is
+Qwen 7B q4 GGUF on llama.cpp, 21 September.
 
-**With vLLM or SGLang, twelve callers answer in about a second.** Both batch every caller's reply
-into each step on the GPU, and the language model's first token stayed between 36 and 72 ms from
-one caller to sixteen. The limit moves to speech, which still runs one caller at a time: Kokoro's
-first audio grows from ~350 ms alone to 1.5–2 s at sixteen callers, and Whisper grows with how
-long people talk (a 3-second question: ~200 ms alone, 1.6–2.2 s at sixteen). Batching speech is
-the next step, not the language model.
-
-**Tools hold up under load.** Every caller asked about the same order on every turn: vLLM looked
+**Tools hold up under load.** On that 3090, every caller asked about the same order on every turn: vLLM looked
 it up in 122 of 123 turns, SGLang in 109. On SGLang every session looked it up the first time;
 the turns without a lookup were the question asked a second, third or fourth time, answered from
 the lookup already in the conversation. That is correct, but if your data can change during a
 call, tell the agent to look things up again.
-
-Measured 26 September 2026: Qwen2.5-7B-Instruct-AWQ, `--gpu-memory-utilization 0.6`,
-`--max-model-len 4096`, Whisper small and Kokoro on the same card, both servers with default
-settings otherwise. The in-process column is Qwen 7B q4 GGUF on llama.cpp, 21 September.
 
 To run the model on vLLM or SGLang, name it in the agent and `frun up` starts the server for you:
 
@@ -353,6 +416,7 @@ file are in [the docs](https://fusion-runtime.dev/docs#deploying).
 |---|---|
 | `frun up [agent.py]` | Starts the server, and vLLM or SGLang if the agent names one. `--host`, `--port`, `--reload`, `--llm-log` |
 | `frun talk` | Talks to it from a terminal, with a latency summary per turn |
+| `frun bench` | Several callers at once against a running server, and which stage they wait on |
 | `frun models list` / `pull` | What's available, and downloading it |
 | `frun key new` / `keys list` / `token` | Keys and browser tokens |
 | `frun doctor` | Checks the machine and says how to fix what's wrong |
@@ -364,7 +428,7 @@ file are in [the docs](https://fusion-runtime.dev/docs#deploying).
 
 `frun up agent.py` covers running an agent. The pipeline can also run inside your own process —
 for a queue worker, a test, or a batch job over recorded calls — with no server involved. See
-[`examples/sdk_example.py`](examples/sdk_example.py), which is runnable, and
+[`examples/sdk_example.py`](https://github.com/SamarthUrs18/fusion-runtime/blob/main/examples/sdk_example.py), which is runnable, and
 [the docs](https://fusion-runtime.dev/docs#python).
 
 ## Documentation and contact
@@ -376,7 +440,7 @@ GPU setup and deployment — is at **[fusion-runtime.dev/docs](https://fusion-ru
 |---|---|
 | Site and docs | **[fusion-runtime.dev](https://fusion-runtime.dev)** |
 | Questions, or anything else | **hello@fusion-runtime.dev** |
-| Security problems | **security@fusion-runtime.dev** — not a public issue, please ([why](CONTRIBUTING.md#security)) |
+| Security problems | **security@fusion-runtime.dev** — not a public issue, please ([why](https://github.com/SamarthUrs18/fusion-runtime/blob/main/CONTRIBUTING.md#security)) |
 
 ## Development
 
@@ -385,12 +449,12 @@ uv sync --extra dev --extra talk     # or: pip install -e ".[dev,talk]"
 pytest
 ```
 
-CI runs the suite on Python 3.11, 3.12 and 3.13. [CONTRIBUTING.md](CONTRIBUTING.md) has the
+CI runs the suite on Python 3.11, 3.12 and 3.13. [CONTRIBUTING.md](https://github.com/SamarthUrs18/fusion-runtime/blob/main/CONTRIBUTING.md) has the
 layout, the design rules a review will hold you to, and how to add a runtime.
 
 ## License
 
-[Apache-2.0](LICENSE). Embed it in a commercial product, rebrand it, ship it closed — keep the
+[Apache-2.0](https://github.com/SamarthUrs18/fusion-runtime/blob/main/LICENSE). Embed it in a commercial product, rebrand it, ship it closed — keep the
 copyright notice and the `NOTICE` file in what you distribute, and don't use the project's name
 to imply it endorses you.
 
