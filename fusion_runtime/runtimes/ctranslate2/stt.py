@@ -186,7 +186,7 @@ class CTranslate2STT(STTRuntime):
                     languages[i] = token[2:-2]  # "<|en|>" -> "en"
 
         tokenizers, prompts = [], []
-        for (_, _, prompt), language in zip(items, languages):
+        for (_, _, prompt), language in zip(items, languages, strict=True):
             tokenizer = Tokenizer(model.hf_tokenizer, multilingual, task="transcribe", language=language)
             previous = tokenizer.encode(" " + prompt.strip()) if prompt else []
             tokenizers.append(tokenizer)
@@ -203,7 +203,7 @@ class CTranslate2STT(STTRuntime):
         )
         threshold = options.get("no_speech_threshold", DEFAULT_NO_SPEECH_THRESHOLD)
         out = []
-        for result, tokenizer, language, probability in zip(results, tokenizers, languages, probabilities):
+        for result, tokenizer, language, probability in zip(results, tokenizers, languages, probabilities, strict=True):
             text = tokenizer.decode(result.sequences_ids[0])
             score = result.no_speech_prob
             if threshold is not None and score > threshold and text.strip():
@@ -234,7 +234,7 @@ class CTranslate2STT(STTRuntime):
                 for i, _, _ in batch:
                     results[i] = failure
             else:
-                for (i, request, _), (text, language, probability, dropped) in zip(batch, outs):
+                for (i, request, _), (text, language, probability, dropped) in zip(batch, outs, strict=True):
                     try:
                         results[i] = self._finish(request, text, language, probability, dropped)
                     except AdapterError as e:

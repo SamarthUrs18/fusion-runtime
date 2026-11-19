@@ -244,7 +244,7 @@ class ModelScheduler:
     async def _run_batch(self, batch: List[_Waiter], call: BatchCall) -> None:
         started = time.monotonic()
         waits = [(started - w.enqueued) * 1000 for w in batch]
-        for rider, wait_ms in zip(batch, waits):
+        for rider, wait_ms in zip(batch, waits, strict=True):
             telemetry.emit("scheduler.slot", level="debug", stage=self.stage, request_id=rider.request.id,
                            session_id=rider.request.session_id, duration_ms=wait_ms, model=self.model,
                            batch_size=len(batch), in_flight=self._in_flight)
@@ -252,7 +252,7 @@ class ModelScheduler:
             results = await call([w.request for w in batch])
             if len(results) != len(batch):
                 raise RuntimeError(f"{self.stage} model returned {len(results)} results for {len(batch)} requests")
-            for rider, result in zip(batch, results):
+            for rider, result in zip(batch, results, strict=True):
                 if not rider.future.done():
                     rider.future.set_result(result)
         except Exception as e:
