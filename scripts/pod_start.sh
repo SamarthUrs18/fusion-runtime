@@ -21,6 +21,9 @@
 #   AGENT=examples/my_agent.py MAX_SESSIONS=32 bash scripts/pod_start.sh
 #   ENGINE=sglang bash scripts/pod_start.sh
 #   WORKSPACE=/root/work bash scripts/pod_start.sh   # when /workspace can't hold code (see step 0)
+#
+# On images whose Python refuses pip installs (Ubuntu 24.04, PEP 668) it makes a
+# virtualenv at $WORKSPACE/fusion-env and uses it; FUSION_ENV=... puts it elsewhere.
 set -euo pipefail
 
 WORKSPACE="${WORKSPACE:-/workspace}"
@@ -82,6 +85,24 @@ if ! { touch "$probe" && chmod +x "$probe"; } 2>/dev/null; then
 fi
 rm -f "$probe"
 echo "$WORKSPACE takes code and installs"
+
+# Ubuntu 24.04 images (PEP 668) refuse `pip install` into the system Python
+# ("externally-managed-environment"; RTX 4090 pod, 19 Nov). Fusion then gets its own
+# virtualenv on the workspace, used by this script and by frun; later runs reuse it.
+FUSION_ENV="${FUSION_ENV:-$WORKSPACE/fusion-env}"
+if [[ -x "$FUSION_ENV/bin/python" ]]; then
+  export PATH="$FUSION_ENV/bin:$PATH"
+  echo "using the virtualenv at $FUSION_ENV"
+elif [[ -z "${VIRTUAL_ENV:-}" ]] && python3 -c 'import os, sys, sysconfig
+sys.exit(0 if os.path.exists(os.path.join(sysconfig.get_path("stdlib"), "EXTERNALLY-MANAGED")) else 1)'; then
+  echo "this image's Python refuses pip installs (PEP 668); making a virtualenv at $FUSION_ENV"
+  if ! python3 -m venv "$FUSION_ENV" 2>/dev/null; then
+    rm -rf "$FUSION_ENV"
+    { apt-get update -qq && apt-get install -y -qq python3-venv >/dev/null && python3 -m venv "$FUSION_ENV"; } \
+      || fail "couldn't make a virtualenv at $FUSION_ENV; install python3-venv and run this again"
+  fi
+  export PATH="$FUSION_ENV/bin:$PATH"
+fi
 
 # The NVIDIA libraries pip installs (cuDNN, cuBLAS) are only found if they are on this path.
 cuda_libs() {
@@ -232,6 +253,9 @@ echo "$ENGINE:  http://localhost:$LLM_PORT   (log: $WORKSPACE/$ENGINE.log)"
 if [[ -n "$origin" ]]; then
   echo "browser: frun token --url http://127.0.0.1:$PORT --key \$(cat $WORKSPACE/key) --public-url $origin"
   echo "         prints the link to open (once, within a minute)"
+fi
+if [[ -x "$FUSION_ENV/bin/frun" ]]; then
+  echo "frun:    in a new shell, first: export PATH=$FUSION_ENV/bin:\$PATH"
 fi
 echo "load test:"
 echo "  frun bench --url ws://127.0.0.1:$PORT --key \$(cat $WORKSPACE/key) \\"

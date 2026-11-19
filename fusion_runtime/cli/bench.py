@@ -211,9 +211,14 @@ def bottleneck(rows: List[dict]) -> str:
         return (f"The LLM is where callers wait: {stage} went from {first.get(stage, 0)} to {last[stage]} ms {span}.\n"
                 "An in-process model answers one caller at a time; put it on vLLM or SGLang (frun up starts them).")
     held = ", ".join(f"{k} {v} ms" for k, v in llm.items())
+    if stage.startswith("stt"):
+        advice = ("On a GPU, Whisper takes up to 8 callers per call (STT(..., max_batch=N)); a Whisper served by "
+                  "vLLM, through STT(\"http://.../v1\", model_name=...), went further on an RTX 4090.")
+    else:
+        advice = ("On a GPU, Kokoro speaks 4 sentences at once (TTS(..., max_concurrency=N)); past that, "
+                  "more callers need another server.")
     return (f"Speech is where callers wait: {stage} went from {first.get(stage, 0)} to {last[stage]} ms {span}"
-            + (f", while the LLM held ({held})" if held else "") + ".\n"
-            "Whisper and Kokoro handle one caller at a time on each server; more callers need more servers.")
+            + (f", while the LLM held ({held})" if held else "") + ".\n" + advice)
 
 
 def capacity(rows: List[dict], target_ms: float) -> str:
