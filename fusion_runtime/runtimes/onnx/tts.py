@@ -26,6 +26,10 @@ from fusion_runtime.contract import (
 
 # Settings this runtime reads, and the ones each family adds (the resolver refuses others)
 OPTIONS = ("voice", "speed", "language", "voices_path", "warmup", "max_concurrency")
+
+# Sentences synthesized at once. On a GPU, four in flight cut the worst wait at 16 callers from
+# 6.6-8.5 s to 3.1-3.6 s (RTX 4090, 19 Nov); on the CPU they'd only share the same cores.
+DEFAULT_GPU_CONCURRENCY = 4
 FAMILY_OPTIONS = {"kokoro": ()}
 
 FAMILIES = {
@@ -51,7 +55,8 @@ class OnnxTTS(TTSRuntime):
             sample_rate=self.family.sample_rate,
             voices=self.family.voices,
             languages=self.family.languages if self._loaded else None,
-            max_concurrency=self.spec.options.get("max_concurrency", 1),
+            max_concurrency=self.spec.options.get("max_concurrency")
+            or (DEFAULT_GPU_CONCURRENCY if getattr(self.family, "on_gpu", False) else 1),
         )
 
     def health(self) -> Health:

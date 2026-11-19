@@ -14,6 +14,7 @@ or the `voices_path` option.
 """
 import importlib.metadata
 import os
+import threading
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -37,11 +38,19 @@ class KokoroFamily:
         self.model_path = model_path
         self.options = options
         self._kokoro = None
+        # Voice packs read into memory once. kokoro_onnx keeps them as a lazily read .npz (a zip
+        # file), and two sentences reading it at once corrupted each other's read ("Overlapped
+        # entries ... possible zip bomb") as soon as max_concurrency was above 1 (4090 pod, 19 Nov)
+        self._packs: dict = {}
+        # espeak, behind the phonemizer, is a C library with global state: one text at a time.
+        # It takes milliseconds; the model run, where the time goes, stays parallel.
+        self._phonemize_lock = threading.Lock()
         self.degraded: Optional[str] = None
         self.provider_warnings: List[Tuple[str, str]] = []
 
     def load(self) -> None:
         """Blocking: call from a worker thread."""
+        import numpy as np
         from kokoro_onnx import Kokoro
 
         from fusion_runtime.contract import ModelNotFound
@@ -60,12 +69,20 @@ class KokoroFamily:
             )
         session = onnx_session(self.model_path, found=self.provider_warnings)
         self._kokoro = Kokoro.from_session(session, str(voices))
+        self._packs = {name: np.array(self._kokoro.voices[name]) for name in self._kokoro.voices}
         # Running, but slower than it should be: health() reports it for as long as the server runs
         self.degraded = next((w for w, _ in self.provider_warnings if "CPU" in w), None)
 
     @property
+    def on_gpu(self) -> bool:
+        """onnxruntime actually runs the model on CUDA (not just asked to)."""
+        if self._kokoro is None:
+            return False
+        return self._kokoro.sess.get_providers()[:1] == ["CUDAExecutionProvider"]
+
+    @property
     def voices(self) -> Tuple[str, ...]:
-        return tuple(sorted(self._kokoro.voices)) if self._kokoro is not None else ()
+        return tuple(sorted(self._packs))
 
     @property
     def languages(self) -> Tuple[str, ...]:
@@ -84,11 +101,12 @@ class KokoroFamily:
         import numpy as np
 
         k = self._kokoro
-        phonemes = k.tokenizer.phonemize(text, self.language_for(voice, language))
+        with self._phonemize_lock:
+            phonemes = k.tokenizer.phonemize(text, self.language_for(voice, language))
         tokens = k.tokenizer.tokenize(phonemes)
         if not tokens:  # whitespace or punctuation only: a tiny silence
             return np.zeros(240, dtype=np.int16).tobytes()
-        pack = k.voices[voice]
+        pack = self._packs[voice]
         # The style vector depends on input length: row (tokens - 1) of the voice pack
         style = pack[min(len(tokens), len(pack)) - 1].reshape(1, STYLE_DIM).astype(np.float32)
         outputs = k.sess.run(None, {

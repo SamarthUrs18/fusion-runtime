@@ -299,3 +299,40 @@ async def test_real_whisper_gives_the_same_words_batched():
     batched = await stt.transcribe([STTRequest(audio=hello), STTRequest(audio=order), STTRequest(audio=hello)])
     assert batched[0].text == batched[2].text == solo.text
     assert "order" in batched[1].text.lower() and batched[1].language == "en"
+
+@pytest.mark.integration
+def test_kokoro_never_reads_the_voice_file_after_loading():
+    """4090 pod, 19 Nov: with max_concurrency above 1, sentences read the lazily loaded voice pack
+    (a zip) at the same time and failed with "Overlapped entries ... possible zip bomb". The packs
+    are read into memory once at load, so a sentence never touches the file."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from fusion_runtime.runtimes.onnx.kokoro import KokoroFamily
+
+    resolved = _resolved_or_skip("tts")
+    family = KokoroFamily(Path(resolved.spec.model), resolved.spec.options)
+    family.load()
+    voice = family.voices[0]
+
+    class Untouchable(dict):
+        def __getitem__(self, name):
+            raise AssertionError(f"read {name} from the voice file during synthesis")
+
+    family._kokoro.voices = Untouchable()
+    texts = [f"Order {n} shipped on Thursday." for n in range(1040, 1046)]
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        audio = list(pool.map(lambda t: family.synthesize(t, voice, 1.0, None), texts))
+    assert all(len(pcm) > 24000 for pcm in audio)  # every sentence came back as real speech (> 0.5 s)
+
+
+def test_kokoro_runs_four_sentences_at_once_on_a_gpu_and_one_on_the_cpu():
+    from fusion_runtime.runtimes.onnx.tts import OnnxTTS
+
+    def concurrency(on_gpu, **options):
+        tts = OnnxTTS(ModelSpec(stage="tts", runtime="onnx", model="model.onnx", family="kokoro", options=options))
+        tts.family._kokoro = type("K", (), {"sess": type("S", (), {"get_providers": lambda self: (
+            ["CUDAExecutionProvider", "CPUExecutionProvider"] if on_gpu else ["CPUExecutionProvider"])})()})()
+        return tts.capabilities.max_concurrency
+
+    assert concurrency(True) == 4 and concurrency(False) == 1
+    assert concurrency(True, max_concurrency=2) == 2 and concurrency(False, max_concurrency=3) == 3
