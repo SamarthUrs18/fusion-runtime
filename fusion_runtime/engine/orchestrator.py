@@ -211,9 +211,10 @@ class PipelineOrchestrator:
         return found
 
     async def shutdown(self):
-        pool = self.__dict__.pop("_vad_pool", None)
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+        for name in ("_vad_pool", "_vad_copy_pool"):
+            pool = self.__dict__.pop(name, None)
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
         self.ready = False
         for stage in ("stt", "llm", "tts", "turn_detector"):
             runtime = self.__dict__.get(stage)
@@ -462,11 +463,21 @@ class PipelineOrchestrator:
                     self.__dict__["_vad_template"] = template
 
         def fresh_copy():
+            time.sleep(0)  # hand the GIL to the event loop between copies, or the next one starts first
             model = copy.deepcopy(template)
             model.reset_states()
             return model
 
-        return await asyncio.get_running_loop().run_in_executor(None, fresh_copy)
+        # One copy at a time, on one thread. A TorchScript copy holds Python's GIL for its whole
+        # ~5 ms, and every call makes two (VAD and the barge-in watcher): sixteen callers
+        # connecting together made 32 copies at once in the default pool and froze the event
+        # loop, everyone's audio and interruptions included, for 300-400 ms (4090 pod, 19 Nov).
+        # In a line, the loop runs between copies; the last caller starts ~0.2 s later instead.
+        pool = self.__dict__.get("_vad_copy_pool")
+        if pool is None:
+            pool = self.__dict__["_vad_copy_pool"] = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="fusion-vad-copy")
+        return await asyncio.get_running_loop().run_in_executor(pool, fresh_copy)
 
     async def _load_vad_template(self):
         def load():
